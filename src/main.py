@@ -88,7 +88,25 @@ def agent_loop(user_input: str):
         
 if __name__ == "__main__":
     result = agent_loop("""
-hello!
+在src目录下创建一个todo_manager.py文件。
+内容是一个TodoManager类，包含update, render方法。
+update接收一个list，元素包含三个属性：id, text, status, text去除收尾空格后不能为空。
+list长度不能超过20个，in_progress中的任务最多只能有一个。
+处理status的时候先统一转小写。
+stuatus必须是pending, in_progress, completed其中之一, id可以为空，为空的话就根据顺序自动设置，从1开始计数。
+render方法返回一个字符串，包含所有待办事项的id、status和text，如果没有待办事项，返回"No todos."。
+格式为参考：
+```
+[x] #1: 写需求文档
+[>] #2: 实现接口
+
+[ ] #3: 补单元测试
+
+(1/3 completed)
+```
+
+update方法返回值为调用render方法的结果。
+把todo_manager.py中的TodoManager的update方法，增加到tool.py文件中的TOOLS和TOOL_HANDLERS中。
 """)
     print("最终结果：")
     print(result)

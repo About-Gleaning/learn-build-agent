@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import subprocess
+from .todo_manager import TodoManager
 
 
 WORKDIR = Path.cwd()
@@ -104,6 +105,18 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_manager_update",
+            "description": "Update todo list with validation. Accepts a list of todo items with id, text, and status properties.",
+            "parameters": {
+                "type": "object",
+                "properties": {"todo_list": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string"}}, "required": ["text", "status"]}}},
+                "required": ["todo_list"],
+            }
+        }
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -111,4 +124,5 @@ TOOL_HANDLERS = {
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
+    "todo_manager_update": lambda **kw: TodoManager().update(kw["todo_list"]),
 }
