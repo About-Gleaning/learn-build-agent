@@ -108,7 +108,7 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "todo_manager_update",
+            "name": "todo",
             "description": "Update todo list with validation. Accepts a list of todo items with id, text, and status properties.",
             "parameters": {
                 "type": "object",
@@ -124,5 +124,5 @@ TOOL_HANDLERS = {
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "todo_manager_update": lambda **kw: TodoManager().update(kw["todo_list"]),
+    "todo": lambda **kw: TodoManager().update(kw["todo_list"]),
 }

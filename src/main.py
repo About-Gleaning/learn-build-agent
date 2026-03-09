@@ -30,6 +30,10 @@ SYSTEM = """
 """
 
 def agent_loop(user_input: str):
+    todo_tool_name = "todo"
+    todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
+    non_todo_round_streak = 0
+
     messages = [
         {
             "role": "system",
@@ -48,6 +52,16 @@ def agent_loop(user_input: str):
         )
         message = response.choices[0].message
         is_tool_calls = bool(getattr(message, "tool_calls", None))
+        has_todo_call_in_round = False
+
+        if is_tool_calls:
+            has_todo_call_in_round = any(
+                tc.function.name == todo_tool_name for tc in (message.tool_calls or [])
+            )
+            if has_todo_call_in_round:
+                non_todo_round_streak = 0
+            else:
+                non_todo_round_streak += 1
 
         # 追加助手消息
         assistant_message = {
@@ -90,6 +104,15 @@ def agent_loop(user_input: str):
                 "tool_call_id": tool_call.id
             }
             messages.append(tool_message)
+
+        # 连续多轮未使用 todo 工具时，追加提醒消息。
+        if non_todo_round_streak >= 3:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": todo_reminder_text,
+                }
+            )
 
 
 
