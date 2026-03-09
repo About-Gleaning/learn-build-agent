@@ -59,6 +59,19 @@ SUBAGENT_SYSTEM = f"""
 You are a coding subagent at {WORKDIR}.
 完成给定的任务，然后总结你的发现。
 使用待办事项工具来规划多步骤任务。开始前标记为“in_progress”，完成后标记为“completed”。
+
+你可以看到一个 skills catalog，里面只有每个 skill 的简短介绍。
+当用户的问题需要某个专业 skill 时，你不要瞎猜 skill 的细节，
+而是应该调用工具去加载对应的 skill。
+
+规则：
+1. 如果现有上下文已经足够回答，就直接回答。
+2. 如果你判断某个 skill 会显著提高回答质量，就调用工具 load_skill。
+3. 不要假装已经看过某个 skill 的完整内容，除非你真的调用过工具。
+4. 可以一次加载一个或多个 skill，但尽量克制，只加载必要的。
+
+当前可用 skills catalog:\n{skills_catalog}
+
 优先使用工具而非文字描述。
 """
 
@@ -72,7 +85,7 @@ TOOL_HANDLERS = {
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
     "todo": lambda **kw: TODO.update(kw["todo_list"]),
     "task": lambda **kw: subagent_loop(kw["prompt"]),
-    "load_skill": lambda **kw: registry.build_skill_context(kw["skill_name"])
+    "load_skill": lambda **kw: registry.build_skill_context(kw["skill_names"])
 }
 
 def normalize_tool_result(result) -> str:
@@ -273,7 +286,7 @@ def agent_loop(user_input: str):
 if __name__ == "__main__":
     result = agent_loop(
         """
-你有哪些可用的skills
+你有哪些可用的skills，并总结内容
 """
     )
     print("最终结果：")
