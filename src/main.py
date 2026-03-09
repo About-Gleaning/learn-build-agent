@@ -23,7 +23,7 @@ client = OpenAI(
 
 WORKDIR = Path.cwd()
 
-SYSTEM = """
+SYSTEM = f"""
 你是{WORKDIR}的一名编码代理。
 使用待办事项工具来规划多步骤任务。开始前标记为“进行中”，完成后标记为“已完成”。
 优先使用工具而非文字描述。
@@ -37,7 +37,7 @@ def agent_loop(user_input: str):
     messages = [
         {
             "role": "system",
-            "content": ""
+            "content": SYSTEM
         },
         {
             "role": "user",
@@ -93,8 +93,15 @@ def agent_loop(user_input: str):
         for tool_call in message.tool_calls or []:
             handler = TOOL_HANDLERS.get(tool_call.function.name)
             if handler:
-                args = json.loads(tool_call.function.arguments)
-                result = handler(**args)
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except Exception as e:
+                    result = f"Error: Invalid tool arguments: {type(e).__name__}: {e}"
+                else:
+                    try:
+                        result = handler(**args)
+                    except Exception as e:
+                        result = f"Error: Tool execution failed: {type(e).__name__}: {e}"
             else:
                 result = "Error: Unknown tool"
             # 工具调用结果封装为 message

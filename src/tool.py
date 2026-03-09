@@ -29,7 +29,7 @@ def run_read(path: str, limit: int = None) -> str:
     try:
         text = safe_path(path).read_text()
         lines = text.splitlines()
-        if limit and limit < len(lines):
+        if limit is not None and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
         return "\n".join(lines)[:50000]
     except Exception as e:
@@ -112,17 +112,19 @@ TOOLS = [
             "description": "更新任务清单,跟踪多步骤任务的进度。",
             "parameters": {
                 "type": "object",
-                "properties": {"todo_list": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string"}, "enum": ["pending", "in_progress", "completed"]}, "required": ["text", "status"]}}},
+                "properties": {"todo_list": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["text", "status"]}}},
                 "required": ["todo_list"],
             }
         }
     },
 ]
 
+TODO = TodoManager()
+
 TOOL_HANDLERS = {
     "bash":       lambda **kw: run_bash(kw["command"]),
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "todo": lambda **kw: TodoManager().update(kw["todo_list"]),
+    "todo": lambda **kw: TODO.update(kw["todo_list"]),
 }
