@@ -1,10 +1,11 @@
 import json
 import os
+from pathlib import Path
 
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from tool import TOOL_HANDLERS, TOOLS
+from .tool import TOOL_HANDLERS, TOOLS
 
 load_dotenv()
 
@@ -20,12 +21,19 @@ client = OpenAI(
     base_url=BASE_URL
 )
 
+WORKDIR = Path.cwd()
+
+SYSTEM = """
+你是{WORKDIR}的一名编码代理。
+使用待办事项工具来规划多步骤任务。开始前标记为“进行中”，完成后标记为“已完成”。
+优先使用工具而非文字描述。
+"""
 
 def agent_loop(user_input: str):
     messages = [
         {
             "role": "system",
-            "content": "你叫爪爪，是一个有帮助的助手。必要时调用工具。"
+            "content": ""
         },
         {
             "role": "user",
@@ -88,25 +96,7 @@ def agent_loop(user_input: str):
         
 if __name__ == "__main__":
     result = agent_loop("""
-在src目录下创建一个todo_manager.py文件。
-内容是一个TodoManager类，包含update, render方法。
-update接收一个list，元素包含三个属性：id, text, status, text去除收尾空格后不能为空。
-list长度不能超过20个，in_progress中的任务最多只能有一个。
-处理status的时候先统一转小写。
-stuatus必须是pending, in_progress, completed其中之一, id可以为空，为空的话就根据顺序自动设置，从1开始计数。
-render方法返回一个字符串，包含所有待办事项的id、status和text，如果没有待办事项，返回"No todos."。
-格式为参考：
-```
-[x] #1: 写需求文档
-[>] #2: 实现接口
 
-[ ] #3: 补单元测试
-
-(1/3 completed)
-```
-
-update方法返回值为调用render方法的结果。
-把todo_manager.py中的TodoManager的update方法，增加到tool.py文件中的TOOLS和TOOL_HANDLERS中。
 """)
     print("最终结果：")
     print(result)
