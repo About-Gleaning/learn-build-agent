@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 import subprocess
-from .todo_manager import TodoManager
-
 
 WORKDIR = Path.cwd()
 
@@ -55,8 +53,7 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
-
-TOOLS = [
+BASE_TOOL = [
     {
         "type": "function",
         "function": {
@@ -117,14 +114,39 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "加载一个或多个 skill 的完整内容。当你需要查看某个 skill 的详细说明时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要加载的 skill 名称列表"
+                    }
+                },
+                "required": ["skill_names"]
+            }
+        }
+    }
 ]
 
-TODO = TodoManager()
+MAIN_AGENT_TOOL = BASE_TOOL + [
+    {
+        "type": "function",
+        "function": {
+            "name": "task",
+            "description": "当需要把一个相对独立的复杂任务委托给子代理时调用。子代理拥有全新上下文，不继承当前对话历史，但共享文件系统。",
+            "parameters": {
+                "type": "object",
+                "properties": {"prompt": {"type": "string", "description": "发给子代理的完整任务说明，包含目标、上下文、约束条件和期望输出。"}},
+                "required": ["prompt"],
+            }
+        }
+    },
+]
 
-TOOL_HANDLERS = {
-    "bash":       lambda **kw: run_bash(kw["command"]),
-    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
-    "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
-    "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "todo": lambda **kw: TODO.update(kw["todo_list"]),
-}
+
