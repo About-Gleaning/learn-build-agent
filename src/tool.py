@@ -109,10 +109,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "todo",
-            "description": "Update todo list with validation. Accepts a list of todo items with id, text, and status properties.",
+            "description": "更新任务清单,跟踪多步骤任务的进度。",
             "parameters": {
                 "type": "object",
-                "properties": {"todo_list": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string"}}, "required": ["text", "status"]}}},
+                "properties": {"todo_list": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string"}, "enum": ["pending", "in_progress", "completed"]}, "required": ["text", "status"]}}},
                 "required": ["todo_list"],
             }
         }

@@ -115,11 +115,11 @@ def agent_loop(user_input: str):
             )
 
 
-
-        
 if __name__ == "__main__":
-    result = agent_loop("""
-
-""")
+    result = agent_loop(
+        """
+检查所有python代码去，并修复所有样式上的错误
+"""
+    )
     print("最终结果：")
     print(result)
