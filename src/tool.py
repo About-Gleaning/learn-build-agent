@@ -3,6 +3,8 @@ from pathlib import Path
 import subprocess
 
 WORKDIR = Path.cwd()
+TODO_DESC_FILE = Path(__file__).with_name("todo_write.txt")
+TODO_TOOL_DESCRIPTION = TODO_DESC_FILE.read_text().strip()
 
 def safe_path(p: str) -> Path:
     path = (WORKDIR / p).resolve()
@@ -105,12 +107,37 @@ BASE_TOOL = [
     {
         "type": "function",
         "function": {
-            "name": "todo",
-            "description": "更新任务清单,跟踪多步骤任务的进度。",
+            "name": "todo_write",
+            "description": TODO_TOOL_DESCRIPTION,
             "parameters": {
                 "type": "object",
-                "properties": {"todo_list": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["text", "status"]}}},
+                "properties": {
+                    "todo_list": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "text": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]},
+                                "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                            },
+                            "required": ["text", "status", "priority"],
+                        },
+                    }
+                },
                 "required": ["todo_list"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_read",
+            "description": "使用这个工具来阅读你的待办事项清单。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             }
         }
     },
@@ -148,5 +175,3 @@ MAIN_AGENT_TOOL = BASE_TOOL + [
         }
     },
 ]
-
-

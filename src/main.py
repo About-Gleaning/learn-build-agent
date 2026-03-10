@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from .skills_runtime import SkillRegistry
 
+from .context import get_session_id, set_session_id
 from .todo_manager import TodoManager
 
 from .tool import MAIN_AGENT_TOOL, BASE_TOOL, run_bash, run_edit, run_read, run_write
@@ -83,8 +84,9 @@ TOOL_HANDLERS = {
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "todo": lambda **kw: TODO.update(kw["todo_list"]),
-    "task": lambda **kw: subagent_loop(kw["prompt"]),
+    "todo_write": lambda **kw: TODO.update(kw["todo_list"]),
+    "todo_read":  lambda **kw: TODO.read_current_session(),
+    "task": lambda **kw: subagent_loop(kw["prompt"], session_id=get_session_id()),
     "load_skill": lambda **kw: registry.build_skill_context(kw["skill_names"])
 }
 
@@ -98,7 +100,11 @@ def normalize_tool_result(result) -> str:
         return str(result)
 
 
-def subagent_loop(task: str) -> str:
+def subagent_loop(prompt: str, session_id: str = None) -> str:
+    print(f"Subagent received task: {prompt}")
+    if session_id is not None:
+        set_session_id(session_id)
+
     todo_tool_name = "todo"
     todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
     non_todo_round_streak = 0
@@ -110,7 +116,7 @@ def subagent_loop(task: str) -> str:
         },
         {
             "role": "user",
-            "content": task
+            "content": prompt
         }
     ]
     while True:
@@ -190,8 +196,10 @@ def subagent_loop(task: str) -> str:
                 }
             )
 
-def agent_loop(user_input: str):
-    todo_tool_name = "todo"
+def agent_loop(user_input: str, session_id: str = None):
+    set_session_id(session_id)
+
+    todo_tool_name = ["todo_write", "todo_read"]
     todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
     non_todo_round_streak = 0
 
@@ -217,7 +225,7 @@ def agent_loop(user_input: str):
 
         if is_tool_calls:
             has_todo_call_in_round = any(
-                tc.function.name == todo_tool_name for tc in (message.tool_calls or [])
+                tc.function.name in todo_tool_name for tc in (message.tool_calls or [])
             )
             if has_todo_call_in_round:
                 non_todo_round_streak = 0
@@ -284,10 +292,10 @@ def agent_loop(user_input: str):
 
 
 if __name__ == "__main__":
-    result = agent_loop(
-        """
-你有哪些可用的skills，并总结内容
-"""
+    result = agent_loop("""
+看下项目中是否有hello.py这个文件，如果有的话，帮我把里面的hello函数的返回值改成"Hello, DashScope!"，如果没有的话，就帮我创建这个文件和函数。必须使用todo工具进行规划后再执行
+""",
+"test-session-123"
     )
     print("最终结果：")
     print(result)
