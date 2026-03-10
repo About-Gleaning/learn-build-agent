@@ -1,15 +1,26 @@
 import json
+import logging
+import time
 from pathlib import Path
+from typing import Callable
 
 from .compact import compact
 from .client import create_chat_completion
-
-from .skills_runtime import SkillRegistry
-
 from .ctx import get_session_id, set_session_id
+from .message import (
+    EVENT_BUS,
+    Message,
+    append_text_part,
+    append_tool_result_part,
+    create_message,
+    extract_tool_calls,
+    get_message_text,
+)
+from .skills_runtime import SkillRegistry
 from .todo_manager import TodoManager
+from .tool import BASE_TOOL, MAIN_AGENT_TOOL, run_bash, run_edit, run_read, run_write
 
-from .tool import MAIN_AGENT_TOOL, BASE_TOOL, run_bash, run_edit, run_read, run_write
+logger = logging.getLogger(__name__)
 
 # skills 注册与目录构建
 registry = SkillRegistry("./src/skills")
@@ -18,7 +29,6 @@ skills_catalog = registry.build_brief_catalog_for_model()
 
 # 构建 system prompt
 WORKDIR = Path.cwd()
-SKILLS_DIR = WORKDIR / "skills"
 
 SYSTEM = f"""
 You are a coding agent at {WORKDIR}.
@@ -60,22 +70,24 @@ You are a coding subagent at {WORKDIR}.
 优先使用工具而非文字描述。
 """
 
-# 工具函数与处理器
 TODO = TodoManager()
 
-TOOL_HANDLERS = {
-    "bash":       lambda **kw: run_bash(kw["command"]),
-    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
-    "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
-    "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "todo_write": lambda **kw: TODO.update(kw["todo_list"]),
-    "todo_read":  lambda **kw: TODO.read_current_session(),
-    "task": lambda **kw: subagent_loop(kw["prompt"], session_id=get_session_id()),
-    "load_skill": lambda **kw: registry.build_skill_context(kw["skill_names"])
-}
 
-def normalize_tool_result(result) -> str:
-    """将工具返回值规范为字符串，避免非法 content 结构导致接口报错。"""
+def _on_message_completed(event: dict) -> None:
+    payload = event.get("payload", {})
+    logger.debug(
+        "event.message_completed session_id=%s message_id=%s finish_reason=%s",
+        event.get("session_id", ""),
+        event.get("message_id", ""),
+        payload.get("finish_reason", ""),
+    )
+
+
+EVENT_BUS.subscribe("message_completed", _on_message_completed)
+
+
+def normalize_tool_result(result: object) -> str:
+    """将工具返回值规范为字符串，避免非法结构导致模型接口报错。"""
     if isinstance(result, str):
         return result
     try:
@@ -84,202 +96,156 @@ def normalize_tool_result(result) -> str:
         return str(result)
 
 
-def subagent_loop(prompt: str, session_id: str = None) -> str:
-    print(f"Subagent received task: {prompt}")
-    if session_id is not None:
-        set_session_id(session_id)
+def _build_text_message(role: str, content: str, session_id: str) -> Message:
+    message = create_message(role=role, session_id=session_id)
+    append_text_part(message, content)
+    return message
 
-    todo_tool_name = "todo"
+
+def _build_tool_message(session_id: str, tool_call_id: str, tool_name: str, content: str) -> Message:
+    message = create_message(role="tool", session_id=session_id)
+    append_tool_result_part(
+        message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        content=content,
+    )
+    return message
+
+
+def subagent_loop(prompt: str, session_id: str | None = None) -> str:
+    logger.info("subagent.start prompt_preview=%s", prompt[:120].replace("\n", "\\n"))
+    result = run_session(
+        user_input=prompt,
+        session_id=session_id,
+        tools=BASE_TOOL,
+        system_prompt=SUBAGENT_SYSTEM,
+        todo_tool_names={"todo_write", "todo_read"},
+    )
+    return get_message_text(result)
+
+
+TOOL_HANDLERS: dict[str, Callable[..., str]] = {
+    "bash": lambda **kw: run_bash(kw["command"]),
+    "read_file": lambda **kw: run_read(kw["path"], kw.get("limit")),
+    "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
+    "edit_file": lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
+    "todo_write": lambda **kw: TODO.update(kw["todo_list"]),
+    "todo_read": lambda **kw: TODO.read_current_session(),
+    "task": lambda **kw: subagent_loop(kw["prompt"], session_id=get_session_id()),
+    "load_skill": lambda **kw: registry.build_skill_context(kw["skill_names"]),
+}
+
+
+def _execute_tool_call(tool_name: str, arguments: str) -> str:
+    handler = TOOL_HANDLERS.get(tool_name)
+    if handler is None:
+        return "Error: Unknown tool"
+
+    try:
+        args = json.loads(arguments)
+    except Exception as exc:
+        return f"Error: Invalid tool arguments: {type(exc).__name__}: {exc}"
+
+    try:
+        return normalize_tool_result(handler(**args))
+    except Exception as exc:
+        return f"Error: Tool execution failed: {type(exc).__name__}: {exc}"
+
+
+def run_session(
+    user_input: str,
+    session_id: str | None = None,
+    *,
+    tools: list[dict] | None = None,
+    system_prompt: str = SYSTEM,
+    todo_tool_names: set[str] | None = None,
+) -> Message:
+    """新会话入口：返回最终助手 Message（含结构化 parts）。"""
+    active_session_id = set_session_id(session_id)
+    selected_tools = tools if tools is not None else MAIN_AGENT_TOOL
+    todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
+
     todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
     non_todo_round_streak = 0
 
-    messages = [
-        {
-            "role": "system",
-            "content": SUBAGENT_SYSTEM
-        },
-        {
-            "role": "user",
-            "content": prompt
-        }
+    messages: list[Message] = [
+        _build_text_message("system", system_prompt, active_session_id),
+        _build_text_message("user", user_input, active_session_id),
     ]
-    while True:
-        compact(messages)  
-        response = create_chat_completion(
-            messages=messages,
-            tools=BASE_TOOL,
-        )
-        message = response.choices[0].message
-        is_tool_calls = bool(getattr(message, "tool_calls", None))
-        has_todo_call_in_round = False
 
-        if is_tool_calls:
-            has_todo_call_in_round = any(
-                tc.function.name == todo_tool_name for tc in (message.tool_calls or [])
-            )
-            if has_todo_call_in_round:
+    round_no = 0
+    while True:
+        round_no += 1
+        messages = compact(messages)
+
+        logger.debug(
+            "session.round.start session_id=%s round=%d message_count=%d",
+            active_session_id,
+            round_no,
+            len(messages),
+        )
+
+        assistant_message = create_chat_completion(messages=messages, tools=selected_tools)
+        messages.append(assistant_message)
+
+        tool_calls = extract_tool_calls(assistant_message)
+        has_tool_calls = bool(tool_calls)
+
+        if has_tool_calls:
+            has_todo_call = any(tc["name"] in todo_names for tc in tool_calls)
+            if has_todo_call:
                 non_todo_round_streak = 0
             else:
                 non_todo_round_streak += 1
 
-        # 追加助手消息
-        assistant_message = {
-            "role": "assistant",
-            "content": message.content
-        }
-        # 如果有工具调用，附加工具调用信息
-        if is_tool_calls:
-            assistant_message["tool_calls"] = []
-            for tc in message.tool_calls or []:
-                assistant_message["tool_calls"].append(
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                )
-        messages.append(assistant_message)
+        if not has_tool_calls:
+            logger.info(
+                "session.round.finish session_id=%s round=%d status=%s",
+                active_session_id,
+                round_no,
+                assistant_message["info"].get("status", "unknown"),
+            )
+            return assistant_message
 
+        for tool_call in tool_calls:
+            tool_name = tool_call["name"]
+            started = time.perf_counter()
+            result = _execute_tool_call(tool_name, tool_call["arguments"])
+            duration_ms = int((time.perf_counter() - started) * 1000)
 
-        # 如果不是工具调用，代表结束了
-        if not is_tool_calls:
-            return message.content or ""
-        
-        # 工具调用
-        for tool_call in message.tool_calls or []:
-            handler = TOOL_HANDLERS.get(tool_call.function.name)
-            if handler:
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except Exception as e:
-                    result = f"Error: Invalid tool arguments: {type(e).__name__}: {e}"
-                else:
-                    try:
-                        result = handler(**args)
-                    except Exception as e:
-                        result = f"Error: Tool execution failed: {type(e).__name__}: {e}"
-            else:
-                result = "Error: Unknown tool"
-            # 工具调用结果封装为 message
-            tool_message = {
-                "role": "tool",
-                "content": normalize_tool_result(result),
-                "tool_call_id": tool_call.id
-            }
+            logger.info(
+                "tool.exec session_id=%s tool=%s tool_call_id=%s duration_ms=%d result_size=%d",
+                active_session_id,
+                tool_name,
+                tool_call["id"],
+                duration_ms,
+                len(result),
+            )
+
+            tool_message = _build_tool_message(
+                active_session_id,
+                tool_call_id=tool_call["id"],
+                tool_name=tool_name,
+                content=result,
+            )
             messages.append(tool_message)
 
-        # 连续多轮未使用 todo 工具时，追加提醒消息。
         if non_todo_round_streak >= 3:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": todo_reminder_text,
-                }
-            )
-
-def agent_loop(user_input: str, session_id: str = None):
-    set_session_id(session_id)
-
-    todo_tool_name = ["todo_write", "todo_read"]
-    todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
-    non_todo_round_streak = 0
-
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM
-        },
-        {
-            "role": "user",
-            "content": user_input
-        }
-    ]
-    while True:
-        compact(messages) 
-        response = create_chat_completion(
-            messages=messages,
-            tools=MAIN_AGENT_TOOL,
-        )
-        message = response.choices[0].message
-        is_tool_calls = bool(getattr(message, "tool_calls", None))
-        has_todo_call_in_round = False
-
-        if is_tool_calls:
-            has_todo_call_in_round = any(
-                tc.function.name in todo_tool_name for tc in (message.tool_calls or [])
-            )
-            if has_todo_call_in_round:
-                non_todo_round_streak = 0
-            else:
-                non_todo_round_streak += 1
-
-        # 追加助手消息
-        assistant_message = {
-            "role": "assistant",
-            "content": message.content
-        }
-        # 如果有工具调用，附加工具调用信息
-        if is_tool_calls:
-            assistant_message["tool_calls"] = []
-            for tc in message.tool_calls or []:
-                assistant_message["tool_calls"].append(
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                )
-        messages.append(assistant_message)
+            messages.append(_build_text_message("user", todo_reminder_text, active_session_id))
 
 
-        # 如果不是工具调用，代表结束了
-        if not is_tool_calls:
-            return messages
-        
-        # 工具调用
-        for tool_call in message.tool_calls or []:
-            handler = TOOL_HANDLERS.get(tool_call.function.name)
-            if handler:
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except Exception as e:
-                    result = f"Error: Invalid tool arguments: {type(e).__name__}: {e}"
-                else:
-                    try:
-                        result = handler(**args)
-                    except Exception as e:
-                        result = f"Error: Tool execution failed: {type(e).__name__}: {e}"
-            else:
-                result = "Error: Unknown tool"
-            # 工具调用结果封装为 message
-            tool_message = {
-                "role": "tool",
-                "content": normalize_tool_result(result),
-                "tool_call_id": tool_call.id
-            }
-            messages.append(tool_message)
-
-        # 连续多轮未使用 todo 工具时，追加提醒消息。
-        if non_todo_round_streak >= 3:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": todo_reminder_text,
-                }
-            )
+def agent_loop(user_input: str, session_id: str | None = None) -> Message:
+    """兼容入口：内部转发到新接口。"""
+    return run_session(user_input=user_input, session_id=session_id)
 
 
 if __name__ == "__main__":
-    result = agent_loop("""
+    result = run_session(
+        """
 你有哪些工具
 """,
-"test-session-123"
+        "test-session-123",
     )
     print("最终结果：")
-    print(result)
+    print(get_message_text(result))
