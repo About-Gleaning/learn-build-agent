@@ -1,31 +1,15 @@
 import json
-import os
 from pathlib import Path
 
-from openai import OpenAI
-from dotenv import load_dotenv
+from .compact import compact
+from .client import create_chat_completion
 
 from .skills_runtime import SkillRegistry
 
-from .context import get_session_id, set_session_id
+from .ctx import get_session_id, set_session_id
 from .todo_manager import TodoManager
 
 from .tool import MAIN_AGENT_TOOL, BASE_TOOL, run_bash, run_edit, run_read, run_write
-
-# 环境加载
-load_dotenv()
-
-API_KEY = os.getenv("API_KEY")
-BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-MODEL = os.getenv("MODEL", "qwen3-max")
-
-if not API_KEY:
-    raise ValueError("缺少 API_KEY，请在 .env 文件中配置 API_KEY。")
-
-client = OpenAI(
-    api_key=API_KEY,
-    base_url=BASE_URL
-)
 
 # skills 注册与目录构建
 registry = SkillRegistry("./src/skills")
@@ -120,8 +104,8 @@ def subagent_loop(prompt: str, session_id: str = None) -> str:
         }
     ]
     while True:
-        response = client.chat.completions.create(
-            model=MODEL,
+        compact(messages)  
+        response = create_chat_completion(
             messages=messages,
             tools=BASE_TOOL,
         )
@@ -214,8 +198,8 @@ def agent_loop(user_input: str, session_id: str = None):
         }
     ]
     while True:
-        response = client.chat.completions.create(
-            model=MODEL,
+        compact(messages) 
+        response = create_chat_completion(
             messages=messages,
             tools=MAIN_AGENT_TOOL,
         )
@@ -293,7 +277,7 @@ def agent_loop(user_input: str, session_id: str = None):
 
 if __name__ == "__main__":
     result = agent_loop("""
-看下项目中是否有hello.py这个文件，如果有的话，帮我把里面的hello函数的返回值改成"Hello, DashScope!"，如果没有的话，就帮我创建这个文件和函数。必须使用todo工具进行规划后再执行
+你有哪些工具
 """,
 "test-session-123"
     )
