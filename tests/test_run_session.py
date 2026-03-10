@@ -1,5 +1,5 @@
-from src.main import run_session
-from src.message import (
+from agent.runtime.session import run_session
+from agent.core.message import (
     append_text_part,
     append_tool_call_part,
     create_message,
@@ -26,7 +26,7 @@ def test_run_session_with_tool_call(monkeypatch):
             append_text_part(assistant, "最终答案")
         return assistant
 
-    monkeypatch.setattr("src.main.create_chat_completion", fake_chat)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
 
     result = run_session("测试", session_id="s_test")
 
@@ -41,7 +41,7 @@ def test_run_session_end_on_failed_message(monkeypatch):
         append_text_part(assistant, "Error: 模型调用失败")
         return assistant
 
-    monkeypatch.setattr("src.main.create_chat_completion", fake_chat)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
 
     result = run_session("测试失败", session_id="s_fail")
 

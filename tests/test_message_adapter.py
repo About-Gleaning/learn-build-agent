@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from src.message import (
+from agent.core.message import (
     append_text_part,
     create_message,
     extract_tool_calls,

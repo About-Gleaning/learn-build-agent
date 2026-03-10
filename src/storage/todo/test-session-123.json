@@ -1,0 +1,18 @@
+{
+  "session_id": "test-session-123",
+  "updated_at": "2026-03-10T12:19:11.622198+00:00",
+  "todo_list": [
+    {
+      "id": "1",
+      "text": "检查当前文件夹下是否存在hello.py文件",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "text": "如果不存在hello.py文件，则创建该文件并添加打印'hello world'的代码",
+      "status": "completed",
+      "priority": "high"
+    }
+  ]
+}

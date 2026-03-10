@@ -1,8 +1,8 @@
 import json
 from typing import Any
 
-from .client import create_chat_completion
-from .message import (
+from ..adapters.llm.client import create_chat_completion
+from ..core.message import (
     Message,
     append_compact_summary_part,
     append_text_part,
@@ -92,30 +92,28 @@ def compaction_summary(messages: list[Message]) -> list[Message]:
 """
 
     summary_messages: list[Message] = []
-    system_message = create_message("system", session_id=messages[-1]["info"].get("session_id", "default_session"))
+    session_id = messages[-1]["info"].get("session_id", "default_session")
+
+    system_message = create_message("system", session_id=session_id)
     append_text_part(system_message, "你是一个擅长上下文压缩的助手，请输出简洁、结构化的中文摘要。")
     summary_messages.append(system_message)
 
-    user_message = create_message("user", session_id=messages[-1]["info"].get("session_id", "default_session"))
+    user_message = create_message("user", session_id=session_id)
     append_text_part(user_message, summary_prompt)
     summary_messages.append(user_message)
 
-    response_message = create_chat_completion(
-        messages=summary_messages,
-        tools=[],
-        max_tokens=2000,
-    )
+    response_message = create_chat_completion(messages=summary_messages, tools=[], max_tokens=2000)
     if response_message["info"].get("status") != "completed":
         return messages
-    summary_text = get_message_text(response_message).strip()
 
+    summary_text = get_message_text(response_message).strip()
     if not summary_text:
         return messages
 
-    compact_message = create_message("user", session_id=messages[-1]["info"].get("session_id", "default_session"))
+    compact_message = create_message("user", session_id=session_id)
     append_compact_summary_part(compact_message, "以下是历史对话摘要（自动压缩生成）：\n" + summary_text)
 
-    continue_message = create_message("assistant", session_id=messages[-1]["info"].get("session_id", "default_session"))
+    continue_message = create_message("assistant", session_id=session_id)
     append_text_part(continue_message, "Understood. Continuing.")
 
     return system_messages + [compact_message, continue_message]

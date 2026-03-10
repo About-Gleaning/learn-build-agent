@@ -2,14 +2,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.client import (
+from agent.adapters.llm.client import (
     LLMHook,
     LoggingHook,
     clear_global_hooks,
     create_chat_completion,
     register_global_hook,
 )
-from src.message import append_text_part, create_message
+from agent.core.message import append_text_part, create_message
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +67,7 @@ def _build_user_message(session_id: str = "s_hook"):
 
 
 def test_hooks_execute_in_order_global_then_local(monkeypatch):
-    import src.client as client_module
+    import agent.adapters.llm.client as client_module
 
     clear_global_hooks()
     recorder: list[str] = []
@@ -94,7 +94,7 @@ def test_hooks_execute_in_order_global_then_local(monkeypatch):
 
 
 def test_hook_fail_open_should_continue(monkeypatch):
-    import src.client as client_module
+    import agent.adapters.llm.client as client_module
 
     clear_global_hooks()
     register_global_hook(BrokenHook(fail_fast=False))
@@ -111,7 +111,7 @@ def test_hook_fail_open_should_continue(monkeypatch):
 
 
 def test_hook_fail_fast_should_raise(monkeypatch):
-    import src.client as client_module
+    import agent.adapters.llm.client as client_module
 
     called = {"provider": False}
 
@@ -130,7 +130,7 @@ def test_hook_fail_fast_should_raise(monkeypatch):
 
 
 def test_on_error_hook_called_when_provider_fails(monkeypatch):
-    import src.client as client_module
+    import agent.adapters.llm.client as client_module
 
     recorder: list[str] = []
     clear_global_hooks()

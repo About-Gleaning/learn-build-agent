@@ -1,14 +1,18 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/main.py`: entry point for the agent loop and model client setup.
-- `src/tool.py`: local tool handlers (`bash`, file read/write/edit) and workspace safety checks.
+- `src/main.py`: lightweight runnable entrypoint for a demo session.
+- `src/agent/runtime/session.py`: session orchestration and tool-call loop.
+- `src/agent/adapters/llm/client.py`: provider client adapter and LLM hooks.
+- `src/agent/runtime/tool_executor.py`: shared tool execution and tool hook dispatch.
+- `src/agent/tools/`: tool specs, handlers, and todo manager.
+- `src/agent/core/`: core message/context models and generic hook dispatcher.
 - `.vscode/`: local editor settings only; avoid putting runtime logic here.
-- Keep new Python modules under `src/` and group by responsibility (for example, `src/tools/`, `src/core/`).
+- Keep new Python modules under `src/agent/` and group by responsibility.
 
 ## Build, Test, and Development Commands
 - `python3 src/main.py`: run the current demo flow end-to-end.
-- `python3 -m py_compile src/*.py`: quick syntax validation before commit.
+- `python3 -m py_compile $(find src -name '*.py')`: quick syntax validation before commit.
 - `python3 -m venv .venv && source .venv/bin/activate`: create and activate an isolated environment.
 - If you add dependencies, document install commands in this file and pin versions.
 

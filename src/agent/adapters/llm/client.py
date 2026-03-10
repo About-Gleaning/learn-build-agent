@@ -1,12 +1,12 @@
 import logging
-import os
 import time
 from typing import Any, TypedDict
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
-from .message import (
+from ...config.settings import API_KEY, BASE_URL, LOG_LEVEL, MODEL
+from ...core.hooks import HookDispatcher
+from ...core.message import (
     Message,
     count_parts,
     create_error_message,
@@ -15,14 +15,6 @@ from .message import (
     parse_provider_response,
     to_provider_messages,
 )
-
-# 环境加载
-load_dotenv()
-
-API_KEY = os.getenv("API_KEY")
-BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-MODEL = os.getenv("MODEL", "qwen3-max")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 if not API_KEY:
     raise ValueError("缺少 API_KEY，请在 .env 文件中配置 API_KEY。")
@@ -138,12 +130,10 @@ class OpenAICompatibleAdapter:
         )
 
 
-client = OpenAI(
-    api_key=API_KEY,
-    base_url=BASE_URL,
-)
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 adapter = OpenAICompatibleAdapter(MODEL)
 _GLOBAL_HOOKS: list[LLMHook] = []
+_DISPATCHER = HookDispatcher[LLMHook, HookContext, dict[str, str]](logger=logger, name="llm")
 
 
 def _mask_text(text: str, limit: int = 300) -> str:
@@ -174,24 +164,17 @@ def _invoke_hook(
     error: Exception | None = None,
     normalized_error: dict[str, str] | None = None,
 ) -> None:
-    try:
-        if stage == "before":
-            hook.before_call(ctx)
-        elif stage == "after" and message is not None:
-            hook.after_call(ctx, message)
-        elif stage == "error" and error is not None and normalized_error is not None:
-            hook.on_error(ctx, error, normalized_error)
-    except Exception as hook_exc:
-        logger.warning(
-            "llm.hook_failed hook=%s stage=%s fail_fast=%s error=%s",
-            hook.name,
-            stage,
-            hook.fail_fast,
-            f"{type(hook_exc).__name__}: {hook_exc}",
-            exc_info=True,
-        )
-        if hook.fail_fast:
-            raise RuntimeError(f"Hook '{hook.name}' failed at stage '{stage}': {hook_exc}") from hook_exc
+    _DISPATCHER.dispatch(
+        hook,
+        stage,
+        ctx=ctx,
+        result=message,
+        error=error,
+        normalized_error=normalized_error,
+        on_before=lambda h, context: h.before_call(context),
+        on_after=lambda h, context, result: h.after_call(context, result),
+        on_error=lambda h, context, exc, norm: h.on_error(context, exc, norm),
+    )
 
 
 def _default_hooks() -> None:

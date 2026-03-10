@@ -2,15 +2,16 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from .ctx import get_session_id
+from ..core.context import get_session_id
 
 
 class TodoManager:
     VALID_STATUSES = ["pending", "in_progress", "completed", "cancelled"]
     VALID_PRIORITIES = ["high", "medium", "low"]
 
-    def __init__(self, storage_dir: str = "storage/todo"):
+    def __init__(self, storage_dir: str = "src/storage/todo"):
         self.todos = []
         self.storage_dir = Path(storage_dir)
 
@@ -23,7 +24,7 @@ class TodoManager:
         safe_id = self._safe_session_id(session_id)
         return self.storage_dir / f"{safe_id}.json"
 
-    def _persist(self, session_id: str, todo_list):
+    def _persist(self, session_id: str, todo_list: list[dict[str, Any]]) -> None:
         payload = {
             "session_id": session_id,
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -33,7 +34,7 @@ class TodoManager:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
-    def update(self, todo_list):
+    def update(self, todo_list: list[dict[str, Any]]) -> str:
         """更新并持久化 todo 列表。"""
         if len(todo_list) > 20:
             raise ValueError("Todo list cannot exceed 20 items")
@@ -77,7 +78,7 @@ class TodoManager:
         self._persist(get_session_id(), processed_todos)
         return self.render()
 
-    def read_current_session(self):
+    def read_current_session(self) -> str:
         """读取当前会话下的 todo JSON。"""
         session_id = get_session_id()
         file_path = self._session_file(session_id)
@@ -85,7 +86,7 @@ class TodoManager:
             return f"No todos found for session '{session_id}'."
         return file_path.read_text()
 
-    def render(self):
+    def render(self) -> str:
         """渲染简洁的 todo 文本摘要。"""
         if not self.todos:
             return "No todos."

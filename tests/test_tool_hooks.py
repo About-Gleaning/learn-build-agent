@@ -1,8 +1,8 @@
 import pytest
 
-from src.main import run_session
-from src.message import append_text_part, append_tool_call_part, create_message, get_message_text
-from src.tool import (
+from agent.runtime.session import run_session
+from agent.core.message import append_text_part, append_tool_call_part, create_message, get_message_text
+from agent.runtime.tool_executor import (
     ToolHook,
     ToolLoggingHook,
     clear_global_tool_hooks,
@@ -73,7 +73,7 @@ def _mock_chat_with_one_tool_then_text():
 
 
 def test_tool_hooks_order_global_then_local(monkeypatch):
-    import src.main as main_module
+    import agent.runtime.session as main_module
 
     records: list[str] = []
     clear_global_tool_hooks()
@@ -89,7 +89,7 @@ def test_tool_hooks_order_global_then_local(monkeypatch):
 
 
 def test_tool_hook_fail_open_should_continue(monkeypatch):
-    import src.main as main_module
+    import agent.runtime.session as main_module
 
     clear_global_tool_hooks()
     register_global_tool_hook(BrokenBeforeHook(fail_fast=False))
@@ -102,7 +102,7 @@ def test_tool_hook_fail_open_should_continue(monkeypatch):
 
 
 def test_tool_hook_fail_fast_should_interrupt(monkeypatch):
-    import src.main as main_module
+    import agent.runtime.session as main_module
 
     clear_global_tool_hooks()
     register_global_tool_hook(BrokenBeforeHook(fail_fast=True))
@@ -114,7 +114,7 @@ def test_tool_hook_fail_fast_should_interrupt(monkeypatch):
 
 
 def test_tool_error_hook_unknown_tool(monkeypatch):
-    import src.main as main_module
+    import agent.runtime.session as main_module
 
     records: list[str] = []
     clear_global_tool_hooks()
