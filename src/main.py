@@ -18,7 +18,19 @@ from .message import (
 )
 from .skills_runtime import SkillRegistry
 from .todo_manager import TodoManager
-from .tool import BASE_TOOL, MAIN_AGENT_TOOL, run_bash, run_edit, run_read, run_write
+from .tool import (
+    BASE_TOOL,
+    MAIN_AGENT_TOOL,
+    ToolHook,
+    ToolHookContext,
+    get_global_tool_hooks,
+    invoke_tool_hook,
+    normalize_tool_error,
+    run_bash,
+    run_edit,
+    run_read,
+    run_write,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,20 +149,76 @@ TOOL_HANDLERS: dict[str, Callable[..., str]] = {
 }
 
 
-def _execute_tool_call(tool_name: str, arguments: str) -> str:
+def _run_tool_hooks(
+    hooks: list[ToolHook],
+    stage: str,
+    *,
+    ctx: ToolHookContext,
+    result: str | None = None,
+    error: Exception | None = None,
+    error_code: str = "execution_error",
+) -> None:
+    normalized = normalize_tool_error(error, code=error_code) if error is not None else None
+    for hook in hooks:
+        invoke_tool_hook(
+            hook,
+            stage,
+            ctx=ctx,
+            result=result,
+            error=error,
+            normalized_error=normalized,
+        )
+
+
+def _execute_tool_call(
+    tool_name: str,
+    arguments: str,
+    *,
+    session_id: str,
+    tool_call_id: str,
+    round_no: int,
+    hooks: list[ToolHook],
+) -> str:
+    ctx: ToolHookContext = {
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "tool_call_id": tool_call_id,
+        "arguments": arguments,
+        "round_no": round_no,
+    }
+
+    started = time.perf_counter()
+    ctx["started_at"] = started
+    _run_tool_hooks(hooks, "before", ctx=ctx)
+
     handler = TOOL_HANDLERS.get(tool_name)
     if handler is None:
+        ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
+        err = ValueError("Unknown tool")
+        _run_tool_hooks(hooks, "error", ctx=ctx, error=err, error_code="unknown_tool")
         return "Error: Unknown tool"
 
     try:
         args = json.loads(arguments)
+        if not isinstance(args, dict):
+            raise ValueError("Tool arguments must be a JSON object")
+        ctx["parsed_args"] = args
     except Exception as exc:
+        ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
+        _run_tool_hooks(hooks, "error", ctx=ctx, error=exc, error_code="invalid_arguments")
         return f"Error: Invalid tool arguments: {type(exc).__name__}: {exc}"
 
     try:
-        return normalize_tool_result(handler(**args))
+        result = normalize_tool_result(handler(**args))
     except Exception as exc:
+        ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
+        _run_tool_hooks(hooks, "error", ctx=ctx, error=exc, error_code="execution_error")
         return f"Error: Tool execution failed: {type(exc).__name__}: {exc}"
+
+    ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
+    ctx["result_size"] = len(result)
+    _run_tool_hooks(hooks, "after", ctx=ctx, result=result)
+    return result
 
 
 def run_session(
@@ -160,11 +228,13 @@ def run_session(
     tools: list[dict] | None = None,
     system_prompt: str = SYSTEM,
     todo_tool_names: set[str] | None = None,
+    tool_hooks: list[ToolHook] | None = None,
 ) -> Message:
     """新会话入口：返回最终助手 Message（含结构化 parts）。"""
     active_session_id = set_session_id(session_id)
     selected_tools = tools if tools is not None else MAIN_AGENT_TOOL
     todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
+    effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
 
     todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
     non_todo_round_streak = 0
@@ -209,24 +279,19 @@ def run_session(
             return assistant_message
 
         for tool_call in tool_calls:
-            tool_name = tool_call["name"]
-            started = time.perf_counter()
-            result = _execute_tool_call(tool_name, tool_call["arguments"])
-            duration_ms = int((time.perf_counter() - started) * 1000)
-
-            logger.info(
-                "tool.exec session_id=%s tool=%s tool_call_id=%s duration_ms=%d result_size=%d",
-                active_session_id,
-                tool_name,
-                tool_call["id"],
-                duration_ms,
-                len(result),
+            result = _execute_tool_call(
+                tool_call["name"],
+                tool_call["arguments"],
+                session_id=active_session_id,
+                tool_call_id=tool_call["id"],
+                round_no=round_no,
+                hooks=effective_tool_hooks,
             )
 
             tool_message = _build_tool_message(
                 active_session_id,
                 tool_call_id=tool_call["id"],
-                tool_name=tool_name,
+                tool_name=tool_call["name"],
                 content=result,
             )
             messages.append(tool_message)
@@ -243,7 +308,7 @@ def agent_loop(user_input: str, session_id: str | None = None) -> Message:
 if __name__ == "__main__":
     result = run_session(
         """
-你有哪些工具
+查看当前目录下有哪些文件
 """,
         "test-session-123",
     )
