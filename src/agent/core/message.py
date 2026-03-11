@@ -156,8 +156,8 @@ def append_part(
     return part
 
 
-def append_text_part(message: Message, content: str) -> Part:
-    return append_part(message, "text", content=content)
+def append_text_part(message: Message, content: str, meta: dict[str, Any] | None = None) -> Part:
+    return append_part(message, "text", content=content, meta=meta)
 
 
 def append_compact_summary_part(message: Message, content: str) -> Part:

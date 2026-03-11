@@ -22,11 +22,12 @@ src/
         client.py             # LLM 调用适配与 LLM Hook
     runtime/
       session.py              # 会话主循环与工具调用编排
+      main_agent_mode.py      # 主 agent 模式状态（build/plan）
       tool_executor.py        # ToolExecutor 与 Tool Hook
       compaction.py           # 上下文压缩
     tools/
-      handlers.py             # bash/read/write/edit 等工具实现
-      specs.py                # 工具协议定义（BASE_TOOL/MAIN_AGENT_TOOL）
+      handlers.py             # bash/read/write/edit/plan_enter/plan_exit 等工具实现
+      specs.py                # 工具协议定义（BASE_TOOL/BUILD_AGENT_TOOL/PLAN_AGENT_TOOL）
       todo_manager.py         # todo 状态管理与持久化
       todo_write.txt          # todo_write 工具描述
     skills/
@@ -65,15 +66,30 @@ python3 -m py_compile $(find src -name '*.py')
 
 1. 在 `src/agent/tools/handlers.py` 增加实现函数。
 2. 在 `src/agent/tools/specs.py` 增加该工具的 JSON Schema 定义。
-3. 在 `src/agent/runtime/session.py` 的 `_build_tool_handlers()` 注册工具名到处理函数映射。
+3. 在 `src/agent/runtime/session.py` 的 `_build_tool_handlers()` 注册工具名到处理函数映射（仅做路由，不写业务逻辑）。
 4. 在 `tests/` 增加对应行为测试（成功路径 + 参数异常 + 安全边界）。
+
+分层约束（重要）：
+- 工具业务逻辑必须放在 `tools/handlers.py`，不要写在 `runtime/session.py`。
+- `runtime/session.py` 只负责编排：消息循环、模式选择、工具分发。
+- 主模式状态统一放在 `runtime/main_agent_mode.py`，避免散落在会话编排代码中。
 
 建议：
 - 时间复杂度优先控制在 O(n) 线性处理。
 - 返回值统一为字符串或可 JSON 序列化结构。
 - 涉及路径、命令、外部输入时必须做防御性校验。
 
-### 2) 新增一个 Tool Hook
+### 2) 多主/子 Agent 扩展约定
+
+- 主 agent：`build`、`plan`
+  - 通过工具 `plan_enter` / `plan_exit` 切换。
+  - `plan_exit` 需外部确认后传 `confirmed=true` 才会真正退出。
+- 子 agent：统一通过 `task` 调用，使用 `agent` 参数路由（当前支持 `explore`）。
+- `plan` 模式安全策略：
+  - `write_file/edit_file` 仅允许 `src/plan/`。
+  - `bash` 仅允许只读命令，禁止重定向、管道、链式执行和命令替换。
+
+### 3) 新增一个 Tool Hook
 
 1. 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`。
 2. 实现 `before_call/after_call/on_error` 任意阶段。
@@ -84,7 +100,7 @@ python3 -m py_compile $(find src -name '*.py')
 - 指标采集（耗时、错误率、结果大小）
 - 安全策略检查
 
-### 3) 新增一个 LLM Hook
+### 4) 新增一个 LLM Hook
 
 1. 继承 `src/agent/adapters/llm/client.py` 中的 `LLMHook`。
 2. 在调用前后做监控、脱敏、观测增强。

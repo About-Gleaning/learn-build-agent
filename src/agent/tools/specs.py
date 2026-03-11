@@ -117,22 +117,62 @@ BASE_TOOL: list[dict[str, Any]] = [
     },
 ]
 
-MAIN_AGENT_TOOL = BASE_TOOL + [
-    {
-        "type": "function",
-        "function": {
-            "name": "task",
-            "description": "当需要把一个相对独立的复杂任务委托给子代理时调用。子代理拥有全新上下文，不继承当前对话历史，但共享文件系统。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "发给子代理的完整任务说明，包含目标、上下文、约束条件和期望输出。",
-                    }
+TASK_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "task",
+        "description": "当需要把一个相对独立的复杂任务委托给子代理时调用。子代理拥有全新上下文，不继承当前对话历史，但共享文件系统。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "发给子代理的完整任务说明，包含目标、上下文、约束条件和期望输出。",
                 },
-                "required": ["prompt"],
+                "agent": {
+                    "type": "string",
+                    "description": "要调用的子代理名称，当前支持 explore。",
+                    "default": "explore",
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+}
+
+PLAN_ENTER_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "plan_enter",
+        "description": "请求切换到 plan 模式。首次调用会返回确认请求，确认后再次调用并传入 confirmed=true。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "是否确认切换。true 表示用户已同意切换。",
+                }
             },
         },
     },
-]
+}
+
+PLAN_EXIT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "plan_exit",
+        "description": "请求退出 plan 模式。需要用户确认后再次调用并传入 confirmed=true 才会真正切换回 build。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "是否已获得用户确认。true 才会执行退出。",
+                }
+            },
+        },
+    },
+}
+
+BUILD_AGENT_TOOL = BASE_TOOL + [TASK_TOOL, PLAN_ENTER_TOOL]
+PLAN_AGENT_TOOL = BASE_TOOL + [TASK_TOOL, PLAN_EXIT_TOOL]
