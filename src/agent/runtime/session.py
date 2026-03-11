@@ -30,6 +30,7 @@ from ..tools.handlers import (
 from ..tools.specs import BASE_TOOL, BUILD_AGENT_TOOL, PLAN_AGENT_TOOL
 from ..tools.todo_manager import TodoManager
 from .compaction import compact
+from .session_memory import InMemorySessionMemoryStore, SessionMemoryStore
 from .tool_executor import ToolExecutor, ToolHook, get_global_tool_hooks
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ You are a coding subagent at {WORKDIR}.
 """
 
 TODO = TodoManager()
+SESSION_MEMORY_STORE: SessionMemoryStore = InMemorySessionMemoryStore(max_messages=24)
 
 
 def _get_system_prompt_for_mode(mode: MainAgentMode) -> str:
@@ -246,6 +248,16 @@ def _build_tool_message(session_id: str, tool_call_id: str, tool_name: str, cont
     return message
 
 
+def configure_session_memory_store(store: SessionMemoryStore) -> None:
+    """配置会话记忆存储实现，便于替换为 Redis 等后端。"""
+    global SESSION_MEMORY_STORE
+    SESSION_MEMORY_STORE = store
+
+
+def clear_session_memory(session_id: str | None = None) -> None:
+    SESSION_MEMORY_STORE.clear(session_id)
+
+
 def subagent_loop(prompt: str, agent: str = "explore", session_id: str | None = None) -> str:
     agent_name = (agent or "explore").strip().lower()
     if agent_name != "explore":
@@ -342,6 +354,10 @@ def run_session(
     if mode in {"build", "plan"}:
         initial_mode = mode
 
+    history_messages: list[Message] = SESSION_MEMORY_STORE.load(active_session_id) if mode_enabled else []
+    if mode is None and mode_enabled and history_messages:
+        initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
+
     initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
     initial_system_prompt = _get_system_prompt_for_mode(initial_mode) if mode_enabled else (system_prompt or BUILD_SYSTEM)
 
@@ -357,6 +373,7 @@ def run_session(
 
     messages: list[Message] = [
         _build_text_message("system", initial_system_prompt, active_session_id),
+        *history_messages,
         _build_text_message("user", user_input, active_session_id, text_meta=user_meta),
     ]
 
@@ -408,6 +425,8 @@ def run_session(
                 round_no,
                 assistant_message["info"].get("status", "unknown"),
             )
+            if mode_enabled:
+                SESSION_MEMORY_STORE.save(active_session_id, messages)
             return assistant_message
 
         should_interrupt = False
@@ -439,13 +458,17 @@ def run_session(
             if status == "confirmation_required":
                 output_text = str(payload.get("output", "请确认后继续。"))
                 question = str(metadata.get("confirmation_question", "是否继续？"))
-                return _build_confirmation_interrupted_message(
+                interrupted_message = _build_confirmation_interrupted_message(
                     active_session_id,
                     tool_name=tool_call["name"],
                     output_text=output_text,
                     question=question,
                     metadata=metadata,
                 )
+                messages.append(interrupted_message)
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                return interrupted_message
 
             if status == "switched":
                 synthetic_agent = str(metadata.get("synthetic_agent", "")).strip().lower()
@@ -474,6 +497,9 @@ def run_session(
                 finish_reason="cancelled",
             )
             append_text_part(message, "用户取消了模式切换，当前流程已中断。")
+            messages.append(message)
+            if mode_enabled:
+                SESSION_MEMORY_STORE.save(active_session_id, messages)
             return message
 
         if non_todo_round_streak >= 3:
