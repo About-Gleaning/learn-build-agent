@@ -1,0 +1,24 @@
+{
+  "session_id": "cli-session-002",
+  "updated_at": "2026-03-11T04:09:08.696461+00:00",
+  "todo_list": [
+    {
+      "id": "1",
+      "text": "创建hello.py文件",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "text": "在文件中添加打印'hello world'的代码",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "text": "验证文件内容是否正确",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ]
+}

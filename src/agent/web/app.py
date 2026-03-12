@@ -8,9 +8,10 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from ..config.settings import build_runtime_options
 from ..core.message import Message, get_message_text
 from ..runtime import session as session_runtime
-from .schemas import ChatStreamReq, MessageVO, SessionClearedVO, SessionMessagesVO
+from .schemas import ChatStreamReq, MessageVO, RuntimeOptionsVO, SessionClearedVO, SessionMessagesVO
 
 
 def _to_message_vo(message: Message) -> MessageVO:
@@ -22,6 +23,8 @@ def _to_message_vo(message: Message) -> MessageVO:
         created_at=str(info.get("created_at", "")),
         status=str(info.get("status", "")),
         agent=str(info.get("agent", "")),
+        provider=str(info.get("provider", "")),
+        model=str(info.get("model", "")),
     )
 
 
@@ -35,6 +38,8 @@ def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
             user_input=req.user_input,
             session_id=req.session_id,
             mode=req.mode,
+            provider=req.provider,
+            provider_specified="provider" in req.model_fields_set,
         ):
             event_type = str(event.get("type", "")).strip()
             if not event_type:
@@ -81,6 +86,10 @@ def create_app() -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/runtime/options", response_model=RuntimeOptionsVO)
+    def runtime_options() -> RuntimeOptionsVO:
+        return RuntimeOptionsVO(**build_runtime_options())
 
     @app.post("/api/chat/stream")
     def chat_stream(req: ChatStreamReq) -> StreamingResponse:

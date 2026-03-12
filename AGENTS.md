@@ -1,58 +1,64 @@
 # Repository Guidelines
 
 ## 规范优先级（重要）
-- 开发实现必须优先遵循 `README.md` 中的开发规范与分层约束。
-- 若 `AGENTS.md` 与 `README.md` 出现不一致，以 `README.md` 为准，并同步更新本文件。
-- 提交前应自检：实现位置、职责边界、测试策略是否与 `README.md` 保持一致。
 
-## Project Structure & Module Organization
-- `src/main.py`: lightweight runnable entrypoint for a demo session.
-- `src/agent/runtime/session.py`: session orchestration and tool-call loop.
-- `src/agent/runtime/main_agent_mode.py`: main-agent mode state (`build`/`plan`) management.
-- `src/agent/adapters/llm/client.py`: provider client adapter and LLM hooks.
-- `src/agent/runtime/tool_executor.py`: shared tool execution and tool hook dispatch.
-- `src/agent/tools/`: tool specs, handlers, and todo manager.
-- `src/agent/core/`: core message/context models and generic hook dispatcher.
-- `.vscode/`: local editor settings only; avoid putting runtime logic here.
-- Keep new Python modules under `src/agent/` and group by responsibility.
+- 开发实现必须优先遵循 `README.md` 中的开发规范与分层约束。
+- 若 `AGENTS.md` 与 `README.md` 不一致，以 `README.md` 为准，并同步更新本文件。
+- 提交前必须自检：实现位置、职责边界、测试策略、安全约束是否与 `README.md` 一致。
+
+## 项目结构与模块分工
+
+- `src/main.py`：CLI 示例入口。
+- `src/web_main.py`：FastAPI 启动入口（`uvicorn src.web_main:app`）。
+- `src/agent/runtime/session.py`：会话编排（消息循环、模式切换、工具分发）。
+- `src/agent/runtime/session_memory.py`：会话记忆与状态持久化辅助。
+- `src/agent/runtime/tool_executor.py`：工具执行器与 Tool Hook 分发。
+- `src/agent/runtime/compaction.py`：上下文压缩逻辑。
+- `src/agent/adapters/llm/client.py`：LLM 适配与 LLM Hook。
+- `src/agent/tools/`：工具实现（`handlers.py`）与协议定义（`specs.py`）。
+- `src/agent/core/`：消息模型、上下文与通用 HookDispatcher。
+- `src/agent/web/`：Web API 与请求/响应模型。
+- `tests/`：`pytest` 用例（工具、会话、Web、Hook 等）。
 
 ## 分层职责约束（与 README 对齐）
-- `runtime/session.py` 只做会话编排（消息循环、模式选择、工具分发），不放具体工具业务逻辑。
-- 工具实现统一放在 `tools/handlers.py`，工具协议统一放在 `tools/specs.py`。
-- 主 agent 模式状态统一放在 `runtime/main_agent_mode.py`，禁止在其他模块散落存储。
-- 多主/子 agent 扩展统一遵循：
-  - 主 agent：`build` / `plan`，通过 `plan_enter` / `plan_exit` 切换。
-  - 子 agent：统一走 `task`，通过 `agent` 参数路由（当前支持 `explore`）。
-  - `plan` 模式安全限制：写入仅限 `src/plan/`，`bash` 仅允许只读命令。
 
-## Build, Test, and Development Commands
-- `python3 src/main.py`: run the current demo flow end-to-end.
-- `python3 -m py_compile $(find src -name '*.py')`: quick syntax validation before commit.
-- `python3 -m venv .venv && source .venv/bin/activate`: create and activate an isolated environment.
-- If you add dependencies, document install commands in this file and pin versions.
+- `runtime/session.py` 只做会话编排，不放具体工具业务逻辑。
+- 工具实现统一在 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- 主 Agent 模式状态统一收敛在 `runtime/main_agent_mode.py`（若启用该模块），禁止散落存储。
+- 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
 
-## Coding Style & Naming Conventions
-- Follow PEP 8 with 4-space indentation and clear, small functions.
-- Use `snake_case` for variables/functions, `UPPER_CASE` for constants, and `PascalCase` for classes.
-- Prefer type hints on public functions (e.g., `def run_read(path: str) -> str`).
-- Keep side effects explicit; separate pure logic from subprocess/file operations.
+## 开发与验证命令
 
-## Testing Guidelines
-- Current repository has no formal test suite; add `pytest` tests under `tests/`.
-- Name files as `test_<module>.py` and test functions as `test_<behavior>()`.
-- For tool safety logic, include edge-case tests (path traversal, blocked commands, timeout handling).
-- Run tests with `pytest -q` once tests are introduced.
-- 新增或调整工具时，至少覆盖：
-  - 工具函数单测（`tests/test_handlers.py` 维度）
-  - 会话编排集成测试（`tests/test_run_session.py` 维度）
+- `python3 src/main.py`：运行 CLI 示例流程。
+- `pytest -q`：执行测试。
+- `python3 -m py_compile $(find src -name '*.py')`：语法检查。
+- `python3 -m venv .venv && source .venv/bin/activate`：创建并激活虚拟环境。
+- 新增依赖时必须在 `requirements.txt` 固定版本，并同步更新 README。
 
-## Commit & Pull Request Guidelines
-- No Git history is available in this workspace, so use a consistent convention now:
-  - Commit format: `feat: ...`, `fix: ...`, `refactor: ...`, `test: ...`, `docs: ...`.
-  - Example: `fix: block dangerous shell patterns in run_bash`.
-- PRs should include: purpose, key changes, verification steps, and risk/security impact.
+## 代码风格
 
-## Security & Configuration Tips
-- Never hardcode secrets (API keys, tokens). Use environment variables instead.
-- Validate all filesystem paths with workspace boundaries (as `safe_path` does).
-- Treat shell execution as high risk; keep deny-lists and timeouts, and prefer allow-listing when expanding capabilities.
+- 遵循 PEP 8，4 空格缩进，函数职责单一。
+- 命名规范：变量/函数 `snake_case`，常量 `UPPER_CASE`，类名 `PascalCase`。
+- 公共函数优先补全类型标注。
+- 副作用操作（文件、子进程、网络）与纯逻辑分离，便于测试与审计。
+
+## 测试要求
+
+- 统一使用 `pytest`，测试文件命名 `test_<module>.py`。
+- 新增或调整工具时至少覆盖：
+  - `tests/test_handlers.py` 维度：参数校验、正常路径、异常路径。
+  - `tests/test_run_session.py` 维度：会话编排与工具路由集成行为。
+- 涉及 Web API 时补充 `tests/test_web_api.py` 维度覆盖。
+- 安全相关逻辑必须覆盖边界用例（路径穿越、危险命令、超时、权限限制）。
+
+## 提交与评审规范
+
+- 提交类型建议：`feat:`、`fix:`、`refactor:`、`test:`、`docs:`。
+- Commit message 与 PR 描述优先中文，确保语义清晰。
+- PR 内容至少包含：变更目的、关键改动、验证步骤、风险与安全影响。
+
+## 安全规范
+
+- 禁止硬编码任何密钥或令牌，统一使用环境变量。
+- 所有路径输入必须通过工作区边界校验（如 `safe_path`）。
+- Shell 执行默认高风险，优先白名单、超时与最小权限策略。

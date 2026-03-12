@@ -36,8 +36,17 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
 
     def fake_stream_events(user_input: str, session_id: str | None = None, mode: str | None = None, **kwargs):
         assert user_input == "你好"
-        yield {"type": "start", "session_id": session_id or "default", "mode": mode or "build", "started_at": "t1"}
-        yield {"type": "round_start", "round": 1, "agent": "build", "started_at": "t2"}
+        assert kwargs["provider"] == "gpt"
+        assert kwargs["provider_specified"] is True
+        yield {
+            "type": "start",
+            "session_id": session_id or "default",
+            "mode": mode or "build",
+            "provider": "gpt",
+            "model": "gpt-4.1",
+            "started_at": "t1",
+        }
+        yield {"type": "round_start", "round": 1, "agent": "build", "provider": "gpt", "model": "gpt-4.1", "started_at": "t2"}
         yield {"type": "text_delta", "round": 1, "delta": "回答"}
         yield {"type": "text_delta", "round": 1, "delta": ": 你好"}
         yield {"type": "round_end", "round": 1, "status": "completed", "finish_reason": "stop", "completed_at": "t3"}
@@ -45,7 +54,11 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
 
     monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
 
-    with client.stream("POST", "/api/chat/stream", json={"session_id": "s_web", "user_input": "你好", "mode": "build"}) as resp:
+    with client.stream(
+        "POST",
+        "/api/chat/stream",
+        json={"session_id": "s_web", "user_input": "你好", "mode": "build", "provider": "gpt"},
+    ) as resp:
         assert resp.status_code == 200
         body = "".join(resp.iter_text())
 
@@ -54,6 +67,19 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     assert any(evt == "round_start" for evt, _ in events)
     assert any(evt == "text_delta" for evt, _ in events)
     assert any(evt == "done" for evt, _ in events)
+
+
+def test_runtime_options_should_return_backend_config():
+    app = create_app()
+    client = TestClient(app)
+
+    resp = client.get("/api/runtime/options")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["default_agent"] == "build"
+    assert any(item["name"] == "build" for item in payload["agents"])
+    assert any(item["name"] == "qwen" for item in payload["providers"])
 
 
 def test_get_session_messages_and_clear():

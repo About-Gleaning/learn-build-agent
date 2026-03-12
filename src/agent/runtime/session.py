@@ -6,6 +6,7 @@ from collections.abc import Generator
 from typing import Any, Callable, Literal
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
+from ..config.settings import ResolvedLLMConfig, resolve_llm_config
 from ..core.context import set_session_id
 from ..core.message import (
     EVENT_BUS,
@@ -68,8 +69,6 @@ You are a coding agent at {WORKDIR}.
 """
 
 PLAN_SYSTEM = f"""
-You are a coding planning agent at {WORKDIR}.
-
 你当前处于 plan 模式，目标是澄清需求、拆解任务、组织执行计划，并在必要时委托 explore 子代理收集信息。
 使用待办事项工具来规划多步骤任务。开始前标记为“in_progress”，完成后标记为“completed”。
 
@@ -147,20 +146,77 @@ def _latest_model(messages: list[Message]) -> str:
     return ""
 
 
-def _resolve_mode_from_messages(messages: list[Message], fallback: MainAgentMode = "build") -> MainAgentMode:
+def _latest_provider(messages: list[Message]) -> str:
+    for msg in reversed(messages):
+        provider = str(msg["info"].get("provider", "")).strip().lower()
+        if provider:
+            return provider
+    return ""
+
+
+def _iter_user_text_meta(messages: list[Message]) -> Generator[dict[str, Any], None, None]:
     for msg in reversed(messages):
         if get_role(msg) != "user":
             continue
-        for part in msg["parts"]:
+        for part in reversed(msg["parts"]):
             if part.get("type") != "text":
                 continue
             meta = part.get("meta") or {}
-            if not isinstance(meta, dict):
-                continue
-            agent = str(meta.get("agent", "")).strip().lower()
-            if agent in {"build", "plan"}:
-                return agent  # type: ignore[return-value]
+            if isinstance(meta, dict):
+                yield meta
+
+
+def _resolve_mode_from_messages(messages: list[Message], fallback: MainAgentMode = "build") -> MainAgentMode:
+    for meta in _iter_user_text_meta(messages):
+        agent = str(meta.get("agent", "")).strip().lower()
+        if agent in {"build", "plan"}:
+            return agent  # type: ignore[return-value]
     return fallback
+
+
+def _resolve_provider_preference_from_messages(messages: list[Message]) -> str | None:
+    for meta in _iter_user_text_meta(messages):
+        if bool(meta.get("provider_reset_to_default")):
+            return ""
+        provider = str(meta.get("provider", "")).strip().lower()
+        if provider and bool(meta.get("provider_explicit")):
+            return provider
+    return None
+
+
+def _resolve_provider_selection(
+    messages: list[Message],
+    *,
+    mode: MainAgentMode,
+    provider: str | None,
+    provider_specified: bool,
+) -> tuple[str, bool]:
+    normalized_provider = (provider or "").strip().lower()
+    if provider_specified:
+        if normalized_provider:
+            return normalized_provider, True
+        return resolve_llm_config(mode).provider, False
+
+    inherited_provider = _resolve_provider_preference_from_messages(messages)
+    if inherited_provider:
+        return inherited_provider, True
+    return resolve_llm_config(mode).provider, False
+
+
+def _resolve_runtime_config(
+    messages: list[Message],
+    *,
+    mode: MainAgentMode,
+    provider: str | None,
+    provider_specified: bool,
+) -> tuple[ResolvedLLMConfig, bool]:
+    provider_name, is_explicit = _resolve_provider_selection(
+        messages,
+        mode=mode,
+        provider=provider,
+        provider_specified=provider_specified,
+    )
+    return resolve_llm_config(mode, provider_name), is_explicit
 
 
 def _build_confirmation_interrupted_message(
@@ -197,6 +253,8 @@ def _append_synthetic_user_message(
     agent: MainAgentMode,
     text: str,
     plan_path: str,
+    provider: str,
+    provider_explicit: bool,
     model: str,
 ) -> None:
     synthetic = _build_text_message(
@@ -204,10 +262,13 @@ def _append_synthetic_user_message(
         text,
         session_id,
         model=model,
+        provider=provider,
         text_meta={
             "agent": agent,
             "synthetic": True,
             "plan_path": plan_path,
+            "provider": provider,
+            "provider_explicit": provider_explicit,
             "model": model,
         },
     )
@@ -233,9 +294,10 @@ def _build_text_message(
     session_id: str,
     *,
     model: str = "",
+    provider: str = "",
     text_meta: dict[str, Any] | None = None,
 ) -> Message:
-    message = create_message(role=role, session_id=session_id, model=model)
+    message = create_message(role=role, session_id=session_id, model=model, provider=provider)
     append_text_part(message, content, meta=text_meta)
     return message
 
@@ -244,10 +306,16 @@ def _set_message_runtime_info(
     message: Message,
     *,
     agent: str,
+    model: str | None = None,
+    provider: str | None = None,
     turn_started_at: str,
     turn_completed_at: str | None = None,
 ) -> None:
     message["info"]["agent"] = agent
+    if model:
+        message["info"]["model"] = model
+    if provider:
+        message["info"]["provider"] = provider
     message["info"]["turn_started_at"] = turn_started_at
     if turn_completed_at:
         message["info"]["turn_completed_at"] = turn_completed_at
@@ -316,7 +384,13 @@ def clear_session_memory(session_id: str | None = None) -> None:
     SESSION_MEMORY_STORE.clear(session_id)
 
 
-def subagent_loop(prompt: str, agent: str = "explore", session_id: str | None = None) -> str:
+def subagent_loop(
+    prompt: str,
+    agent: str = "explore",
+    session_id: str | None = None,
+    *,
+    llm_config: ResolvedLLMConfig | None = None,
+) -> str:
     agent_name = (agent or "explore").strip().lower()
     if agent_name != "explore":
         return f"Error: Unknown subagent '{agent_name}'. 当前仅支持 explore。"
@@ -328,6 +402,7 @@ def subagent_loop(prompt: str, agent: str = "explore", session_id: str | None = 
         tools=BASE_TOOL,
         system_prompt=SUBAGENT_EXPLORE_SYSTEM,
         todo_tool_names={"todo_write", "todo_read"},
+        llm_config=llm_config,
     )
     return get_message_text(result)
 
@@ -337,6 +412,8 @@ def _build_tool_handlers(
     session_id: str,
     get_mode: Callable[[], MainAgentMode],
     get_latest_model: Callable[[], str],
+    get_current_runtime: Callable[[], ResolvedLLMConfig],
+    get_provider_explicit: Callable[[], bool],
 ) -> dict[str, Callable[..., object]]:
     def _normalize_confirmed(raw_args: dict[str, Any]) -> bool | None:
         if "confirmed" not in raw_args:
@@ -387,7 +464,12 @@ def _build_tool_handlers(
         "edit_file": lambda **kw: _run_mode_aware_edit(kw["path"], kw["old_text"], kw["new_text"]),
         "todo_write": lambda **kw: TODO.update(kw["todo_list"]),
         "todo_read": lambda **kw: TODO.read_current_session(),
-        "task": lambda **kw: subagent_loop(kw["prompt"], agent=kw.get("agent", "explore"), session_id=session_id),
+        "task": lambda **kw: subagent_loop(
+            kw["prompt"],
+            agent=kw.get("agent", "explore"),
+            session_id=session_id,
+            llm_config=get_current_runtime(),
+        ),
         "plan_enter": lambda **kw: _run_plan_enter_tool(**kw),
         "plan_exit": lambda **kw: _run_plan_exit_tool(**kw),
         "load_skill": lambda **kw: registry.build_skill_context(kw["skill_names"]),
@@ -399,10 +481,13 @@ def run_session(
     session_id: str | None = None,
     *,
     mode: MainAgentMode | None = None,
+    provider: str | None = None,
+    provider_specified: bool = False,
     tools: list[dict] | None = None,
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
+    llm_config: ResolvedLLMConfig | None = None,
 ) -> Message:
     """新会话入口：返回最终助手 Message（含结构化 parts）。"""
     active_session_id = set_session_id(session_id)
@@ -417,6 +502,16 @@ def run_session(
     if mode is None and mode_enabled and history_messages:
         initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
 
+    if mode_enabled:
+        initial_runtime, initial_provider_explicit = _resolve_runtime_config(
+            history_messages,
+            mode=initial_mode,
+            provider=provider,
+            provider_specified=provider_specified,
+        )
+    else:
+        initial_runtime = llm_config or resolve_llm_config("build")
+        initial_provider_explicit = False
     initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
     initial_system_prompt = _get_system_prompt_for_mode(initial_mode) if mode_enabled else (system_prompt or BUILD_SYSTEM)
 
@@ -428,21 +523,38 @@ def run_session(
 
     user_meta: dict[str, Any] | None = None
     if mode_enabled:
-        user_meta = {"agent": initial_mode}
+        user_meta = {
+            "agent": initial_mode,
+            "provider": initial_runtime.provider,
+            "provider_explicit": initial_provider_explicit,
+            "provider_reset_to_default": provider_specified and not (provider or "").strip(),
+            "model": initial_runtime.model,
+        }
 
     messages: list[Message] = [
         _build_text_message("system", initial_system_prompt, active_session_id),
         *history_messages,
-        _build_text_message("user", user_input, active_session_id, text_meta=user_meta),
+        _build_text_message(
+            "user",
+            user_input,
+            active_session_id,
+            model=initial_runtime.model if mode_enabled else (llm_config.model if llm_config else ""),
+            provider=initial_runtime.provider if mode_enabled else (llm_config.provider if llm_config else ""),
+            text_meta=user_meta,
+        ),
     ]
 
     current_mode: MainAgentMode = initial_mode
+    current_runtime = initial_runtime if mode_enabled else (llm_config or resolve_llm_config("build"))
+    current_provider_explicit = initial_provider_explicit
 
     tool_executor = ToolExecutor(
         _build_tool_handlers(
             session_id=active_session_id,
             get_mode=lambda: current_mode,
             get_latest_model=lambda: _latest_model(messages),
+            get_current_runtime=lambda: current_runtime,
+            get_provider_explicit=lambda: current_provider_explicit,
         )
     )
 
@@ -461,12 +573,24 @@ def run_session(
         selected_tools = initial_tools
         if mode_enabled:
             current_mode = _resolve_mode_from_messages(messages, fallback=initial_mode)
+            current_runtime, current_provider_explicit = _resolve_runtime_config(
+                messages,
+                mode=current_mode,
+                provider=provider,
+                provider_specified=False,
+            )
             selected_tools = _get_tools_for_mode(current_mode)
             messages = _ensure_system_prompt(messages, _get_system_prompt_for_mode(current_mode), active_session_id)
         active_agent = current_mode if mode_enabled else ("explore" if system_prompt == SUBAGENT_EXPLORE_SYSTEM else "build")
 
-        assistant_message = create_chat_completion(messages=messages, tools=selected_tools)
-        _set_message_runtime_info(assistant_message, agent=active_agent, turn_started_at=turn_started_at)
+        assistant_message = create_chat_completion(messages=messages, tools=selected_tools, llm_config=current_runtime)
+        _set_message_runtime_info(
+            assistant_message,
+            agent=active_agent,
+            model=current_runtime.model,
+            provider=current_runtime.provider,
+            turn_started_at=turn_started_at,
+        )
         messages.append(assistant_message)
 
         tool_calls = extract_tool_calls(assistant_message)
@@ -532,6 +656,8 @@ def run_session(
                 _set_message_runtime_info(
                     interrupted_message,
                     agent=active_agent,
+                    model=current_runtime.model,
+                    provider=current_runtime.provider,
                     turn_started_at=turn_started_at,
                     turn_completed_at=utc_now_iso(),
                 )
@@ -544,16 +670,23 @@ def run_session(
                 synthetic_agent = str(metadata.get("synthetic_agent", "")).strip().lower()
                 synthetic_text = str(metadata.get("synthetic_user_message", "")).strip()
                 plan_path = str(metadata.get("plan_path", "")).strip()
-                model_name = str(metadata.get("model", "")).strip()
 
                 if synthetic_agent in {"build", "plan"} and synthetic_text:
+                    synthetic_runtime, synthetic_provider_explicit = _resolve_runtime_config(
+                        messages,
+                        mode=synthetic_agent,  # type: ignore[arg-type]
+                        provider=current_runtime.provider if current_provider_explicit else None,
+                        provider_specified=current_provider_explicit,
+                    )
                     _append_synthetic_user_message(
                         messages,
                         session_id=active_session_id,
                         agent=synthetic_agent,  # type: ignore[arg-type]
                         text=synthetic_text,
                         plan_path=plan_path,
-                        model=model_name,
+                        provider=synthetic_runtime.provider,
+                        provider_explicit=synthetic_provider_explicit,
+                        model=synthetic_runtime.model,
                     )
 
             if status == "cancelled":
@@ -570,6 +703,8 @@ def run_session(
             _set_message_runtime_info(
                 message,
                 agent=active_agent,
+                model=current_runtime.model,
+                provider=current_runtime.provider,
                 turn_started_at=turn_started_at,
                 turn_completed_at=utc_now_iso(),
             )
@@ -587,10 +722,13 @@ def run_session_stream_events(
     session_id: str | None = None,
     *,
     mode: MainAgentMode | None = None,
+    provider: str | None = None,
+    provider_specified: bool = False,
     tools: list[dict] | None = None,
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
+    llm_config: ResolvedLLMConfig | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """流式会话入口：逐步产出轮次/文本/工具事件。"""
     active_session_id = set_session_id(session_id)
@@ -605,6 +743,16 @@ def run_session_stream_events(
     if mode is None and mode_enabled and history_messages:
         initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
 
+    if mode_enabled:
+        initial_runtime, initial_provider_explicit = _resolve_runtime_config(
+            history_messages,
+            mode=initial_mode,
+            provider=provider,
+            provider_specified=provider_specified,
+        )
+    else:
+        initial_runtime = llm_config or resolve_llm_config("build")
+        initial_provider_explicit = False
     initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
     initial_system_prompt = _get_system_prompt_for_mode(initial_mode) if mode_enabled else (system_prompt or BUILD_SYSTEM)
 
@@ -616,21 +764,38 @@ def run_session_stream_events(
 
     user_meta: dict[str, Any] | None = None
     if mode_enabled:
-        user_meta = {"agent": initial_mode}
+        user_meta = {
+            "agent": initial_mode,
+            "provider": initial_runtime.provider,
+            "provider_explicit": initial_provider_explicit,
+            "provider_reset_to_default": provider_specified and not (provider or "").strip(),
+            "model": initial_runtime.model,
+        }
 
     messages: list[Message] = [
         _build_text_message("system", initial_system_prompt, active_session_id),
         *history_messages,
-        _build_text_message("user", user_input, active_session_id, text_meta=user_meta),
+        _build_text_message(
+            "user",
+            user_input,
+            active_session_id,
+            model=initial_runtime.model if mode_enabled else (llm_config.model if llm_config else ""),
+            provider=initial_runtime.provider if mode_enabled else (llm_config.provider if llm_config else ""),
+            text_meta=user_meta,
+        ),
     ]
 
     current_mode: MainAgentMode = initial_mode
+    current_runtime = initial_runtime if mode_enabled else (llm_config or resolve_llm_config("build"))
+    current_provider_explicit = initial_provider_explicit
 
     tool_executor = ToolExecutor(
         _build_tool_handlers(
             session_id=active_session_id,
             get_mode=lambda: current_mode,
             get_latest_model=lambda: _latest_model(messages),
+            get_current_runtime=lambda: current_runtime,
+            get_provider_explicit=lambda: current_provider_explicit,
         )
     )
 
@@ -638,6 +803,8 @@ def run_session_stream_events(
         "type": "start",
         "session_id": active_session_id,
         "mode": initial_mode,
+        "provider": current_runtime.provider,
+        "model": current_runtime.model,
         "started_at": turn_started_at,
     }
 
@@ -656,6 +823,12 @@ def run_session_stream_events(
         selected_tools = initial_tools
         if mode_enabled:
             current_mode = _resolve_mode_from_messages(messages, fallback=initial_mode)
+            current_runtime, current_provider_explicit = _resolve_runtime_config(
+                messages,
+                mode=current_mode,
+                provider=provider,
+                provider_specified=False,
+            )
             selected_tools = _get_tools_for_mode(current_mode)
             messages = _ensure_system_prompt(messages, _get_system_prompt_for_mode(current_mode), active_session_id)
         active_agent = current_mode if mode_enabled else ("explore" if system_prompt == SUBAGENT_EXPLORE_SYSTEM else "build")
@@ -664,10 +837,12 @@ def run_session_stream_events(
             "type": "round_start",
             "round": round_no,
             "agent": active_agent,
+            "provider": current_runtime.provider,
+            "model": current_runtime.model,
             "started_at": utc_now_iso(),
         }
 
-        stream_iter = create_chat_completion_stream(messages=messages, tools=selected_tools)
+        stream_iter = create_chat_completion_stream(messages=messages, tools=selected_tools, llm_config=current_runtime)
         while True:
             try:
                 stream_event = next(stream_iter)
@@ -684,7 +859,13 @@ def run_session_stream_events(
                         "delta": delta,
                     }
 
-        _set_message_runtime_info(assistant_message, agent=active_agent, turn_started_at=turn_started_at)
+        _set_message_runtime_info(
+            assistant_message,
+            agent=active_agent,
+            model=current_runtime.model,
+            provider=current_runtime.provider,
+            turn_started_at=turn_started_at,
+        )
         messages.append(assistant_message)
 
         tool_calls = extract_tool_calls(assistant_message)
@@ -715,6 +896,8 @@ def run_session_stream_events(
                 "round": round_no,
                 "status": assistant_message["info"].get("status", "completed"),
                 "finish_reason": assistant_message["info"].get("finish_reason", "stop"),
+                "provider": current_runtime.provider,
+                "model": current_runtime.model,
                 "completed_at": utc_now_iso(),
             }
             yield {
@@ -722,6 +905,8 @@ def run_session_stream_events(
                 "session_id": active_session_id,
                 "message_id": str(assistant_message["info"].get("message_id", "")),
                 "status": assistant_message["info"].get("status", "completed"),
+                "provider": current_runtime.provider,
+                "model": current_runtime.model,
                 "completed_at": utc_now_iso(),
             }
             return
@@ -775,6 +960,8 @@ def run_session_stream_events(
                 _set_message_runtime_info(
                     interrupted_message,
                     agent=active_agent,
+                    model=current_runtime.model,
+                    provider=current_runtime.provider,
                     turn_started_at=turn_started_at,
                     turn_completed_at=utc_now_iso(),
                 )
@@ -786,6 +973,8 @@ def run_session_stream_events(
                     "round": round_no,
                     "status": interrupted_message["info"].get("status", "interrupted"),
                     "finish_reason": interrupted_message["info"].get("finish_reason", "confirmation_required"),
+                    "provider": current_runtime.provider,
+                    "model": current_runtime.model,
                     "completed_at": utc_now_iso(),
                 }
                 yield {
@@ -793,6 +982,8 @@ def run_session_stream_events(
                     "session_id": active_session_id,
                     "message_id": str(interrupted_message["info"].get("message_id", "")),
                     "status": interrupted_message["info"].get("status", "interrupted"),
+                    "provider": current_runtime.provider,
+                    "model": current_runtime.model,
                     "completed_at": utc_now_iso(),
                 }
                 return
@@ -801,16 +992,23 @@ def run_session_stream_events(
                 synthetic_agent = str(metadata.get("synthetic_agent", "")).strip().lower()
                 synthetic_text = str(metadata.get("synthetic_user_message", "")).strip()
                 plan_path = str(metadata.get("plan_path", "")).strip()
-                model_name = str(metadata.get("model", "")).strip()
 
                 if synthetic_agent in {"build", "plan"} and synthetic_text:
+                    synthetic_runtime, synthetic_provider_explicit = _resolve_runtime_config(
+                        messages,
+                        mode=synthetic_agent,  # type: ignore[arg-type]
+                        provider=current_runtime.provider if current_provider_explicit else None,
+                        provider_specified=current_provider_explicit,
+                    )
                     _append_synthetic_user_message(
                         messages,
                         session_id=active_session_id,
                         agent=synthetic_agent,  # type: ignore[arg-type]
                         text=synthetic_text,
                         plan_path=plan_path,
-                        model=model_name,
+                        provider=synthetic_runtime.provider,
+                        provider_explicit=synthetic_provider_explicit,
+                        model=synthetic_runtime.model,
                     )
 
             if status == "cancelled":
@@ -827,6 +1025,8 @@ def run_session_stream_events(
             _set_message_runtime_info(
                 message,
                 agent=active_agent,
+                model=current_runtime.model,
+                provider=current_runtime.provider,
                 turn_started_at=turn_started_at,
                 turn_completed_at=utc_now_iso(),
             )
@@ -838,6 +1038,8 @@ def run_session_stream_events(
                 "round": round_no,
                 "status": "interrupted",
                 "finish_reason": "cancelled",
+                "provider": current_runtime.provider,
+                "model": current_runtime.model,
                 "completed_at": utc_now_iso(),
             }
             yield {
@@ -845,6 +1047,8 @@ def run_session_stream_events(
                 "session_id": active_session_id,
                 "message_id": str(message["info"].get("message_id", "")),
                 "status": "interrupted",
+                "provider": current_runtime.provider,
+                "model": current_runtime.model,
                 "completed_at": utc_now_iso(),
             }
             return
@@ -854,6 +1058,8 @@ def run_session_stream_events(
             "round": round_no,
             "status": "completed",
             "finish_reason": "tool_call",
+            "provider": current_runtime.provider,
+            "model": current_runtime.model,
             "completed_at": utc_now_iso(),
         }
 

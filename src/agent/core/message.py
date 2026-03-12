@@ -27,6 +27,7 @@ class MessageInfo(TypedDict, total=False):
     role: MessageRole
     created_at: str
     model: str
+    provider: str
     status: MessageStatus
     finish_reason: str
     parent_id: str
@@ -100,6 +101,7 @@ def create_message(
     session_id: str,
     *,
     model: str = "",
+    provider: str = "",
     status: MessageStatus = "pending",
     finish_reason: str = "",
     parent_id: str = "",
@@ -112,6 +114,7 @@ def create_message(
             "role": role,
             "created_at": utc_now_iso(),
             "model": model,
+            "provider": provider,
             "status": status,
             "finish_reason": finish_reason,
             "parent_id": parent_id,
@@ -334,6 +337,7 @@ def parse_provider_response(
     *,
     session_id: str,
     model: str,
+    provider: str = "",
     parent_id: str = "",
     trace_id: str = "",
 ) -> Message:
@@ -343,6 +347,7 @@ def parse_provider_response(
         "assistant",
         session_id,
         model=model,
+        provider=provider,
         status="running",
         finish_reason=str(getattr(choice, "finish_reason", "") or ""),
         parent_id=parent_id,
@@ -398,6 +403,7 @@ def create_error_message(
     *,
     session_id: str,
     model: str,
+    provider: str = "",
     error: NormalizedError,
     parent_id: str = "",
     trace_id: str = "",
@@ -406,6 +412,7 @@ def create_error_message(
         "assistant",
         session_id,
         model=model,
+        provider=provider,
         status="failed",
         finish_reason="error",
         parent_id=parent_id,

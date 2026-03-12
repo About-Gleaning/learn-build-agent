@@ -5,24 +5,21 @@ from typing import Any, TypedDict
 
 from openai import OpenAI
 
-from ...config.settings import API_KEY, BASE_URL, LOG_LEVEL, MODEL
+from ...config.settings import LOG_LEVEL, ResolvedLLMConfig, resolve_llm_config
 from ...core.hooks import HookDispatcher
 from ...core.message import (
     Message,
     append_text_part,
     append_tool_part,
     count_parts,
-    create_message,
     create_error_message,
+    create_message,
     estimate_message_size,
     mark_message_completed,
     normalize_error,
     parse_provider_response,
     to_provider_messages,
 )
-
-if not API_KEY:
-    raise ValueError("缺少 API_KEY，请在 .env 文件中配置 API_KEY。")
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -33,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 class HookContext(TypedDict, total=False):
     session_id: str
+    provider: str
     model: str
     parent_id: str
     max_tokens: int
@@ -69,8 +67,9 @@ class LoggingHook(LLMHook):
 
     def before_call(self, ctx: HookContext) -> None:
         logger.info(
-            "llm.request session_id=%s model=%s message_count=%d tools_count=%d request_size=%d",
+            "llm.request session_id=%s provider=%s model=%s message_count=%d tools_count=%d request_size=%d",
             ctx.get("session_id", "default_session"),
+            ctx.get("provider", ""),
             ctx.get("model", ""),
             ctx.get("message_count", 0),
             ctx.get("tools_count", 0),
@@ -82,8 +81,9 @@ class LoggingHook(LLMHook):
             "\n".join(part.get("content", "") for part in message["parts"] if part.get("type") in {"text", "error"})
         )
         logger.info(
-            "llm.response session_id=%s model=%s latency_ms=%d status=%s finish_reason=%s tool_calls=%d preview=%s",
+            "llm.response session_id=%s provider=%s model=%s latency_ms=%d status=%s finish_reason=%s tool_calls=%d preview=%s",
             ctx.get("session_id", "default_session"),
+            ctx.get("provider", ""),
             ctx.get("model", ""),
             ctx.get("latency_ms", 0),
             message["info"].get("status", "unknown"),
@@ -104,8 +104,9 @@ class LoggingHook(LLMHook):
 
     def on_error(self, ctx: HookContext, error: Exception, normalized_error: dict[str, str]) -> None:
         logger.exception(
-            "llm.error session_id=%s model=%s latency_ms=%d error_code=%s error_type=%s",
+            "llm.error session_id=%s provider=%s model=%s latency_ms=%d error_code=%s error_type=%s",
             ctx.get("session_id", "default_session"),
+            ctx.get("provider", ""),
             ctx.get("model", ""),
             ctx.get("latency_ms", 0),
             normalized_error.get("code", "api_error"),
@@ -116,8 +117,10 @@ class LoggingHook(LLMHook):
 class OpenAICompatibleAdapter:
     """OpenAI 兼容接口适配层，负责内部 Message 与 provider 协议互转。"""
 
-    def __init__(self, model: str) -> None:
-        self.model = model
+    def __init__(self, config: ResolvedLLMConfig) -> None:
+        self.config = config
+        self.model = config.model
+        self.provider = config.provider
 
     def build_request(self, messages: list[Message], tools: list[dict[str, Any]]) -> dict[str, Any]:
         return {
@@ -131,12 +134,11 @@ class OpenAICompatibleAdapter:
             response,
             session_id=session_id,
             model=self.model,
+            provider=self.provider,
             parent_id=parent_id,
         )
 
 
-client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-adapter = OpenAICompatibleAdapter(MODEL)
 _GLOBAL_HOOKS: list[LLMHook] = []
 _DISPATCHER = HookDispatcher[LLMHook, HookContext, dict[str, str]](logger=logger, name="llm")
 
@@ -187,21 +189,34 @@ def _default_hooks() -> None:
         register_global_hook(LoggingHook())
 
 
+def _resolve_effective_config(llm_config: ResolvedLLMConfig | None) -> ResolvedLLMConfig:
+    return llm_config or resolve_llm_config("build")
+
+
+def _build_openai_client(llm_config: ResolvedLLMConfig) -> OpenAI:
+    return OpenAI(api_key=llm_config.api_key, base_url=llm_config.base_url)
+
+
 def create_chat_completion(
     messages: list[Message],
     tools: list[dict[str, Any]],
     max_tokens: int = 4096,
     hooks: list[LLMHook] | None = None,
+    llm_config: ResolvedLLMConfig | None = None,
 ) -> Message:
     """统一封装大模型调用入口，返回内部 Message 结构。"""
     session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
+    effective_config = _resolve_effective_config(llm_config)
+    adapter = OpenAICompatibleAdapter(effective_config)
+    client = _build_openai_client(effective_config)
 
     request_payload = adapter.build_request(messages, tools)
     request_payload["max_tokens"] = max_tokens
 
     ctx: HookContext = {
         "session_id": session_id,
+        "provider": adapter.provider,
         "model": adapter.model,
         "parent_id": parent_id,
         "max_tokens": max_tokens,
@@ -230,6 +245,7 @@ def create_chat_completion(
         return create_error_message(
             session_id=session_id,
             model=adapter.model,
+            provider=adapter.provider,
             error=normalized,
             parent_id=parent_id,
         )
@@ -246,10 +262,14 @@ def create_chat_completion_stream(
     tools: list[dict[str, Any]],
     max_tokens: int = 4096,
     hooks: list[LLMHook] | None = None,
+    llm_config: ResolvedLLMConfig | None = None,
 ) -> Generator[dict[str, Any], None, Message]:
     """流式调用大模型，逐步产出文本增量并在结束时返回完整 Message。"""
     session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
+    effective_config = _resolve_effective_config(llm_config)
+    adapter = OpenAICompatibleAdapter(effective_config)
+    client = _build_openai_client(effective_config)
 
     request_payload = adapter.build_request(messages, tools)
     request_payload["max_tokens"] = max_tokens
@@ -257,6 +277,7 @@ def create_chat_completion_stream(
 
     ctx: HookContext = {
         "session_id": session_id,
+        "provider": adapter.provider,
         "model": adapter.model,
         "parent_id": parent_id,
         "max_tokens": max_tokens,
@@ -330,6 +351,7 @@ def create_chat_completion_stream(
         return create_error_message(
             session_id=session_id,
             model=adapter.model,
+            provider=adapter.provider,
             error=normalized,
             parent_id=parent_id,
         )
@@ -338,6 +360,7 @@ def create_chat_completion_stream(
         "assistant",
         session_id,
         model=adapter.model,
+        provider=adapter.provider,
         status="running",
         finish_reason=finish_reason,
         parent_id=parent_id,

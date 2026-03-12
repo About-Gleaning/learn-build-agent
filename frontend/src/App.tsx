@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "user" | "assistant" | "tool" | "system";
 
@@ -10,12 +10,27 @@ type UiMessage = {
   status: string;
 };
 
+type AgentName = "build" | "plan";
+
 type TimelineItem = {
   id: string;
   kind: string;
   title: string;
   detail: string;
   createdAt: string;
+};
+
+type RuntimeOptionsResp = {
+  default_agent: AgentName;
+  agents: Array<{
+    name: AgentName;
+    default_provider: string;
+    default_model: string;
+  }>;
+  providers: Array<{
+    name: string;
+    default_model: string;
+  }>;
 };
 
 type HistoryResp = {
@@ -31,6 +46,7 @@ type HistoryResp = {
 };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "http://127.0.0.1:8000";
+const AUTO_SCROLL_THRESHOLD = 56;
 
 function buildId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -50,6 +66,90 @@ function readString(payload: Record<string, unknown>, key: string, fallback = ""
 function readNumber(payload: Record<string, unknown>, key: string, fallback = 0): number {
   const value = payload[key];
   return typeof value === "number" ? value : fallback;
+}
+
+function formatTime(isoText: string): string {
+  if (!isoText) {
+    return "--";
+  }
+  const date = new Date(isoText);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function getRoleLabel(role: Role): string {
+  if (role === "user") {
+    return "你";
+  }
+  if (role === "assistant") {
+    return "助手";
+  }
+  if (role === "tool") {
+    return "工具";
+  }
+  return "系统";
+}
+
+function getStatusLabel(status: string): string {
+  if (status === "running") {
+    return "运行中";
+  }
+  if (status === "completed") {
+    return "已完成";
+  }
+  if (status === "failed") {
+    return "失败";
+  }
+  if (status === "interrupted") {
+    return "已中断";
+  }
+  return status || "待处理";
+}
+
+function getAvatarLabel(role: Role): string {
+  if (role === "user") {
+    return "你";
+  }
+  if (role === "assistant") {
+    return "AI";
+  }
+  if (role === "tool") {
+    return "工具";
+  }
+  return "系统";
+}
+
+function getTimelineBadgeLabel(kind: string): string {
+  if (kind === "start") {
+    return "开始";
+  }
+  if (kind === "round_start") {
+    return "轮次";
+  }
+  if (kind === "tool_call") {
+    return "工具";
+  }
+  if (kind === "tool_result") {
+    return "结果";
+  }
+  if (kind === "round_end") {
+    return "结束";
+  }
+  if (kind === "done") {
+    return "完成";
+  }
+  if (kind === "error") {
+    return "异常";
+  }
+  return "事件";
 }
 
 async function loadHistory(sessionId: string): Promise<UiMessage[]> {
@@ -79,6 +179,8 @@ async function clearHistory(sessionId: string): Promise<void> {
 async function streamChat(params: {
   sessionId: string;
   userInput: string;
+  mode: AgentName;
+  provider: string;
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
 }): Promise<void> {
@@ -90,7 +192,8 @@ async function streamChat(params: {
     body: JSON.stringify({
       session_id: params.sessionId,
       user_input: params.userInput,
-      mode: "build",
+      mode: params.mode,
+      provider: params.provider,
     }),
   });
 
@@ -158,6 +261,23 @@ async function streamChat(params: {
   }
 }
 
+async function loadRuntimeOptions(): Promise<RuntimeOptionsResp> {
+  const resp = await fetch(`${API_BASE}/api/runtime/options`);
+  if (!resp.ok) {
+    throw new Error(`运行配置加载失败: ${resp.status}`);
+  }
+  return (await resp.json()) as RuntimeOptionsResp;
+}
+
+function describeRuntime(payload: Record<string, unknown>): string {
+  const mode = readString(payload, "mode");
+  const agent = readString(payload, "agent");
+  const provider = readString(payload, "provider");
+  const model = readString(payload, "model");
+  const tags = [mode || agent, provider, model].filter(Boolean);
+  return tags.join(" / ");
+}
+
 function buildTimelineItem(eventName: string, payload: Record<string, unknown>): TimelineItem | null {
   const now = new Date().toISOString();
   if (eventName === "text_delta") {
@@ -169,7 +289,7 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
       id: buildId("timeline"),
       kind: "start",
       title: "会话开始",
-      detail: `模式: ${readString(payload, "mode", "build")}`,
+      detail: describeRuntime(payload) || `模式: ${readString(payload, "mode", "build")}`,
       createdAt: readString(payload, "started_at", now),
     };
   }
@@ -180,7 +300,7 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
       id: buildId("timeline"),
       kind: "round_start",
       title: `第 ${roundNo} 轮开始`,
-      detail: `执行代理: ${readString(payload, "agent", "unknown")}`,
+      detail: describeRuntime(payload) || `执行代理: ${readString(payload, "agent", "unknown")}`,
       createdAt: readString(payload, "started_at", now),
     };
   }
@@ -221,7 +341,7 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
       id: buildId("timeline"),
       kind: "done",
       title: "会话完成",
-      detail: `最终状态: ${readString(payload, "status", "completed")}`,
+      detail: `${readString(payload, "status", "completed")} ${describeRuntime(payload)}`.trim(),
       createdAt: readString(payload, "completed_at", now),
     };
   }
@@ -245,16 +365,117 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
   };
 }
 
+function getNextAgent(current: AgentName, agents: AgentName[]): AgentName {
+  if (agents.length === 0) {
+    return current === "build" ? "plan" : "build";
+  }
+  const currentIndex = agents.indexOf(current);
+  const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % agents.length : 0;
+  return agents[nextIndex];
+}
+
 export function App() {
-  const [sessionId, setSessionId] = useState(() => buildSessionId());
+  const [sessionId] = useState(() => buildSessionId());
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [error, setError] = useState("");
+  const [runtimeOptions, setRuntimeOptions] = useState<RuntimeOptionsResp | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [copyHint, setCopyHint] = useState("");
+  const [shouldFollow, setShouldFollow] = useState(true);
+  const [mode, setMode] = useState<AgentName>("build");
+  const [provider, setProvider] = useState("");
+  const [activeProvider, setActiveProvider] = useState("");
+  const [activeModel, setActiveModel] = useState("");
+
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const timelineListRef = useRef<HTMLDivElement>(null);
 
   const canSubmit = useMemo(() => input.trim().length > 0 && !isStreaming, [input, isStreaming]);
+  const messageCount = messages.length;
+  const timelineCount = timeline.length;
+  const statusText = isStreaming ? "运行中" : "空闲";
+  const latestMessage = messages[messages.length - 1] || null;
+
+  const modeDefaults = useMemo(() => {
+    const map = new Map<AgentName, { defaultProvider: string; defaultModel: string }>();
+    for (const item of runtimeOptions?.agents || []) {
+      map.set(item.name, { defaultProvider: item.default_provider, defaultModel: item.default_model });
+    }
+    return map;
+  }, [runtimeOptions]);
+
+  const providerDefaults = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of runtimeOptions?.providers || []) {
+      map.set(item.name, item.default_model);
+    }
+    return map;
+  }, [runtimeOptions]);
+
+  const agentOptions = useMemo<AgentName[]>(
+    () => (runtimeOptions?.agents || []).map((item) => item.name),
+    [runtimeOptions],
+  );
+  const providerOptions = runtimeOptions?.providers || [];
+  const providerNames = useMemo(() => providerOptions.map((item) => item.name), [providerOptions]);
+
+  const displayProvider = activeProvider || provider || modeDefaults.get(mode)?.defaultProvider || "--";
+  const displayModel =
+    activeModel ||
+    providerDefaults.get(activeProvider || provider) ||
+    modeDefaults.get(mode)?.defaultModel ||
+    "--";
+  const currentRuntimeSummary = `${mode} / ${displayProvider} / ${displayModel}`;
+  const followText = shouldFollow ? "自动跟随开启" : "自动跟随关闭";
+  const composerHint =
+    copyHint || (isStreaming ? "助手正在实时生成响应。" : "Enter 发送，Shift + Enter 换行，Shift + Tab 切换 Agent。");
+  const workspaceTone = isStreaming ? "实时协作中" : "准备就绪";
+
+  useEffect(() => {
+    if (!copyHint) {
+      return;
+    }
+    const timer = window.setTimeout(() => setCopyHint(""), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copyHint]);
+
+  useEffect(() => {
+    if (!shouldFollow) {
+      return;
+    }
+    const listEl = messageListRef.current;
+    if (listEl) {
+      listEl.scrollTop = listEl.scrollHeight;
+    }
+  }, [messages, shouldFollow]);
+
+  useEffect(() => {
+    const listEl = timelineListRef.current;
+    if (listEl) {
+      listEl.scrollTop = listEl.scrollHeight;
+    }
+  }, [timeline]);
+
+  useEffect(() => {
+    if (!runtimeOptions) {
+      return;
+    }
+    setMode((prev) => (agentOptions.includes(prev) ? prev : runtimeOptions.default_agent));
+  }, [runtimeOptions, agentOptions]);
+
+  useEffect(() => {
+    if (!runtimeOptions) {
+      return;
+    }
+    const hasProvider = providerNames.includes(provider);
+    if (!provider || !hasProvider) {
+      setProvider(modeDefaults.get(mode)?.defaultProvider || providerNames[0] || "");
+    }
+  }, [runtimeOptions, mode, provider, providerNames, modeDefaults]);
 
   const refreshHistory = async () => {
     setIsLoadingHistory(true);
@@ -269,8 +490,22 @@ export function App() {
     }
   };
 
+  const refreshRuntimeOptions = async () => {
+    setIsLoadingOptions(true);
+    setError("");
+    try {
+      const options = await loadRuntimeOptions();
+      setRuntimeOptions(options);
+    } catch (err) {
+      setError((err as Error).message || "运行配置加载失败");
+    } finally {
+      setIsLoadingOptions(false);
+    }
+  };
+
   useEffect(() => {
     void refreshHistory();
+    void refreshRuntimeOptions();
   }, []);
 
   const handleSubmit = async (event: FormEvent) => {
@@ -283,6 +518,7 @@ export function App() {
     setError("");
     setInput("");
     setTimeline([]);
+    setShouldFollow(true);
 
     const now = new Date().toISOString();
     const userMessage: UiMessage = {
@@ -303,6 +539,8 @@ export function App() {
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setIsStreaming(true);
+    setActiveProvider("");
+    setActiveModel("");
 
     let finalStatus = "completed";
 
@@ -310,6 +548,8 @@ export function App() {
       await streamChat({
         sessionId,
         userInput: trimmed,
+        mode,
+        provider,
         onDelta: (delta) => {
           setMessages((prev) =>
             prev.map((msg) =>
@@ -319,14 +559,22 @@ export function App() {
                     text: msg.text + delta,
                     status: "running",
                   }
-                : msg
-            )
+                : msg,
+            ),
           );
         },
         onEvent: (eventName, payload) => {
           const item = buildTimelineItem(eventName, payload);
           if (item) {
             setTimeline((prev) => [...prev, item]);
+          }
+          const providerName = readString(payload, "provider");
+          const modelName = readString(payload, "model");
+          if (providerName) {
+            setActiveProvider(providerName);
+          }
+          if (modelName) {
+            setActiveModel(modelName);
           }
           if (eventName === "done") {
             finalStatus = readString(payload, "status", "completed");
@@ -345,7 +593,7 @@ export function App() {
             status: normalizedStatus,
             text: msg.text || (normalizedStatus === "interrupted" ? "流程已中断。" : msg.text),
           };
-        })
+        }),
       );
     } catch (err) {
       setError((err as Error).message || "发送失败");
@@ -357,8 +605,8 @@ export function App() {
                 status: "failed",
                 text: msg.text || "请求失败，请稍后重试。",
               }
-            : msg
-        )
+            : msg,
+        ),
       );
     } finally {
       setIsStreaming(false);
@@ -374,85 +622,241 @@ export function App() {
       await clearHistory(sessionId);
       setMessages([]);
       setTimeline([]);
+      setActiveProvider("");
+      setActiveModel("");
     } catch (err) {
       setError((err as Error).message || "清空失败");
     }
   };
 
+  const handleMessageScroll = () => {
+    const listEl = messageListRef.current;
+    if (!listEl) {
+      return;
+    }
+    const distanceToBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
+    setShouldFollow(distanceToBottom <= AUTO_SCROLL_THRESHOLD);
+  };
+
+  const handleCopyText = async (text: string) => {
+    if (!text) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyHint("消息已复制到剪贴板");
+    } catch {
+      setCopyHint("复制失败，请检查浏览器权限");
+    }
+  };
+
+  const handleCycleAgent = () => {
+    if (isStreaming) {
+      return;
+    }
+    setMode((prev) => getNextAgent(prev, agentOptions));
+  };
+
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Tab" && event.shiftKey) {
+      event.preventDefault();
+      handleCycleAgent();
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (canSubmit) {
+        void handleSubmit(event);
+      }
+    }
+  };
+
   return (
-    <div className="page-shell">
-      <div className="bg-orb bg-orb-a" />
-      <div className="bg-orb bg-orb-b" />
+    <div className="app-shell">
+      <div className="ambient-grid" aria-hidden="true" />
+      <main className="workspace" aria-label="Agent 对话工作台">
+        <section className={`workspace-main ${error ? "has-alert" : "no-alert"}`} aria-label="会话交互区">
+          {error ? (
+            <div className="alert-banner" role="alert">
+              <strong>请求异常</strong>
+              <span>{error}</span>
+            </div>
+          ) : null}
 
-      <main className="chat-card">
-        <header className="chat-header">
-          <div>
-            <h1>my-main-agent Web</h1>
-            <p>Mac 本地交互面板（FastAPI + React）</p>
-          </div>
-          <button onClick={handleClear} disabled={isStreaming} className="ghost-btn">
-            清空会话
-          </button>
-        </header>
+          <section className="dialogue-panel" aria-label="消息工作台">
+            <section className="conversation-card" aria-label="消息区">
+              <div className="card-header conversation-head">
+                <div>
+                  <p className="card-kicker">对话中心</p>
+                  <h2>消息流</h2>
+                </div>
+                <div className="head-actions">
+                  <span className="metric-chip subtle-chip">{workspaceTone}</span>
+                  <span className="runtime-pill" title={currentRuntimeSummary}>
+                    {currentRuntimeSummary}
+                  </span>
+                  <span className="metric-chip">{messageCount} 条消息</span>
+                  <span className={`metric-chip ${isStreaming ? "is-live" : ""}`}>{statusText}</span>
+                  <button
+                    type="button"
+                    onClick={() => void refreshHistory()}
+                    disabled={isLoadingHistory || isStreaming}
+                    className="secondary-btn"
+                  >
+                    {isLoadingHistory ? "加载中..." : "刷新历史"}
+                  </button>
+                  <button type="button" onClick={handleClear} disabled={isStreaming} className="danger-btn compact">
+                    清空会话
+                  </button>
+                </div>
+              </div>
 
-        <section className="session-row">
-          <label htmlFor="session-id">会话 ID</label>
-          <input
-            id="session-id"
-            value={sessionId}
-            onChange={(e) => setSessionId(e.target.value.replace(/[^A-Za-z0-9_-]/g, ""))}
-            maxLength={64}
-            placeholder="自动随机会话ID"
-          />
-          <button onClick={() => void refreshHistory()} disabled={isLoadingHistory || isStreaming} className="ghost-btn">
-            {isLoadingHistory ? "加载中..." : "刷新历史"}
-          </button>
+              <div className="message-list" ref={messageListRef} onScroll={handleMessageScroll}>
+                {messages.length === 0 ? (
+                  <div className="empty-panel">
+                    <strong>暂无会话内容</strong>
+                    <span>输入一个问题，工作台会在这里展示完整对话过程。</span>
+                  </div>
+                ) : null}
+
+                {messages.map((msg) => (
+                  <article key={msg.id} className={`message-bubble ${msg.role}`}>
+                    <div className="message-shell">
+                      <div className={`message-avatar ${msg.role}`}>{getAvatarLabel(msg.role)}</div>
+                      <div className="message-content">
+                        <div className="message-toolbar">
+                          <div className="message-title">
+                            <span className="message-role">{getRoleLabel(msg.role)}</span>
+                            <span className="message-time">{formatTime(msg.createdAt)}</span>
+                          </div>
+                          <div className="message-actions">
+                            <span className={`status-badge status-${msg.status}`}>{getStatusLabel(msg.status)}</span>
+                            <button type="button" className="plain-btn" onClick={() => void handleCopyText(msg.text)}>
+                              复制
+                            </button>
+                          </div>
+                        </div>
+                        <div className="message-text">{msg.text || (msg.status === "running" ? "正在生成响应..." : "")}</div>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <form className="composer-card compact" onSubmit={handleSubmit}>
+              <div className="composer-topbar">
+                <div>
+                  <p className="card-kicker">输入区</p>
+                  <h2>发送消息</h2>
+                </div>
+                <span className="composer-status">{composerHint}</span>
+              </div>
+
+              <div className="composer-panel">
+                <div className="composer-config" aria-label="运行配置快捷选择">
+                  <div className="config-intro">
+                    <span className="config-intro-label">当前工作模式</span>
+                    <strong>{currentRuntimeSummary}</strong>
+                  </div>
+                  <div className="compact-field">
+                    <label htmlFor="agent-mode">Agent</label>
+                    <select
+                      id="agent-mode"
+                      value={mode}
+                      onChange={(e) => setMode(e.target.value as AgentName)}
+                      disabled={isStreaming}
+                    >
+                      {agentOptions.map((item) => (
+                        <option key={item} value={item}>
+                          {item}
+                        </option>
+                      ))}
+                      {agentOptions.length === 0 ? <option value={mode}>{mode}</option> : null}
+                    </select>
+                  </div>
+                  <div className="compact-field">
+                    <label htmlFor="provider-name">厂商</label>
+                    <select
+                      id="provider-name"
+                      value={provider}
+                      onChange={(e) => setProvider(e.target.value)}
+                      disabled={isStreaming}
+                    >
+                      {providerOptions.map((item) => (
+                        <option key={item.name} value={item.name}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void refreshRuntimeOptions()}
+                    disabled={isLoadingOptions || isStreaming}
+                    className="secondary-btn compact-btn"
+                  >
+                    {isLoadingOptions ? "刷新中..." : "刷新配置"}
+                  </button>
+                </div>
+
+                <div className="composer-input-area">
+                  <div className="composer-textarea-shell">
+                    <textarea
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      placeholder="把你的目标、上下文或想修的细节写清楚，我会沿着同一条执行轨迹持续推进。"
+                      rows={3}
+                      onKeyDown={onComposerKeyDown}
+                      aria-label="消息输入框"
+                    />
+                  </div>
+                  <div className="composer-footer">
+                    <div className="composer-tips">
+                      <span>{followText}</span>
+                      <span>最近消息: {latestMessage ? formatTime(latestMessage.createdAt) : "--"}</span>
+                    </div>
+                    <button type="submit" disabled={!canSubmit} className="primary-btn">
+                      {isStreaming ? "生成中..." : "发送"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </form>
+          </section>
         </section>
 
-        <section className="message-list">
-          {messages.length === 0 ? <p className="empty-state">暂无消息，输入问题开始对话。</p> : null}
-          {messages.map((msg) => (
-            <article key={msg.id} className={`message-item ${msg.role}`}>
-              <div className="message-role">{msg.role === "user" ? "你" : "助手"}</div>
-              <div className="message-text">{msg.text || (msg.status === "running" ? "思考中..." : "")}</div>
-            </article>
-          ))}
-        </section>
+        <aside className="workspace-side" aria-label="执行轨迹区">
+          <section className="timeline-card">
+            <div className="card-header">
+              <div>
+                <p className="card-kicker">执行轨迹</p>
+                <h2>阶段时间线</h2>
+              </div>
+              <span className="metric-chip">{timelineCount} 条事件</span>
+            </div>
 
-        <section className="timeline-panel">
-          <div className="timeline-title">阶段时间线</div>
-          <div className="timeline-list">
-            {timeline.length === 0 ? <p className="empty-state">流式事件将在这里展示。</p> : null}
-            {timeline.map((item) => (
-              <article key={item.id} className={`timeline-item ${item.kind}`}>
-                <div className="timeline-item-title">{item.title}</div>
-                <div className="timeline-item-detail">{item.detail}</div>
-              </article>
-            ))}
-          </div>
-        </section>
+            <div className="timeline-list" ref={timelineListRef}>
+              {timeline.length === 0 ? (
+                <div className="empty-panel compact">
+                  <strong>等待新的执行事件</strong>
+                  <span>发送消息后，这里会按时间顺序展示轮次推进、工具调用与最终完成状态。</span>
+                </div>
+              ) : null}
 
-        <form className="composer" onSubmit={handleSubmit}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="输入你的问题，按 Enter+Shift 换行"
-            rows={3}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                if (canSubmit) {
-                  void handleSubmit(e);
-                }
-              }
-            }}
-          />
-          <button type="submit" disabled={!canSubmit}>
-            {isStreaming ? "生成中..." : "发送"}
-          </button>
-        </form>
-
-        {error ? <p className="error-text">{error}</p> : null}
+              {timeline.map((item) => (
+                <article key={item.id} className={`timeline-entry ${item.kind}`}>
+                  <div className="timeline-entry-head">
+                    <span className={`timeline-kind kind-${item.kind}`}>{getTimelineBadgeLabel(item.kind)}</span>
+                    <time>{formatTime(item.createdAt)}</time>
+                  </div>
+                  <div className="timeline-entry-title">{item.title}</div>
+                  <div className="timeline-entry-detail">{item.detail}</div>
+                </article>
+              ))}
+            </div>
+          </section>
+        </aside>
       </main>
     </div>
   );

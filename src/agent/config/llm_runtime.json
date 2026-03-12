@@ -1,0 +1,27 @@
+{
+  "providers": {
+    "qwen": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen3-max",
+      "api_key_env": "QWEN_API_KEY"
+    },
+    "gemini": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "model": "gemini-2.0-flash",
+      "api_key_env": "GEMINI_API_KEY"
+    },
+    "gpt": {
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4.1",
+      "api_key_env": "OPENAI_API_KEY"
+    }
+  },
+  "agent_defaults": {
+    "build": {
+      "provider": "qwen"
+    },
+    "plan": {
+      "provider": "qwen"
+    }
+  }
+}

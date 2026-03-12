@@ -36,7 +36,7 @@ def _last_user_agent(messages):
 def test_run_session_with_tool_call(monkeypatch):
     call_state = {"count": 0}
 
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
 
@@ -64,7 +64,7 @@ def test_run_session_with_tool_call(monkeypatch):
 
 
 def test_run_session_end_on_failed_message(monkeypatch):
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         assistant = create_message("assistant", session_id, status="failed")
         append_text_part(assistant, "Error: 模型调用失败")
@@ -79,7 +79,7 @@ def test_run_session_end_on_failed_message(monkeypatch):
 
 
 def test_plan_enter_should_interrupt_on_confirmation_required(monkeypatch):
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         assistant = create_message("assistant", session_id, status="completed")
         append_tool_call_part(
@@ -100,7 +100,7 @@ def test_plan_enter_should_interrupt_on_confirmation_required(monkeypatch):
 def test_plan_enter_confirmed_should_switch_by_synthetic_user_message(monkeypatch):
     call_state = {"count": 0}
 
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -113,9 +113,9 @@ def test_plan_enter_confirmed_should_switch_by_synthetic_user_message(monkeypatc
                 arguments='{"confirmed": true}',
             )
         else:
-            system_text = get_message_text(messages[0])
             last_agent = _last_user_agent(messages)
-            final_text = "ok" if ("planning agent" in system_text and last_agent == "plan") else "bad"
+            provider = str(messages[-1]["info"].get("provider", ""))
+            final_text = "ok" if (last_agent == "plan" and provider) else "bad"
             append_text_part(assistant, final_text)
         return assistant
 
@@ -132,7 +132,7 @@ def test_plan_exit_confirmed_should_append_plan_path_when_file_exists(monkeypatc
 
     call_state = {"count": 0}
 
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -157,7 +157,7 @@ def test_plan_exit_confirmed_should_append_plan_path_when_file_exists(monkeypatc
 def test_plan_mode_write_should_be_limited_to_src_plan(monkeypatch):
     call_state = {"count": 0}
 
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -180,7 +180,7 @@ def test_plan_mode_write_should_be_limited_to_src_plan(monkeypatch):
 def test_plan_mode_bash_should_block_redirection(monkeypatch):
     call_state = {"count": 0}
 
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -203,7 +203,7 @@ def test_plan_mode_bash_should_block_redirection(monkeypatch):
 def test_task_with_unknown_subagent_should_return_error(monkeypatch):
     call_state = {"count": 0}
 
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -228,7 +228,7 @@ def test_run_session_should_use_memory_between_calls(monkeypatch):
     clear_session_memory("s_memory")
     call_state = {"count": 0}
 
-    def fake_chat(messages, tools, max_tokens=4096):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -272,7 +272,7 @@ def test_run_session_should_use_configured_memory_store(monkeypatch):
     try:
         call_state = {"count": 0}
 
-        def fake_chat(messages, tools, max_tokens=4096):
+        def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
             session_id = messages[-1]["info"]["session_id"]
             call_state["count"] += 1
             assistant = create_message("assistant", session_id, status="completed")
@@ -295,7 +295,7 @@ def test_run_session_should_use_configured_memory_store(monkeypatch):
 
 
 def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
-    def fake_stream(messages, tools, max_tokens=4096, hooks=None):
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         yield {"type": "text_delta", "delta": "流式"}
         yield {"type": "text_delta", "delta": "回答"}
@@ -319,7 +319,7 @@ def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
 def test_run_session_stream_events_should_emit_tool_events(monkeypatch):
     call_state = {"count": 0}
 
-    def fake_stream(messages, tools, max_tokens=4096, hooks=None):
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -338,3 +338,45 @@ def test_run_session_stream_events_should_emit_tool_events(monkeypatch):
     assert "tool_call" in event_names
     assert "tool_result" in event_names
     assert event_names[-1] == "done"
+
+
+def test_run_session_should_remember_explicit_provider(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_provider_memory")
+    seen: list[tuple[str, str]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        seen.append((llm_config.provider, llm_config.model))
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    run_session("第一轮", session_id="s_provider_memory", provider="gpt", provider_specified=True)
+    run_session("第二轮", session_id="s_provider_memory")
+
+    assert seen[0][0] == "gpt"
+    assert seen[1][0] == "gpt"
+
+
+def test_run_session_should_reset_to_agent_default_provider(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_provider_reset")
+    seen: list[str] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        seen.append(llm_config.provider)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    run_session("第一轮", session_id="s_provider_reset", provider="gpt", provider_specified=True)
+    run_session("第二轮", session_id="s_provider_reset", mode="plan", provider="", provider_specified=True)
+
+    assert seen[0] == "gpt"
+    assert seen[1] == "qwen"

@@ -67,6 +67,19 @@ def _build_user_message(session_id: str = "s_hook"):
     return [msg]
 
 
+def _patch_openai_client(monkeypatch, create_fn):
+    import agent.adapters.llm.client as client_module
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=create_fn,
+            )
+        )
+    )
+    monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
+
+
 def test_hooks_execute_in_order_global_then_local(monkeypatch):
     import agent.adapters.llm.client as client_module
 
@@ -76,11 +89,7 @@ def test_hooks_execute_in_order_global_then_local(monkeypatch):
     register_global_hook(RecorderHook("g2", recorder))
     local_hook = RecorderHook("l1", recorder)
 
-    monkeypatch.setattr(
-        client_module.client.chat.completions,
-        "create",
-        lambda **kwargs: _build_success_response("done"),
-    )
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     create_chat_completion(_build_user_message(), tools=[], hooks=[local_hook])
 
@@ -100,11 +109,7 @@ def test_hook_fail_open_should_continue(monkeypatch):
     clear_global_hooks()
     register_global_hook(BrokenHook(fail_fast=False))
 
-    monkeypatch.setattr(
-        client_module.client.chat.completions,
-        "create",
-        lambda **kwargs: _build_success_response("continue"),
-    )
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("continue"))
 
     result = create_chat_completion(_build_user_message(), tools=[])
 
@@ -122,7 +127,7 @@ def test_hook_fail_fast_should_raise(monkeypatch):
 
     clear_global_hooks()
     register_global_hook(BrokenHook(fail_fast=True))
-    monkeypatch.setattr(client_module.client.chat.completions, "create", _provider_call)
+    _patch_openai_client(monkeypatch, _provider_call)
 
     with pytest.raises(RuntimeError, match="Hook 'broken' failed"):
         create_chat_completion(_build_user_message(), tools=[])
@@ -140,7 +145,7 @@ def test_on_error_hook_called_when_provider_fails(monkeypatch):
     def _raise_timeout(**kwargs):
         raise TimeoutError("request timeout")
 
-    monkeypatch.setattr(client_module.client.chat.completions, "create", _raise_timeout)
+    _patch_openai_client(monkeypatch, _raise_timeout)
 
     result = create_chat_completion(_build_user_message(), tools=[])
 
@@ -171,7 +176,7 @@ def test_stream_should_yield_delta_and_return_message(monkeypatch):
         yield Chunk("式")
         yield Chunk("", finish_reason="stop")
 
-    monkeypatch.setattr(client_module.client.chat.completions, "create", _fake_stream)
+    _patch_openai_client(monkeypatch, _fake_stream)
     stream = create_chat_completion_stream(_build_user_message(), tools=[])
 
     deltas: list[str] = []

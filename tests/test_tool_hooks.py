@@ -54,7 +54,7 @@ class ErrorCodeHook(ToolHook):
 def _mock_chat_with_one_tool_then_text():
     call_state = {"count": 0}
 
-    def _fake_chat(messages, tools, max_tokens=4096, hooks=None):
+    def _fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
@@ -122,7 +122,7 @@ def test_tool_error_hook_unknown_tool(monkeypatch):
 
     call_state = {"count": 0}
 
-    def _fake_chat(messages, tools, max_tokens=4096, hooks=None):
+    def _fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
