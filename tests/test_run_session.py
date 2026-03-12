@@ -12,8 +12,11 @@ from agent.core.message import (
 
 def _last_tool_result_content(messages):
     for part in messages[-1]["parts"]:
-        if part.get("type") == "tool_result":
-            return str(part.get("content", ""))
+        if part.get("type") != "tool":
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        output = state.get("output") if isinstance(state.get("output"), dict) else {}
+        return str(output.get("output", ""))
     return ""
 
 
@@ -55,6 +58,9 @@ def test_run_session_with_tool_call(monkeypatch):
 
     assert result["info"]["role"] == "assistant"
     assert get_message_text(result) == "最终答案"
+    assert result["info"]["agent"] == "build"
+    assert "turn_started_at" in result["info"]
+    assert "turn_completed_at" in result["info"]
 
 
 def test_run_session_end_on_failed_message(monkeypatch):

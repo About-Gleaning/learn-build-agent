@@ -83,7 +83,7 @@ class LoggingHook(LLMHook):
             ctx.get("latency_ms", 0),
             message["info"].get("status", "unknown"),
             message["info"].get("finish_reason", ""),
-            count_parts(message, "tool_call"),
+            count_parts(message, "tool"),
             content_preview,
         )
 

@@ -26,6 +26,18 @@ class ToolNormalizedError(TypedDict, total=False):
     details: str
 
 
+class FilePart(TypedDict):
+    name: str
+    path: str
+    mime_type: str
+
+
+class ToolResult(TypedDict, total=False):
+    output: str
+    metadata: dict[str, Any]
+    attachments: list[FilePart]
+
+
 class ToolHook:
     """工具调用 Hook 基类，支持调用前后与异常阶段扩展。"""
 
@@ -36,7 +48,7 @@ class ToolHook:
     def before_call(self, ctx: ToolHookContext) -> None:
         """在工具调用前执行。"""
 
-    def after_call(self, ctx: ToolHookContext, result: str) -> None:
+    def after_call(self, ctx: ToolHookContext, result: ToolResult) -> None:
         """在工具调用成功后执行。"""
 
     def on_error(self, ctx: ToolHookContext, error: Exception, normalized_error: ToolNormalizedError) -> None:
@@ -59,14 +71,14 @@ class ToolLoggingHook(ToolHook):
             ctx.get("round_no", 0),
         )
 
-    def after_call(self, ctx: ToolHookContext, result: str) -> None:
+    def after_call(self, ctx: ToolHookContext, result: ToolResult) -> None:
         logger.info(
             "tool.response session_id=%s tool=%s tool_call_id=%s duration_ms=%d result_size=%d",
             ctx.get("session_id", ""),
             ctx.get("tool_name", ""),
             ctx.get("tool_call_id", ""),
             ctx.get("duration_ms", 0),
-            len(result),
+            len(result.get("output", "")),
         )
 
     def on_error(self, ctx: ToolHookContext, error: Exception, normalized_error: ToolNormalizedError) -> None:
@@ -111,7 +123,7 @@ def invoke_tool_hook(
     stage: str,
     *,
     ctx: ToolHookContext,
-    result: str | None = None,
+    result: ToolResult | None = None,
     error: Exception | None = None,
     normalized_error: ToolNormalizedError | None = None,
 ) -> None:
@@ -128,7 +140,7 @@ def invoke_tool_hook(
     )
 
 
-def normalize_tool_result(result: object) -> str:
+def normalize_tool_text(result: object) -> str:
     """将工具返回值规范为字符串，避免非法结构导致模型接口报错。"""
     if isinstance(result, str):
         return result
@@ -138,10 +150,31 @@ def normalize_tool_result(result: object) -> str:
         return str(result)
 
 
+def normalize_tool_result(result: object) -> ToolResult:
+    if isinstance(result, dict):
+        output = normalize_tool_text(result.get("output", ""))
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        attachments = result.get("attachments")
+        normalized: ToolResult = {
+            "output": output,
+            "metadata": metadata,
+        }
+        if isinstance(attachments, list):
+            valid_attachments = [item for item in attachments if isinstance(item, dict)]
+            if valid_attachments:
+                normalized["attachments"] = valid_attachments  # type: ignore[assignment]
+        return normalized
+
+    return {
+        "output": normalize_tool_text(result),
+        "metadata": {},
+    }
+
+
 class ToolExecutor:
     """执行工具调用并分发 Hook。"""
 
-    def __init__(self, handlers: dict[str, Callable[..., str]]) -> None:
+    def __init__(self, handlers: dict[str, Callable[..., object]]) -> None:
         self.handlers = handlers
 
     def _run_tool_hooks(
@@ -150,7 +183,7 @@ class ToolExecutor:
         stage: str,
         *,
         ctx: ToolHookContext,
-        result: str | None = None,
+        result: ToolResult | None = None,
         error: Exception | None = None,
         error_code: str = "execution_error",
     ) -> None:
@@ -174,7 +207,7 @@ class ToolExecutor:
         tool_call_id: str,
         round_no: int,
         hooks: list[ToolHook],
-    ) -> str:
+    ) -> ToolResult:
         ctx: ToolHookContext = {
             "session_id": session_id,
             "tool_name": tool_name,
@@ -192,7 +225,14 @@ class ToolExecutor:
             ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
             err = ValueError("Unknown tool")
             self._run_tool_hooks(hooks, "error", ctx=ctx, error=err, error_code="unknown_tool")
-            return "Error: Unknown tool"
+            return {
+                "output": "Error: Unknown tool",
+                "metadata": {
+                    "status": "failed",
+                    "error_code": "unknown_tool",
+                    "error_type": type(err).__name__,
+                },
+            }
 
         try:
             args = json.loads(arguments)
@@ -202,17 +242,33 @@ class ToolExecutor:
         except Exception as exc:
             ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
             self._run_tool_hooks(hooks, "error", ctx=ctx, error=exc, error_code="invalid_arguments")
-            return f"Error: Invalid tool arguments: {type(exc).__name__}: {exc}"
+            return {
+                "output": f"Error: Invalid tool arguments: {type(exc).__name__}: {exc}",
+                "metadata": {
+                    "status": "failed",
+                    "error_code": "invalid_arguments",
+                    "error_type": type(exc).__name__,
+                },
+            }
 
         try:
             result = normalize_tool_result(handler(**args))
         except Exception as exc:
             ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
             self._run_tool_hooks(hooks, "error", ctx=ctx, error=exc, error_code="execution_error")
-            return f"Error: Tool execution failed: {type(exc).__name__}: {exc}"
+            return {
+                "output": f"Error: Tool execution failed: {type(exc).__name__}: {exc}",
+                "metadata": {
+                    "status": "failed",
+                    "error_code": "execution_error",
+                    "error_type": type(exc).__name__,
+                },
+            }
 
+        result["metadata"] = dict(result.get("metadata", {}))
+        result["metadata"].setdefault("status", "completed")
         ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
-        ctx["result_size"] = len(result)
+        ctx["result_size"] = len(result.get("output", ""))
         self._run_tool_hooks(hooks, "after", ctx=ctx, result=result)
         return result
 

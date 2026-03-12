@@ -16,6 +16,17 @@ KEEP_RECENT = 3
 
 
 def _part_content(part: dict[str, Any]) -> str:
+    if part.get("type") == "tool":
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        output = state.get("output") if isinstance(state.get("output"), dict) else {}
+        text = output.get("output", "")
+        if isinstance(text, str):
+            return text
+        try:
+            return json.dumps(text, ensure_ascii=False)
+        except Exception:
+            return str(text)
+
     content = part.get("content", "")
     if isinstance(content, str):
         return content
@@ -26,7 +37,7 @@ def _part_content(part: dict[str, Any]) -> str:
 
 
 def prune(messages: list[Message]) -> list[Message]:
-    """压缩较早的工具输出，只保留最近 KEEP_RECENT 条完整 tool_result。"""
+    """压缩较早的工具输出，只保留最近 KEEP_RECENT 条完整 tool。"""
     tool_messages: list[Message] = [msg for msg in messages if get_role(msg) == "tool"]
 
     if len(tool_messages) <= KEEP_RECENT:
@@ -34,11 +45,16 @@ def prune(messages: list[Message]) -> list[Message]:
 
     for msg in tool_messages[:-KEEP_RECENT]:
         for part in msg["parts"]:
-            if part.get("type") != "tool_result":
+            if part.get("type") != "tool":
                 continue
             content = _part_content(part)
             if len(content) > 100:
-                part["content"] = "[Old tool result content cleared]"
+                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                output = state.get("output") if isinstance(state.get("output"), dict) else {}
+                if output:
+                    output["output"] = "[Old tool result content cleared]"
+                    state["output"] = output
+                    part["state"] = state
 
     return messages
 
@@ -50,8 +66,10 @@ def _estimate_tokens(messages: list[Message]) -> int:
         for part in msg["parts"]:
             raw = _part_content(part)
             total += max(1, len(raw) // 4)
-            if part.get("type") == "tool_call":
-                arguments = str(part.get("arguments", ""))
+            if part.get("type") == "tool":
+                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                input_data = state.get("input") if isinstance(state.get("input"), dict) else {}
+                arguments = str(input_data.get("arguments", ""))
                 total += max(1, len(arguments) // 4)
 
     return total

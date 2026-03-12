@@ -6,7 +6,7 @@ from typing import Any, Callable, Literal, TypedDict
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
 MessageStatus = Literal["pending", "running", "completed", "failed", "interrupted"]
-PartStatus = Literal["pending", "running", "completed", "failed"]
+ToolStateStatus = Literal["requested", "completed", "failed"]
 
 
 class NormalizedError(TypedDict, total=False):
@@ -34,20 +34,21 @@ class MessageInfo(TypedDict, total=False):
     token_usage: TokenUsage
     cost: float
     error: NormalizedError
+    agent: str
+    turn_started_at: str
+    turn_completed_at: str
 
 
 class Part(TypedDict, total=False):
     part_id: str
     type: str
     seq: int
-    status: PartStatus
     created_at: str
     updated_at: str
     meta: dict[str, Any]
     content: str
     name: str
-    arguments: str
-    tool_call_id: str
+    state: dict[str, Any]
 
 
 class Message(TypedDict):
@@ -126,11 +127,9 @@ def append_part(
     message: Message,
     part_type: str,
     *,
-    status: PartStatus = "completed",
     content: str = "",
     name: str = "",
-    arguments: str = "",
-    tool_call_id: str = "",
+    state: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
 ) -> Part:
     now = utc_now_iso()
@@ -138,7 +137,6 @@ def append_part(
         "part_id": _new_id("part"),
         "type": part_type,
         "seq": len(message["parts"]) + 1,
-        "status": status,
         "created_at": now,
         "updated_at": now,
         "meta": meta or {},
@@ -147,10 +145,8 @@ def append_part(
         part["content"] = content
     if name:
         part["name"] = name
-    if arguments:
-        part["arguments"] = arguments
-    if tool_call_id:
-        part["tool_call_id"] = tool_call_id
+    if state:
+        part["state"] = state
     message["parts"].append(part)
     publish_event("part_appended", message, {"part": part})
     return part
@@ -165,22 +161,50 @@ def append_compact_summary_part(message: Message, content: str) -> Part:
 
 
 def append_tool_call_part(message: Message, *, tool_call_id: str, name: str, arguments: str) -> Part:
+    return append_tool_part(
+        message,
+        tool_call_id=tool_call_id,
+        name=name,
+        status="requested",
+        arguments=arguments,
+    )
+
+
+def append_tool_part(
+    message: Message,
+    *,
+    tool_call_id: str,
+    name: str,
+    status: ToolStateStatus,
+    arguments: str = "",
+    output: dict[str, Any] | None = None,
+    meta: dict[str, Any] | None = None,
+) -> Part:
+    state: dict[str, Any] = {
+        "status": status,
+        "tool_call_id": tool_call_id,
+        "input": {
+            "arguments": arguments,
+        },
+    }
+    if output is not None:
+        state["output"] = output
     return append_part(
         message,
-        "tool_call",
+        "tool",
         name=name,
-        arguments=arguments,
-        tool_call_id=tool_call_id,
+        state=state,
+        meta=meta,
     )
 
 
 def append_tool_result_part(message: Message, *, tool_call_id: str, name: str, content: str) -> Part:
-    return append_part(
+    return append_tool_part(
         message,
-        "tool_result",
-        name=name,
-        content=content,
         tool_call_id=tool_call_id,
+        name=name,
+        status="completed",
+        output={"output": content, "metadata": {"status": "completed"}},
     )
 
 
@@ -188,7 +212,6 @@ def append_error_part(message: Message, code: str, error_message: str, details: 
     part = append_part(
         message,
         "error",
-        status="failed",
         content=error_message,
         meta={"code": code, "details": details},
     )
@@ -225,11 +248,15 @@ def get_message_text(message: Message) -> str:
 def extract_tool_calls(message: Message) -> list[ToolFunctionCall]:
     tool_calls: list[ToolFunctionCall] = []
     for part in message["parts"]:
-        if part.get("type") != "tool_call":
+        if part.get("type") != "tool":
             continue
-        tool_call_id = str(part.get("tool_call_id", ""))
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        if str(state.get("status", "")).strip().lower() != "requested":
+            continue
+        tool_call_id = str(state.get("tool_call_id", ""))
         name = str(part.get("name", ""))
-        arguments = str(part.get("arguments", "{}"))
+        input_data = state.get("input") if isinstance(state.get("input"), dict) else {}
+        arguments = str(input_data.get("arguments", "{}"))
         if not tool_call_id or not name:
             continue
         tool_calls.append(
@@ -246,9 +273,15 @@ def _tool_result_for_provider(message: Message) -> tuple[str, str]:
     tool_call_id = ""
     content = ""
     for part in message["parts"]:
-        if part.get("type") == "tool_result":
-            tool_call_id = str(part.get("tool_call_id", ""))
-            content = str(part.get("content", ""))
+        if part.get("type") != "tool":
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        if str(state.get("status", "")).strip().lower() not in {"completed", "failed"}:
+            continue
+        tool_call_id = str(state.get("tool_call_id", ""))
+        output = state.get("output") if isinstance(state.get("output"), dict) else {}
+        content = str(output.get("output", ""))
+        if content:
             break
     if not content:
         content = get_message_text(message)
@@ -321,10 +354,11 @@ def parse_provider_response(
         append_text_part(assistant, str(content))
 
     for tool_call in getattr(provider_msg, "tool_calls", None) or []:
-        append_tool_call_part(
+        append_tool_part(
             assistant,
             tool_call_id=str(tool_call.id),
             name=str(tool_call.function.name),
+            status="requested",
             arguments=str(tool_call.function.arguments),
         )
 

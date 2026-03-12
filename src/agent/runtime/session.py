@@ -1,4 +1,3 @@
-import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -8,12 +7,13 @@ from ..core.context import set_session_id
 from ..core.message import (
     EVENT_BUS,
     Message,
+    append_tool_part,
     append_text_part,
-    append_tool_result_part,
     create_message,
     extract_tool_calls,
     get_role,
     get_message_text,
+    utc_now_iso,
 )
 from ..skills.runtime import SkillRegistry
 from ..tools.handlers import (
@@ -31,7 +31,7 @@ from ..tools.specs import BASE_TOOL, BUILD_AGENT_TOOL, PLAN_AGENT_TOOL
 from ..tools.todo_manager import TodoManager
 from .compaction import compact
 from .session_memory import InMemorySessionMemoryStore, SessionMemoryStore
-from .tool_executor import ToolExecutor, ToolHook, get_global_tool_hooks
+from .tool_executor import ToolExecutor, ToolHook, ToolResult, get_global_tool_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -155,16 +155,6 @@ def _resolve_mode_from_messages(messages: list[Message], fallback: MainAgentMode
     return fallback
 
 
-def _parse_tool_payload(result: str) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(result)
-    except Exception:
-        return None
-    if isinstance(payload, dict):
-        return payload
-    return None
-
-
 def _build_confirmation_interrupted_message(
     session_id: str,
     *,
@@ -242,9 +232,47 @@ def _build_text_message(
     return message
 
 
-def _build_tool_message(session_id: str, tool_call_id: str, tool_name: str, content: str) -> Message:
+def _set_message_runtime_info(
+    message: Message,
+    *,
+    agent: str,
+    turn_started_at: str,
+    turn_completed_at: str | None = None,
+) -> None:
+    message["info"]["agent"] = agent
+    message["info"]["turn_started_at"] = turn_started_at
+    if turn_completed_at:
+        message["info"]["turn_completed_at"] = turn_completed_at
+
+
+def _build_tool_message(
+    session_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    arguments: str,
+    result: ToolResult,
+    *,
+    agent: str,
+    turn_started_at: str,
+) -> Message:
     message = create_message(role="tool", session_id=session_id)
-    append_tool_result_part(message, tool_call_id=tool_call_id, name=tool_name, content=content)
+    status = str((result.get("metadata") or {}).get("status", "completed")).strip().lower()
+    if status not in {"completed", "failed"}:
+        status = "completed"
+    append_tool_part(
+        message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status=status,  # type: ignore[arg-type]
+        arguments=arguments,
+        output=result,
+    )
+    _set_message_runtime_info(
+        message,
+        agent=agent,
+        turn_started_at=turn_started_at,
+        turn_completed_at=utc_now_iso(),
+    )
     return message
 
 
@@ -279,7 +307,7 @@ def _build_tool_handlers(
     session_id: str,
     get_mode: Callable[[], MainAgentMode],
     get_latest_model: Callable[[], str],
-) -> dict[str, Callable[..., str]]:
+) -> dict[str, Callable[..., object]]:
     def _normalize_confirmed(raw_args: dict[str, Any]) -> bool | None:
         if "confirmed" not in raw_args:
             return None
@@ -348,6 +376,7 @@ def run_session(
 ) -> Message:
     """新会话入口：返回最终助手 Message（含结构化 parts）。"""
     active_session_id = set_session_id(session_id)
+    turn_started_at = utc_now_iso()
     mode_enabled = tools is None and system_prompt is None
 
     initial_mode: MainAgentMode = "build"
@@ -404,8 +433,10 @@ def run_session(
             current_mode = _resolve_mode_from_messages(messages, fallback=initial_mode)
             selected_tools = _get_tools_for_mode(current_mode)
             messages = _ensure_system_prompt(messages, _get_system_prompt_for_mode(current_mode), active_session_id)
+        active_agent = current_mode if mode_enabled else ("explore" if system_prompt == SUBAGENT_EXPLORE_SYSTEM else "build")
 
         assistant_message = create_chat_completion(messages=messages, tools=selected_tools)
+        _set_message_runtime_info(assistant_message, agent=active_agent, turn_started_at=turn_started_at)
         messages.append(assistant_message)
 
         tool_calls = extract_tool_calls(assistant_message)
@@ -419,6 +450,7 @@ def run_session(
                 non_todo_round_streak += 1
 
         if not has_tool_calls:
+            assistant_message["info"]["turn_completed_at"] = utc_now_iso()
             logger.info(
                 "session.round.finish session_id=%s round=%d status=%s",
                 active_session_id,
@@ -444,19 +476,21 @@ def run_session(
                     active_session_id,
                     tool_call_id=tool_call["id"],
                     tool_name=tool_call["name"],
-                    content=result,
+                    arguments=tool_call["arguments"],
+                    result=result,
+                    agent=active_agent,
+                    turn_started_at=turn_started_at,
                 )
             )
 
-            payload = _parse_tool_payload(result)
-            if payload is None or tool_call["name"] not in {"plan_enter", "plan_exit"}:
+            if tool_call["name"] not in {"plan_enter", "plan_exit"}:
                 continue
 
-            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
             status = str(metadata.get("status", "")).strip().lower()
 
             if status == "confirmation_required":
-                output_text = str(payload.get("output", "请确认后继续。"))
+                output_text = str(result.get("output", "请确认后继续。"))
                 question = str(metadata.get("confirmation_question", "是否继续？"))
                 interrupted_message = _build_confirmation_interrupted_message(
                     active_session_id,
@@ -464,6 +498,12 @@ def run_session(
                     output_text=output_text,
                     question=question,
                     metadata=metadata,
+                )
+                _set_message_runtime_info(
+                    interrupted_message,
+                    agent=active_agent,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=utc_now_iso(),
                 )
                 messages.append(interrupted_message)
                 if mode_enabled:
@@ -497,6 +537,12 @@ def run_session(
                 finish_reason="cancelled",
             )
             append_text_part(message, "用户取消了模式切换，当前流程已中断。")
+            _set_message_runtime_info(
+                message,
+                agent=active_agent,
+                turn_started_at=turn_started_at,
+                turn_completed_at=utc_now_iso(),
+            )
             messages.append(message)
             if mode_enabled:
                 SESSION_MEMORY_STORE.save(active_session_id, messages)
