@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from agent.runtime.session import clear_session_memory, configure_session_memory_store, run_session, run_session_stream_events
+import agent.runtime.session as session_module
+from agent.runtime.session import (
+    build_system_prompt,
+    clear_session_memory,
+    configure_session_memory_store,
+    run_session,
+    run_session_stream_events,
+)
 from agent.runtime.session_memory import InMemorySessionMemoryStore, SessionMemoryStore
 from agent.core.message import (
     append_text_part,
@@ -380,3 +387,97 @@ def test_run_session_should_reset_to_agent_default_provider(monkeypatch):
 
     assert seen[0] == "gpt"
     assert seen[1] == "qwen"
+
+
+def test_build_system_prompt_should_use_model_specific_prompt(monkeypatch):
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    prompt = build_system_prompt(agent="build", model="qwen3-max", provider="qwen")
+
+    assert "你是 **爪爪**" in prompt
+    assert "- model: qwen3-max" in prompt
+
+
+def test_build_system_prompt_should_fallback_to_default_prompt(monkeypatch):
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    prompt = build_system_prompt(agent="build", model="gpt-4.1", provider="gpt")
+
+    assert "Qwen 系列模型" not in prompt
+    assert "你是 **爪爪**" in prompt
+    assert "- model: gpt-4.1" in prompt
+
+
+def test_build_system_prompt_should_append_agents_md(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    (tmp_path / "AGENTS.md").write_text("请始终先写测试。", encoding="utf-8")
+
+    prompt = build_system_prompt(agent="plan", model="qwen3-max", provider="qwen")
+
+    assert "请始终先写测试。" in prompt
+    assert "以下是当前工作目录下的 AGENTS.md 内容" in prompt
+    assert f"- workdir: {tmp_path}" in prompt
+
+
+def test_build_system_prompt_should_include_git_environment(monkeypatch):
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (True, "/tmp/repo"))
+    prompt = build_system_prompt(agent="explore", model="gemini-2.0-flash", provider="gemini")
+
+    assert "- is_git_repo: true" in prompt
+    assert "- git_root: /tmp/repo" in prompt
+    assert "- provider: gemini" in prompt
+
+
+def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch):
+    seen_system_prompts: list[str] = []
+    call_state = {"count": 0}
+
+    def fake_prompt(agent: str, model: str, provider: str) -> str:
+        return f"PROMPT::{agent}::{provider}::{model}"
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        seen_system_prompts.append(get_message_text(messages[0]))
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_plan_enter_yes",
+                name="plan_enter",
+                arguments='{"confirmed": true}',
+            )
+        else:
+            append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr(session_module, "build_system_prompt", fake_prompt)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("进入 plan", session_id="s_prompt_mode_switch")
+
+    assert get_message_text(result) == "ok"
+    assert seen_system_prompts[0] == "PROMPT::build::qwen::qwen3-max"
+    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen3-max"
+
+
+def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
+    seen_system_prompts: list[str] = []
+
+    def fake_prompt(agent: str, model: str, provider: str) -> str:
+        return f"STREAM::{agent}::{provider}::{model}"
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        seen_system_prompts.append(get_message_text(messages[0]))
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "流式回答")
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(session_module, "build_system_prompt", fake_prompt)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("你好", session_id="s_stream_prompt"))
+
+    assert events[-1]["type"] == "done"
+    assert seen_system_prompts == ["STREAM::build::qwen::qwen3-max"]

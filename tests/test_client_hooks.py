@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import agent.adapters.llm.client as client_module
 from agent.adapters.llm.client import (
     LLMHook,
     LoggingHook,
@@ -68,8 +69,6 @@ def _build_user_message(session_id: str = "s_hook"):
 
 
 def _patch_openai_client(monkeypatch, create_fn):
-    import agent.adapters.llm.client as client_module
-
     fake_client = SimpleNamespace(
         chat=SimpleNamespace(
             completions=SimpleNamespace(
@@ -154,8 +153,6 @@ def test_on_error_hook_called_when_provider_fails(monkeypatch):
 
 
 def test_stream_should_yield_delta_and_return_message(monkeypatch):
-    import agent.adapters.llm.client as client_module
-
     class Delta:
         def __init__(self, content):
             self.content = content
@@ -190,3 +187,26 @@ def test_stream_should_yield_delta_and_return_message(monkeypatch):
 
     assert "".join(deltas) == "流式"
     assert final_message["info"]["status"] == "completed"
+
+
+def test_logging_hook_should_log_prompt_when_enabled(monkeypatch, caplog):
+    monkeypatch.setattr(client_module, "LOG_LLM_PROMPT", True)
+    monkeypatch.setattr(client_module, "LOG_LLM_PROMPT_LIMIT", 2000)
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_user_message(), tools=[])
+
+    assert "llm.prompt" in caplog.text
+    assert '"role":"user"' in caplog.text
+    assert "hello" in caplog.text
+
+
+def test_logging_hook_should_not_log_prompt_when_disabled(monkeypatch, caplog):
+    monkeypatch.setattr(client_module, "LOG_LLM_PROMPT", False)
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_user_message(), tools=[])
+
+    assert "llm.prompt" not in caplog.text

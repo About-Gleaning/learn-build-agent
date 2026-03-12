@@ -1,11 +1,12 @@
 import logging
+import json
 import time
 from collections.abc import Generator
 from typing import Any, TypedDict
 
 from openai import OpenAI
 
-from ...config.settings import LOG_LEVEL, ResolvedLLMConfig, resolve_llm_config
+from ...config.settings import LOG_LEVEL, LOG_LLM_PROMPT, LOG_LLM_PROMPT_LIMIT, ResolvedLLMConfig, resolve_llm_config
 from ...core.hooks import HookDispatcher
 from ...core.message import (
     Message,
@@ -75,6 +76,14 @@ class LoggingHook(LLMHook):
             ctx.get("tools_count", 0),
             ctx.get("request_size", 0),
         )
+        if LOG_LLM_PROMPT:
+            logger.info(
+                "llm.prompt session_id=%s provider=%s model=%s prompt=%s",
+                ctx.get("session_id", "default_session"),
+                ctx.get("provider", ""),
+                ctx.get("model", ""),
+                _build_prompt_preview(ctx.get("request_payload", {})),
+            )
 
     def after_call(self, ctx: HookContext, message: Message) -> None:
         content_preview = _mask_text(
@@ -148,6 +157,15 @@ def _mask_text(text: str, limit: int = 300) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[:limit] + "...<truncated>"
+
+
+def _build_prompt_preview(request_payload: dict[str, Any]) -> str:
+    messages = request_payload.get("messages", [])
+    try:
+        serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        serialized = str(messages)
+    return _mask_text(serialized, limit=LOG_LLM_PROMPT_LIMIT)
 
 
 def register_global_hook(hook: LLMHook) -> None:

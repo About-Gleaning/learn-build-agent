@@ -12,6 +12,8 @@ load_dotenv()
 MainAgentMode = Literal["build", "plan"]
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LLM_PROMPT = os.getenv("LOG_LLM_PROMPT", "false").strip().lower() in {"1", "true", "yes", "on"}
+LOG_LLM_PROMPT_LIMIT = max(200, int(os.getenv("LOG_LLM_PROMPT_LIMIT", "2000")))
 LLM_CONFIG_PATH = Path(
     os.getenv(
         "LLM_CONFIG_PATH",

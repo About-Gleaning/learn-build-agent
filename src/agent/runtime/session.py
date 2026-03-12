@@ -1,6 +1,8 @@
 import logging
 import re
 import json
+import subprocess
+from datetime import datetime
 from pathlib import Path
 from collections.abc import Generator
 from typing import Any, Callable, Literal
@@ -46,72 +48,7 @@ registry = SkillRegistry(SKILLS_ROOT)
 registry.discover()
 skills_catalog = registry.build_brief_catalog_for_model()
 
-WORKDIR = Path.cwd()
-
-BUILD_SYSTEM = f"""
-You are a coding agent at {WORKDIR}.
-
-使用待办事项工具来规划多步骤任务。开始前标记为“in_progress”，完成后标记为“completed”。
-
-你可以看到一个 skills catalog，里面只有每个 skill 的简短介绍。
-当用户的问题需要某个专业 skill 时，你不要瞎猜 skill 的细节，
-而是应该调用工具去加载对应的 skill。
-
-规则：
-1. 如果现有上下文已经足够回答，就直接回答。
-2. 如果你判断某个 skill 会显著提高回答质量，就调用工具 load_skill。
-3. 不要假装已经看过某个 skill 的完整内容，除非你真的调用过工具。
-4. 可以一次加载一个或多个 skill，但尽量克制，只加载必要的。
-
-当前可用 skills catalog:\n{skills_catalog}
-
-优先使用工具而非文字描述。
-"""
-
-PLAN_SYSTEM = f"""
-你当前处于 plan 模式，目标是澄清需求、拆解任务、组织执行计划，并在必要时委托 explore 子代理收集信息。
-使用待办事项工具来规划多步骤任务。开始前标记为“in_progress”，完成后标记为“completed”。
-
-关键限制：
-1. 允许写入和编辑 `src/plan/` 下的文件。
-2. 禁止写入和编辑 `src/plan/` 之外的文件。
-3. bash 仅允许只读命令，禁止链式执行、重定向和命令替换。
-4. 退出 plan 模式时，先调用 plan_exit 并等待用户确认。
-
-你可以看到一个 skills catalog，里面只有每个 skill 的简短介绍。
-当用户的问题需要某个专业 skill 时，你不要瞎猜 skill 的细节，
-而是应该调用工具去加载对应的 skill。
-
-规则：
-1. 如果现有上下文已经足够回答，就直接回答。
-2. 如果你判断某个 skill 会显著提高回答质量，就调用工具 load_skill。
-3. 不要假装已经看过某个 skill 的完整内容，除非你真的调用过工具。
-4. 可以一次加载一个或多个 skill，但尽量克制，只加载必要的。
-
-当前可用 skills catalog:\n{skills_catalog}
-
-优先使用工具而非文字描述。
-"""
-
-SUBAGENT_EXPLORE_SYSTEM = f"""
-You are a coding subagent at {WORKDIR}.
-完成给定的任务，然后总结你的发现。
-使用待办事项工具来规划多步骤任务。开始前标记为“in_progress”，完成后标记为“completed”。
-
-你可以看到一个 skills catalog，里面只有每个 skill 的简短介绍。
-当用户的问题需要某个专业 skill 时，你不要瞎猜 skill 的细节，
-而是应该调用工具去加载对应的 skill。
-
-规则：
-1. 如果现有上下文已经足够回答，就直接回答。
-2. 如果你判断某个 skill 会显著提高回答质量，就调用工具 load_skill。
-3. 不要假装已经看过某个 skill 的完整内容，除非你真的调用过工具。
-4. 可以一次加载一个或多个 skill，但尽量克制，只加载必要的。
-
-当前可用 skills catalog:\n{skills_catalog}
-
-优先使用工具而非文字描述。
-"""
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 TODO = TodoManager()
 SESSION_MEMORY_STORE: SessionMemoryStore = InMemorySessionMemoryStore(max_messages=24)
@@ -122,8 +59,100 @@ _SECRET_PATTERNS = [
 ]
 
 
-def _get_system_prompt_for_mode(mode: MainAgentMode) -> str:
-    return PLAN_SYSTEM if mode == "plan" else BUILD_SYSTEM
+def _normalize_model_name(model: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", model.strip().lower()).strip("._-")
+    return normalized or "default"
+
+
+def _get_workdir() -> Path:
+    return Path.cwd()
+
+
+def _resolve_build_prompt_path(model: str) -> Path:
+    normalized_model = _normalize_model_name(model)
+    candidate = PROMPTS_DIR / f"build.{normalized_model}.txt"
+    if candidate.exists():
+        return candidate
+    return PROMPTS_DIR / "build.default.txt"
+
+
+def _resolve_prompt_path(agent: str, model: str) -> Path:
+    agent_name = agent.strip().lower()
+    if agent_name == "build":
+        return _resolve_build_prompt_path(model)
+    if agent_name == "plan":
+        return PROMPTS_DIR / "plan.txt"
+    if agent_name == "explore":
+        return PROMPTS_DIR / "explore.txt"
+    raise ValueError(f"未知的 prompt agent: {agent}")
+
+
+def _read_prompt_file(path: Path) -> str:
+    if not path.exists():
+        raise ValueError(f"未找到 prompt 文件: {path}")
+    template = path.read_text(encoding="utf-8").strip()
+    return template.format(skills_catalog=skills_catalog)
+
+
+def _read_local_agent_appendix() -> str:
+    agent_md_path = _get_workdir() / "AGENTS.md"
+    if not agent_md_path.exists():
+        return ""
+    try:
+        content = agent_md_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("prompt.agent_md.read_failed path=%s error=%s", agent_md_path, exc)
+        return ""
+    if not content:
+        return ""
+    return f"以下是当前工作目录下的 AGENTS.md 内容，请一并遵守：\n\n{content}"
+
+
+def _detect_git_repository(workdir: Path) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False, ""
+    if result.returncode != 0:
+        return False, ""
+    return True, result.stdout.strip()
+
+
+def _build_environment_appendix(*, agent: str, model: str, provider: str) -> str:
+    workdir = _get_workdir()
+    is_git_repo, git_root = _detect_git_repository(workdir)
+    now_text = datetime.now().astimezone().isoformat(timespec="seconds")
+    lines = [
+        "以下是当前运行环境信息：",
+        f"- agent: {agent}",
+        f"- provider: {provider or 'unknown'}",
+        f"- model: {model or 'unknown'}",
+        f"- workdir: {workdir}",
+        f"- is_git_repo: {'true' if is_git_repo else 'false'}",
+        f"- git_root: {git_root or 'N/A'}",
+        f"- current_datetime: {now_text}",
+    ]
+    return "\n".join(lines)
+
+
+def build_system_prompt(*, agent: str, model: str, provider: str) -> str:
+    base_prompt = _read_prompt_file(_resolve_prompt_path(agent, model))
+    parts = [
+        base_prompt,
+        _read_local_agent_appendix(),
+        _build_environment_appendix(agent=agent, model=model, provider=provider),
+    ]
+    return "\n\n".join(part for part in parts if part)
+
+
+def _get_system_prompt_for_mode(mode: MainAgentMode, *, model: str, provider: str) -> str:
+    return build_system_prompt(agent=mode, model=model, provider=provider)
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
@@ -400,7 +429,12 @@ def subagent_loop(
         user_input=prompt,
         session_id=session_id,
         tools=BASE_TOOL,
-        system_prompt=SUBAGENT_EXPLORE_SYSTEM,
+        system_prompt=build_system_prompt(
+            agent="explore",
+            model=(llm_config.model if llm_config else ""),
+            provider=(llm_config.provider if llm_config else ""),
+        ),
+        runtime_agent="explore",
         todo_tool_names={"todo_write", "todo_read"},
         llm_config=llm_config,
     )
@@ -488,6 +522,7 @@ def run_session(
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
+    runtime_agent: str | None = None,
 ) -> Message:
     """新会话入口：返回最终助手 Message（含结构化 parts）。"""
     active_session_id = set_session_id(session_id)
@@ -513,7 +548,18 @@ def run_session(
         initial_runtime = llm_config or resolve_llm_config("build")
         initial_provider_explicit = False
     initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
-    initial_system_prompt = _get_system_prompt_for_mode(initial_mode) if mode_enabled else (system_prompt or BUILD_SYSTEM)
+    initial_system_prompt = (
+        _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
+        if mode_enabled
+        else (
+            system_prompt
+            or build_system_prompt(
+                agent=runtime_agent or "build",
+                model=(llm_config.model if llm_config else ""),
+                provider=(llm_config.provider if llm_config else ""),
+            )
+        )
+    )
 
     todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
@@ -580,8 +626,12 @@ def run_session(
                 provider_specified=False,
             )
             selected_tools = _get_tools_for_mode(current_mode)
-            messages = _ensure_system_prompt(messages, _get_system_prompt_for_mode(current_mode), active_session_id)
-        active_agent = current_mode if mode_enabled else ("explore" if system_prompt == SUBAGENT_EXPLORE_SYSTEM else "build")
+            messages = _ensure_system_prompt(
+                messages,
+                _get_system_prompt_for_mode(current_mode, model=current_runtime.model, provider=current_runtime.provider),
+                active_session_id,
+            )
+        active_agent = current_mode if mode_enabled else (runtime_agent or "build")
 
         assistant_message = create_chat_completion(messages=messages, tools=selected_tools, llm_config=current_runtime)
         _set_message_runtime_info(
@@ -729,6 +779,7 @@ def run_session_stream_events(
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
+    runtime_agent: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """流式会话入口：逐步产出轮次/文本/工具事件。"""
     active_session_id = set_session_id(session_id)
@@ -754,7 +805,18 @@ def run_session_stream_events(
         initial_runtime = llm_config or resolve_llm_config("build")
         initial_provider_explicit = False
     initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
-    initial_system_prompt = _get_system_prompt_for_mode(initial_mode) if mode_enabled else (system_prompt or BUILD_SYSTEM)
+    initial_system_prompt = (
+        _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
+        if mode_enabled
+        else (
+            system_prompt
+            or build_system_prompt(
+                agent=runtime_agent or "build",
+                model=(llm_config.model if llm_config else ""),
+                provider=(llm_config.provider if llm_config else ""),
+            )
+        )
+    )
 
     todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
@@ -830,8 +892,12 @@ def run_session_stream_events(
                 provider_specified=False,
             )
             selected_tools = _get_tools_for_mode(current_mode)
-            messages = _ensure_system_prompt(messages, _get_system_prompt_for_mode(current_mode), active_session_id)
-        active_agent = current_mode if mode_enabled else ("explore" if system_prompt == SUBAGENT_EXPLORE_SYSTEM else "build")
+            messages = _ensure_system_prompt(
+                messages,
+                _get_system_prompt_for_mode(current_mode, model=current_runtime.model, provider=current_runtime.provider),
+                active_session_id,
+            )
+        active_agent = current_mode if mode_enabled else (runtime_agent or "build")
 
         yield {
             "type": "round_start",
