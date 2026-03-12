@@ -10,6 +10,7 @@
 ```text
 src/
   main.py                     # 轻量入口（示例运行）
+  web_main.py                 # FastAPI 启动入口（uvicorn 使用）
   agent/
     config/                   # 环境配置
       settings.py
@@ -25,6 +26,9 @@ src/
       main_agent_mode.py      # 主 agent 模式状态（build/plan）
       tool_executor.py        # ToolExecutor 与 Tool Hook
       compaction.py           # 上下文压缩
+    web/
+      app.py                  # Web API（SSE 聊天、历史查询、清空会话）
+      schemas.py              # Web 层请求/响应模型
     tools/
       handlers.py             # bash/read/write/edit/plan_enter/plan_exit 等工具实现
       specs.py                # 工具协议定义（BASE_TOOL/BUILD_AGENT_TOOL/PLAN_AGENT_TOOL）
@@ -34,6 +38,8 @@ src/
       runtime.py              # skills 发现、解析、按需加载
 tests/
   test_*.py                   # 核心行为回归测试
+frontend/
+  src/                        # React + TypeScript 前端页面
 ```
 
 ## 快速开始
@@ -42,19 +48,40 @@ tests/
 - 复制 `.env.example` 为 `.env`
 - 配置 `API_KEY`
 
-2. 运行示例：
+2. 安装依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+3. 运行 CLI 示例：
 
 ```bash
 python3 src/main.py
 ```
 
-3. 运行测试：
+4. 启动 Web 后端（FastAPI）：
+
+```bash
+uvicorn src.web_main:app --reload --host 127.0.0.1 --port 8000
+```
+
+5. 启动前端（React + Vite）：
+
+```bash
+cd frontend
+cp .env.example .env
+pnpm install
+pnpm dev
+```
+
+6. 运行测试：
 
 ```bash
 pytest -q
 ```
 
-4. 语法检查：
+7. 语法检查：
 
 ```bash
 python3 -m py_compile $(find src -name '*.py')

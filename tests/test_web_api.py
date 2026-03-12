@@ -1,0 +1,88 @@
+import json
+import re
+
+from fastapi.testclient import TestClient
+
+from agent.core.message import append_text_part, create_message
+from agent.runtime import session as session_runtime
+from agent.runtime.session import clear_session_memory, configure_session_memory_store
+from agent.runtime.session_memory import InMemorySessionMemoryStore
+from agent.web.app import create_app
+
+
+def test_index_should_return_api_overview():
+    app = create_app()
+    client = TestClient(app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "ok"
+    assert payload["chat_stream"] == "/api/chat/stream"
+
+
+def _stream_events(body_text: str) -> list[tuple[str, dict]]:
+    pattern = re.compile(r"event:\s*(?P<event>[a-zA-Z_]+)\s*data:\s*(?P<data>\{.*?\})(?:\n|$)", re.DOTALL)
+    parsed: list[tuple[str, dict]] = []
+    for match in pattern.finditer(body_text.replace("\r", "")):
+        event_type = match.group("event").strip()
+        data_payload = json.loads(match.group("data").strip())
+        parsed.append((event_type, data_payload))
+    return parsed
+
+
+def test_chat_stream_should_return_chunk_and_done(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def fake_run_session(user_input: str, session_id: str | None = None, mode: str | None = None, **kwargs):
+        message = create_message("assistant", session_id or "default", status="completed")
+        append_text_part(message, f"回答: {user_input}")
+        return message
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session", fake_run_session)
+
+    with client.stream("POST", "/api/chat/stream", json={"session_id": "s_web", "user_input": "你好", "mode": "build"}) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+
+    events = _stream_events(body)
+    assert any(evt == "chunk" for evt, _ in events)
+    assert any(evt == "done" for evt, _ in events)
+
+
+def test_get_session_messages_and_clear():
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_hist")
+
+    user_msg = create_message("user", "s_hist", status="completed")
+    append_text_part(user_msg, "第一轮")
+    assistant_msg = create_message("assistant", "s_hist", status="completed")
+    append_text_part(assistant_msg, "第一轮回答")
+    session_runtime.SESSION_MEMORY_STORE.save("s_hist", [user_msg, assistant_msg])
+
+    app = create_app()
+    client = TestClient(app)
+
+    resp = client.get("/api/sessions/s_hist/messages?limit=20")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["session_id"] == "s_hist"
+    assert len(payload["messages"]) >= 2
+
+    clear_resp = client.delete("/api/sessions/s_hist")
+    assert clear_resp.status_code == 200
+
+    resp_after_clear = client.get("/api/sessions/s_hist/messages?limit=20")
+    assert resp_after_clear.status_code == 200
+    assert resp_after_clear.json()["messages"] == []
+
+
+def test_chat_stream_should_validate_session_id():
+    app = create_app()
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/chat/stream",
+        json={"session_id": "invalid id", "user_input": "hi", "mode": "build"},
+    )
+    assert resp.status_code == 422

@@ -1,0 +1,250 @@
+:root {
+  --bg-0: #f7f5ef;
+  --bg-1: #e8f3ef;
+  --ink: #172226;
+  --muted: #5e6a6f;
+  --panel: rgba(255, 255, 255, 0.86);
+  --line: rgba(23, 34, 38, 0.14);
+  --accent: #0e8a68;
+  --accent-strong: #056f52;
+  --assistant: #effaf5;
+  --user: #0f2f42;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Avenir Next", "SF Pro Display", "IBM Plex Sans", "PingFang SC", sans-serif;
+  background: radial-gradient(circle at 0% 0%, #d3e6dd 0%, transparent 36%),
+    radial-gradient(circle at 100% 100%, #d6e8f7 0%, transparent 38%),
+    linear-gradient(130deg, var(--bg-0), var(--bg-1));
+}
+
+.page-shell {
+  min-height: 100vh;
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+}
+
+.bg-orb {
+  position: absolute;
+  filter: blur(50px);
+  border-radius: 999px;
+  opacity: 0.48;
+  pointer-events: none;
+}
+
+.bg-orb-a {
+  width: 260px;
+  height: 260px;
+  background: #9ed8c4;
+  top: 8%;
+  left: 7%;
+  animation: driftA 12s ease-in-out infinite;
+}
+
+.bg-orb-b {
+  width: 300px;
+  height: 300px;
+  background: #a7c8f1;
+  right: 6%;
+  bottom: 8%;
+  animation: driftB 15s ease-in-out infinite;
+}
+
+.chat-card {
+  width: min(980px, 100%);
+  height: min(88vh, 920px);
+  display: grid;
+  grid-template-rows: auto auto 1fr auto auto;
+  gap: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  padding: 20px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 18px 60px rgba(14, 38, 30, 0.14);
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chat-header h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.chat-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.session-row input {
+  width: 100%;
+}
+
+.message-list {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.empty-state {
+  color: var(--muted);
+}
+
+.message-item {
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  animation: fadeIn 0.25s ease;
+}
+
+.message-item.user {
+  background: var(--user);
+  color: #ecf6ff;
+  margin-left: 14%;
+}
+
+.message-item.assistant {
+  background: var(--assistant);
+  border: 1px solid rgba(14, 138, 104, 0.17);
+  margin-right: 14%;
+}
+
+.message-role {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  margin-bottom: 4px;
+}
+
+.message-text {
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+textarea,
+input,
+button {
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  font: inherit;
+}
+
+textarea,
+input {
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+textarea {
+  resize: none;
+}
+
+button {
+  padding: 10px 16px;
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-strong);
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ghost-btn {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+.error-text {
+  color: #a22a2a;
+  margin: 0;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes driftA {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(22px, -12px);
+  }
+}
+
+@keyframes driftB {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(-18px, 14px);
+  }
+}
+
+@media (max-width: 768px) {
+  .chat-card {
+    min-height: 94vh;
+    border-radius: 16px;
+    padding: 14px;
+  }
+
+  .session-row {
+    grid-template-columns: 1fr;
+  }
+
+  .composer {
+    grid-template-columns: 1fr;
+  }
+
+  .message-item.user,
+  .message-item.assistant {
+    margin-left: 0;
+    margin-right: 0;
+  }
+}
