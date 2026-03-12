@@ -7,6 +7,7 @@ from agent.adapters.llm.client import (
     LoggingHook,
     clear_global_hooks,
     create_chat_completion,
+    create_chat_completion_stream,
     register_global_hook,
 )
 from agent.core.message import append_text_part, create_message
@@ -145,3 +146,42 @@ def test_on_error_hook_called_when_provider_fails(monkeypatch):
 
     assert result["info"]["status"] == "failed"
     assert recorder == ["timeout"]
+
+
+def test_stream_should_yield_delta_and_return_message(monkeypatch):
+    import agent.adapters.llm.client as client_module
+
+    class Delta:
+        def __init__(self, content):
+            self.content = content
+            self.tool_calls = []
+
+    class Choice:
+        def __init__(self, content, finish_reason=""):
+            self.delta = Delta(content)
+            self.finish_reason = finish_reason
+
+    class Chunk:
+        def __init__(self, content, finish_reason=""):
+            self.choices = [Choice(content, finish_reason=finish_reason)]
+            self.usage = None
+
+    def _fake_stream(**kwargs):
+        yield Chunk("流")
+        yield Chunk("式")
+        yield Chunk("", finish_reason="stop")
+
+    monkeypatch.setattr(client_module.client.chat.completions, "create", _fake_stream)
+    stream = create_chat_completion_stream(_build_user_message(), tools=[])
+
+    deltas: list[str] = []
+    while True:
+        try:
+            item = next(stream)
+            deltas.append(str(item.get("delta", "")))
+        except StopIteration as stop:
+            final_message = stop.value
+            break
+
+    assert "".join(deltas) == "流式"
+    assert final_message["info"]["status"] == "completed"

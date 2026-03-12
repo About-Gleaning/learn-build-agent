@@ -34,19 +34,25 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     app = create_app()
     client = TestClient(app)
 
-    def fake_run_session(user_input: str, session_id: str | None = None, mode: str | None = None, **kwargs):
-        message = create_message("assistant", session_id or "default", status="completed")
-        append_text_part(message, f"回答: {user_input}")
-        return message
+    def fake_stream_events(user_input: str, session_id: str | None = None, mode: str | None = None, **kwargs):
+        assert user_input == "你好"
+        yield {"type": "start", "session_id": session_id or "default", "mode": mode or "build", "started_at": "t1"}
+        yield {"type": "round_start", "round": 1, "agent": "build", "started_at": "t2"}
+        yield {"type": "text_delta", "round": 1, "delta": "回答"}
+        yield {"type": "text_delta", "round": 1, "delta": ": 你好"}
+        yield {"type": "round_end", "round": 1, "status": "completed", "finish_reason": "stop", "completed_at": "t3"}
+        yield {"type": "done", "session_id": session_id or "default", "message_id": "m_1", "status": "completed"}
 
-    monkeypatch.setattr("agent.web.app.session_runtime.run_session", fake_run_session)
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
 
     with client.stream("POST", "/api/chat/stream", json={"session_id": "s_web", "user_input": "你好", "mode": "build"}) as resp:
         assert resp.status_code == 200
         body = "".join(resp.iter_text())
 
     events = _stream_events(body)
-    assert any(evt == "chunk" for evt, _ in events)
+    assert any(evt == "start" for evt, _ in events)
+    assert any(evt == "round_start" for evt, _ in events)
+    assert any(evt == "text_delta" for evt, _ in events)
     assert any(evt == "done" for evt, _ in events)
 
 

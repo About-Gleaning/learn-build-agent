@@ -1,8 +1,11 @@
 import logging
+import re
+import json
 from pathlib import Path
+from collections.abc import Generator
 from typing import Any, Callable, Literal
 
-from ..adapters.llm.client import create_chat_completion
+from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..core.context import set_session_id
 from ..core.message import (
     EVENT_BUS,
@@ -113,6 +116,11 @@ You are a coding subagent at {WORKDIR}.
 
 TODO = TodoManager()
 SESSION_MEMORY_STORE: SessionMemoryStore = InMemorySessionMemoryStore(max_messages=24)
+
+_SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._-]{12,}"),
+]
 
 
 def _get_system_prompt_for_mode(mode: MainAgentMode) -> str:
@@ -274,6 +282,28 @@ def _build_tool_message(
         turn_completed_at=utc_now_iso(),
     )
     return message
+
+
+def _sanitize_preview(text: str, *, limit: int = 220) -> str:
+    normalized = text.replace("\r", " ").replace("\n", " ").strip()
+    if not normalized:
+        return ""
+    masked = normalized
+    for pattern in _SECRET_PATTERNS:
+        masked = pattern.sub("[MASKED]", masked)
+    if len(masked) > limit:
+        return masked[:limit] + "...<truncated>"
+    return masked
+
+
+def _tool_result_preview(result: ToolResult) -> str:
+    raw_output = result.get("output", "")
+    if isinstance(raw_output, str):
+        return _sanitize_preview(raw_output)
+    try:
+        return _sanitize_preview(json.dumps(raw_output, ensure_ascii=False))
+    except Exception:
+        return _sanitize_preview(str(raw_output))
 
 
 def configure_session_memory_store(store: SessionMemoryStore) -> None:
@@ -547,6 +577,285 @@ def run_session(
             if mode_enabled:
                 SESSION_MEMORY_STORE.save(active_session_id, messages)
             return message
+
+        if non_todo_round_streak >= 3:
+            messages.append(_build_text_message("user", todo_reminder_text, active_session_id))
+
+
+def run_session_stream_events(
+    user_input: str,
+    session_id: str | None = None,
+    *,
+    mode: MainAgentMode | None = None,
+    tools: list[dict] | None = None,
+    system_prompt: str | None = None,
+    todo_tool_names: set[str] | None = None,
+    tool_hooks: list[ToolHook] | None = None,
+) -> Generator[dict[str, Any], None, None]:
+    """流式会话入口：逐步产出轮次/文本/工具事件。"""
+    active_session_id = set_session_id(session_id)
+    turn_started_at = utc_now_iso()
+    mode_enabled = tools is None and system_prompt is None
+
+    initial_mode: MainAgentMode = "build"
+    if mode in {"build", "plan"}:
+        initial_mode = mode
+
+    history_messages: list[Message] = SESSION_MEMORY_STORE.load(active_session_id) if mode_enabled else []
+    if mode is None and mode_enabled and history_messages:
+        initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
+
+    initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
+    initial_system_prompt = _get_system_prompt_for_mode(initial_mode) if mode_enabled else (system_prompt or BUILD_SYSTEM)
+
+    todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
+    effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
+
+    todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
+    non_todo_round_streak = 0
+
+    user_meta: dict[str, Any] | None = None
+    if mode_enabled:
+        user_meta = {"agent": initial_mode}
+
+    messages: list[Message] = [
+        _build_text_message("system", initial_system_prompt, active_session_id),
+        *history_messages,
+        _build_text_message("user", user_input, active_session_id, text_meta=user_meta),
+    ]
+
+    current_mode: MainAgentMode = initial_mode
+
+    tool_executor = ToolExecutor(
+        _build_tool_handlers(
+            session_id=active_session_id,
+            get_mode=lambda: current_mode,
+            get_latest_model=lambda: _latest_model(messages),
+        )
+    )
+
+    yield {
+        "type": "start",
+        "session_id": active_session_id,
+        "mode": initial_mode,
+        "started_at": turn_started_at,
+    }
+
+    round_no = 0
+    while True:
+        round_no += 1
+        messages = compact(messages)
+
+        logger.debug(
+            "session.stream.round.start session_id=%s round=%d message_count=%d",
+            active_session_id,
+            round_no,
+            len(messages),
+        )
+
+        selected_tools = initial_tools
+        if mode_enabled:
+            current_mode = _resolve_mode_from_messages(messages, fallback=initial_mode)
+            selected_tools = _get_tools_for_mode(current_mode)
+            messages = _ensure_system_prompt(messages, _get_system_prompt_for_mode(current_mode), active_session_id)
+        active_agent = current_mode if mode_enabled else ("explore" if system_prompt == SUBAGENT_EXPLORE_SYSTEM else "build")
+
+        yield {
+            "type": "round_start",
+            "round": round_no,
+            "agent": active_agent,
+            "started_at": utc_now_iso(),
+        }
+
+        stream_iter = create_chat_completion_stream(messages=messages, tools=selected_tools)
+        while True:
+            try:
+                stream_event = next(stream_iter)
+            except StopIteration as stop:
+                assistant_message = stop.value
+                break
+
+            if stream_event.get("type") == "text_delta":
+                delta = str(stream_event.get("delta", ""))
+                if delta:
+                    yield {
+                        "type": "text_delta",
+                        "round": round_no,
+                        "delta": delta,
+                    }
+
+        _set_message_runtime_info(assistant_message, agent=active_agent, turn_started_at=turn_started_at)
+        messages.append(assistant_message)
+
+        tool_calls = extract_tool_calls(assistant_message)
+        has_tool_calls = bool(tool_calls)
+
+        if has_tool_calls:
+            has_todo_call = any(tc["name"] in todo_names for tc in tool_calls)
+            if has_todo_call:
+                non_todo_round_streak = 0
+            else:
+                non_todo_round_streak += 1
+
+            for tool_call in tool_calls:
+                yield {
+                    "type": "tool_call",
+                    "round": round_no,
+                    "tool_call_id": tool_call["id"],
+                    "name": tool_call["name"],
+                    "arguments": tool_call["arguments"],
+                }
+
+        if not has_tool_calls:
+            assistant_message["info"]["turn_completed_at"] = utc_now_iso()
+            if mode_enabled:
+                SESSION_MEMORY_STORE.save(active_session_id, messages)
+            yield {
+                "type": "round_end",
+                "round": round_no,
+                "status": assistant_message["info"].get("status", "completed"),
+                "finish_reason": assistant_message["info"].get("finish_reason", "stop"),
+                "completed_at": utc_now_iso(),
+            }
+            yield {
+                "type": "done",
+                "session_id": active_session_id,
+                "message_id": str(assistant_message["info"].get("message_id", "")),
+                "status": assistant_message["info"].get("status", "completed"),
+                "completed_at": utc_now_iso(),
+            }
+            return
+
+        should_interrupt = False
+        for tool_call in tool_calls:
+            result = tool_executor.execute(
+                tool_call["name"],
+                tool_call["arguments"],
+                session_id=active_session_id,
+                tool_call_id=tool_call["id"],
+                round_no=round_no,
+                hooks=effective_tool_hooks,
+            )
+            messages.append(
+                _build_tool_message(
+                    active_session_id,
+                    tool_call_id=tool_call["id"],
+                    tool_name=tool_call["name"],
+                    arguments=tool_call["arguments"],
+                    result=result,
+                    agent=active_agent,
+                    turn_started_at=turn_started_at,
+                )
+            )
+            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            yield {
+                "type": "tool_result",
+                "round": round_no,
+                "tool_call_id": tool_call["id"],
+                "name": tool_call["name"],
+                "status": str(metadata.get("status", "completed")),
+                "output_preview": _tool_result_preview(result),
+            }
+
+            if tool_call["name"] not in {"plan_enter", "plan_exit"}:
+                continue
+
+            status = str(metadata.get("status", "")).strip().lower()
+
+            if status == "confirmation_required":
+                output_text = str(result.get("output", "请确认后继续。"))
+                question = str(metadata.get("confirmation_question", "是否继续？"))
+                interrupted_message = _build_confirmation_interrupted_message(
+                    active_session_id,
+                    tool_name=tool_call["name"],
+                    output_text=output_text,
+                    question=question,
+                    metadata=metadata,
+                )
+                _set_message_runtime_info(
+                    interrupted_message,
+                    agent=active_agent,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=utc_now_iso(),
+                )
+                messages.append(interrupted_message)
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                yield {
+                    "type": "round_end",
+                    "round": round_no,
+                    "status": interrupted_message["info"].get("status", "interrupted"),
+                    "finish_reason": interrupted_message["info"].get("finish_reason", "confirmation_required"),
+                    "completed_at": utc_now_iso(),
+                }
+                yield {
+                    "type": "done",
+                    "session_id": active_session_id,
+                    "message_id": str(interrupted_message["info"].get("message_id", "")),
+                    "status": interrupted_message["info"].get("status", "interrupted"),
+                    "completed_at": utc_now_iso(),
+                }
+                return
+
+            if status == "switched":
+                synthetic_agent = str(metadata.get("synthetic_agent", "")).strip().lower()
+                synthetic_text = str(metadata.get("synthetic_user_message", "")).strip()
+                plan_path = str(metadata.get("plan_path", "")).strip()
+                model_name = str(metadata.get("model", "")).strip()
+
+                if synthetic_agent in {"build", "plan"} and synthetic_text:
+                    _append_synthetic_user_message(
+                        messages,
+                        session_id=active_session_id,
+                        agent=synthetic_agent,  # type: ignore[arg-type]
+                        text=synthetic_text,
+                        plan_path=plan_path,
+                        model=model_name,
+                    )
+
+            if status == "cancelled":
+                should_interrupt = True
+
+        if should_interrupt:
+            message = create_message(
+                role="assistant",
+                session_id=active_session_id,
+                status="interrupted",
+                finish_reason="cancelled",
+            )
+            append_text_part(message, "用户取消了模式切换，当前流程已中断。")
+            _set_message_runtime_info(
+                message,
+                agent=active_agent,
+                turn_started_at=turn_started_at,
+                turn_completed_at=utc_now_iso(),
+            )
+            messages.append(message)
+            if mode_enabled:
+                SESSION_MEMORY_STORE.save(active_session_id, messages)
+            yield {
+                "type": "round_end",
+                "round": round_no,
+                "status": "interrupted",
+                "finish_reason": "cancelled",
+                "completed_at": utc_now_iso(),
+            }
+            yield {
+                "type": "done",
+                "session_id": active_session_id,
+                "message_id": str(message["info"].get("message_id", "")),
+                "status": "interrupted",
+                "completed_at": utc_now_iso(),
+            }
+            return
+
+        yield {
+            "type": "round_end",
+            "round": round_no,
+            "status": "completed",
+            "finish_reason": "tool_call",
+            "completed_at": utc_now_iso(),
+        }
 
         if non_todo_round_streak >= 3:
             messages.append(_build_text_message("user", todo_reminder_text, active_session_id))

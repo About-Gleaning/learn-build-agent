@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agent.runtime.session import clear_session_memory, configure_session_memory_store, run_session
+from agent.runtime.session import clear_session_memory, configure_session_memory_store, run_session, run_session_stream_events
 from agent.runtime.session_memory import InMemorySessionMemoryStore, SessionMemoryStore
 from agent.core.message import (
     append_text_part,
@@ -292,3 +292,49 @@ def test_run_session_should_use_configured_memory_store(monkeypatch):
         assert get_message_text(result) == "ok"
     finally:
         configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+
+
+def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None):
+        session_id = messages[-1]["info"]["session_id"]
+        yield {"type": "text_delta", "delta": "流式"}
+        yield {"type": "text_delta", "delta": "回答"}
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "流式回答")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("你好", session_id="s_stream_1"))
+    event_names = [event["type"] for event in events]
+    text = "".join(event.get("delta", "") for event in events if event["type"] == "text_delta")
+
+    assert "start" in event_names
+    assert "round_start" in event_names
+    assert "round_end" in event_names
+    assert "done" in event_names
+    assert text == "流式回答"
+
+
+def test_run_session_stream_events_should_emit_tool_events(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(assistant, tool_call_id="call_1", name="todo_read", arguments="{}")
+        else:
+            append_text_part(assistant, "ok")
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("测试工具", session_id="s_stream_2"))
+    event_names = [event["type"] for event in events]
+
+    assert "tool_call" in event_names
+    assert "tool_result" in event_names
+    assert event_names[-1] == "done"

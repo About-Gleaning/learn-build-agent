@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,35 +25,22 @@ def _to_message_vo(message: Message) -> MessageVO:
     )
 
 
-def _chunk_text(text: str, *, chunk_size: int = 24) -> list[str]:
-    stripped = text.strip()
-    if not stripped:
-        return [""]
-    return [stripped[index : index + chunk_size] for index in range(0, len(stripped), chunk_size)]
-
-
 def _sse_event(event: str, payload: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
     try:
-        result = session_runtime.run_session(
+        for event in session_runtime.run_session_stream_events(
             user_input=req.user_input,
             session_id=req.session_id,
             mode=req.mode,
-        )
-        full_text = get_message_text(result)
-        for piece in _chunk_text(full_text):
-            yield _sse_event("chunk", {"delta": piece})
-
-        yield _sse_event(
-            "done",
-            {
-                "message_id": str(result["info"].get("message_id", "")),
-                "session_id": req.session_id,
-            },
-        )
+        ):
+            event_type = str(event.get("type", "")).strip()
+            if not event_type:
+                continue
+            payload: dict[str, Any] = {k: v for k, v in event.items() if k != "type"}
+            yield _sse_event(event_type, payload)
     except Exception as exc:  # pragma: no cover - 兜底分支
         yield _sse_event(
             "error",
@@ -96,7 +84,15 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/stream")
     def chat_stream(req: ChatStreamReq) -> StreamingResponse:
-        return StreamingResponse(_stream_chat(req), media_type="text/event-stream")
+        return StreamingResponse(
+            _stream_chat(req),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/api/sessions/{session_id}/messages", response_model=SessionMessagesVO)
     def get_session_messages(session_id: str, limit: int = Query(default=50, ge=1, le=200)) -> SessionMessagesVO:

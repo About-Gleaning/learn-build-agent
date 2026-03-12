@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Generator
 from typing import Any, TypedDict
 
 from openai import OpenAI
@@ -8,9 +9,13 @@ from ...config.settings import API_KEY, BASE_URL, LOG_LEVEL, MODEL
 from ...core.hooks import HookDispatcher
 from ...core.message import (
     Message,
+    append_text_part,
+    append_tool_part,
     count_parts,
+    create_message,
     create_error_message,
     estimate_message_size,
+    mark_message_completed,
     normalize_error,
     parse_provider_response,
     to_provider_messages,
@@ -234,6 +239,133 @@ def create_chat_completion(
         _invoke_hook(hook, "after", ctx=ctx, message=message)
 
     return message
+
+
+def create_chat_completion_stream(
+    messages: list[Message],
+    tools: list[dict[str, Any]],
+    max_tokens: int = 4096,
+    hooks: list[LLMHook] | None = None,
+) -> Generator[dict[str, Any], None, Message]:
+    """流式调用大模型，逐步产出文本增量并在结束时返回完整 Message。"""
+    session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
+    parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
+
+    request_payload = adapter.build_request(messages, tools)
+    request_payload["max_tokens"] = max_tokens
+    request_payload["stream"] = True
+
+    ctx: HookContext = {
+        "session_id": session_id,
+        "model": adapter.model,
+        "parent_id": parent_id,
+        "max_tokens": max_tokens,
+        "message_count": len(messages),
+        "tools_count": len(tools),
+        "request_size": sum(estimate_message_size(msg) for msg in messages),
+        "request_payload": request_payload,
+    }
+
+    effective_hooks = get_global_hooks() + (hooks or [])
+    for hook in effective_hooks:
+        _invoke_hook(hook, "before", ctx=ctx)
+
+    start = time.perf_counter()
+    ctx["start_time"] = start
+
+    finish_reason = "stop"
+    text_buffer: list[str] = []
+    tool_call_map: dict[int, dict[str, str]] = {}
+    usage_payload: dict[str, int] | None = None
+
+    try:
+        stream = client.chat.completions.create(**request_payload)
+        for chunk in stream:
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
+                usage_payload = {
+                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                    "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                }
+
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            chunk_finish_reason = str(getattr(choice, "finish_reason", "") or "").strip()
+            if chunk_finish_reason:
+                finish_reason = chunk_finish_reason
+
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+
+            delta_content = getattr(delta, "content", None)
+            if delta_content:
+                delta_text = str(delta_content)
+                text_buffer.append(delta_text)
+                yield {"type": "text_delta", "delta": delta_text}
+
+            for tool_call in getattr(delta, "tool_calls", None) or []:
+                index = int(getattr(tool_call, "index", 0) or 0)
+                state = tool_call_map.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                tc_id = str(getattr(tool_call, "id", "") or "")
+                if tc_id:
+                    state["id"] = tc_id
+                function_obj = getattr(tool_call, "function", None)
+                if function_obj is None:
+                    continue
+                tc_name = str(getattr(function_obj, "name", "") or "")
+                if tc_name:
+                    state["name"] = tc_name
+                tc_arguments = str(getattr(function_obj, "arguments", "") or "")
+                if tc_arguments:
+                    state["arguments"] += tc_arguments
+    except Exception as exc:
+        ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
+        normalized = normalize_error(exc)
+        for hook in effective_hooks:
+            _invoke_hook(hook, "error", ctx=ctx, error=exc, normalized_error=normalized)
+        return create_error_message(
+            session_id=session_id,
+            model=adapter.model,
+            error=normalized,
+            parent_id=parent_id,
+        )
+
+    assistant = create_message(
+        "assistant",
+        session_id,
+        model=adapter.model,
+        status="running",
+        finish_reason=finish_reason,
+        parent_id=parent_id,
+    )
+
+    if text_buffer:
+        append_text_part(assistant, "".join(text_buffer))
+
+    for index in sorted(tool_call_map.keys()):
+        tool_call = tool_call_map[index]
+        if not tool_call["id"] or not tool_call["name"]:
+            continue
+        append_tool_part(
+            assistant,
+            tool_call_id=tool_call["id"],
+            name=tool_call["name"],
+            status="requested",
+            arguments=tool_call["arguments"] or "{}",
+        )
+
+    if usage_payload is not None:
+        assistant["info"]["token_usage"] = usage_payload
+
+    mark_message_completed(assistant, finish_reason=assistant["info"].get("finish_reason", "stop") or "stop")
+    ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
+    for hook in effective_hooks:
+        _invoke_hook(hook, "after", ctx=ctx, message=assistant)
+    return assistant
 
 
 _default_hooks()

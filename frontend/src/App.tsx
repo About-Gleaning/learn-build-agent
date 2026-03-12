@@ -10,6 +10,14 @@ type UiMessage = {
   status: string;
 };
 
+type TimelineItem = {
+  id: string;
+  kind: string;
+  title: string;
+  detail: string;
+  createdAt: string;
+};
+
 type HistoryResp = {
   session_id: string;
   messages: Array<{
@@ -32,6 +40,16 @@ function buildSessionId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 10);
   return `s_${ts}_${rand}`;
+}
+
+function readString(payload: Record<string, unknown>, key: string, fallback = ""): string {
+  const value = payload[key];
+  return typeof value === "string" ? value : fallback;
+}
+
+function readNumber(payload: Record<string, unknown>, key: string, fallback = 0): number {
+  const value = payload[key];
+  return typeof value === "number" ? value : fallback;
 }
 
 async function loadHistory(sessionId: string): Promise<UiMessage[]> {
@@ -62,6 +80,7 @@ async function streamChat(params: {
   sessionId: string;
   userInput: string;
   onDelta: (delta: string) => void;
+  onEvent: (eventName: string, payload: Record<string, unknown>) => void;
 }): Promise<void> {
   const resp = await fetch(`${API_BASE}/api/chat/stream`, {
     method: "POST",
@@ -82,6 +101,7 @@ async function streamChat(params: {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
+  let hasDoneEvent = false;
 
   const parseEvent = (rawEvent: string): { event: string; data: string } => {
     const lines = rawEvent.split("\n");
@@ -99,7 +119,9 @@ async function streamChat(params: {
 
   while (true) {
     const { done, value } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+    }
 
     let splitIndex = buffer.indexOf("\n\n");
     while (splitIndex >= 0) {
@@ -107,17 +129,27 @@ async function streamChat(params: {
       buffer = buffer.slice(splitIndex + 2);
       if (raw.trim()) {
         const event = parseEvent(raw);
-        const payload = event.data ? (JSON.parse(event.data) as Record<string, string>) : {};
+        const payload = event.data ? (JSON.parse(event.data) as Record<string, unknown>) : {};
+        params.onEvent(event.event, payload);
 
-        if (event.event === "chunk") {
-          params.onDelta(payload.delta || "");
+        if (event.event === "text_delta") {
+          params.onDelta(readString(payload, "delta"));
+        }
+
+        if (event.event === "done") {
+          hasDoneEvent = true;
         }
 
         if (event.event === "error") {
-          throw new Error(payload.message || "服务端返回错误");
+          throw new Error(readString(payload, "message", "服务端返回错误"));
         }
       }
       splitIndex = buffer.indexOf("\n\n");
+    }
+
+    if (hasDoneEvent) {
+      await reader.cancel();
+      break;
     }
 
     if (done) {
@@ -126,10 +158,98 @@ async function streamChat(params: {
   }
 }
 
+function buildTimelineItem(eventName: string, payload: Record<string, unknown>): TimelineItem | null {
+  const now = new Date().toISOString();
+  if (eventName === "text_delta") {
+    return null;
+  }
+
+  if (eventName === "start") {
+    return {
+      id: buildId("timeline"),
+      kind: "start",
+      title: "会话开始",
+      detail: `模式: ${readString(payload, "mode", "build")}`,
+      createdAt: readString(payload, "started_at", now),
+    };
+  }
+
+  if (eventName === "round_start") {
+    const roundNo = readNumber(payload, "round", 0);
+    return {
+      id: buildId("timeline"),
+      kind: "round_start",
+      title: `第 ${roundNo} 轮开始`,
+      detail: `执行代理: ${readString(payload, "agent", "unknown")}`,
+      createdAt: readString(payload, "started_at", now),
+    };
+  }
+
+  if (eventName === "tool_call") {
+    return {
+      id: buildId("timeline"),
+      kind: "tool_call",
+      title: `调用工具: ${readString(payload, "name", "unknown")}`,
+      detail: readString(payload, "arguments", "{}"),
+      createdAt: now,
+    };
+  }
+
+  if (eventName === "tool_result") {
+    return {
+      id: buildId("timeline"),
+      kind: "tool_result",
+      title: `工具结果: ${readString(payload, "name", "unknown")}`,
+      detail: `${readString(payload, "status", "completed")} ${readString(payload, "output_preview")}`.trim(),
+      createdAt: now,
+    };
+  }
+
+  if (eventName === "round_end") {
+    const roundNo = readNumber(payload, "round", 0);
+    return {
+      id: buildId("timeline"),
+      kind: "round_end",
+      title: `第 ${roundNo} 轮结束`,
+      detail: `状态: ${readString(payload, "status", "completed")}`,
+      createdAt: readString(payload, "completed_at", now),
+    };
+  }
+
+  if (eventName === "done") {
+    return {
+      id: buildId("timeline"),
+      kind: "done",
+      title: "会话完成",
+      detail: `最终状态: ${readString(payload, "status", "completed")}`,
+      createdAt: readString(payload, "completed_at", now),
+    };
+  }
+
+  if (eventName === "error") {
+    return {
+      id: buildId("timeline"),
+      kind: "error",
+      title: "会话异常",
+      detail: readString(payload, "message", "未知错误"),
+      createdAt: now,
+    };
+  }
+
+  return {
+    id: buildId("timeline"),
+    kind: eventName,
+    title: `事件: ${eventName}`,
+    detail: JSON.stringify(payload),
+    createdAt: now,
+  };
+}
+
 export function App() {
   const [sessionId, setSessionId] = useState(() => buildSessionId());
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<UiMessage[]>([]);
+  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [error, setError] = useState("");
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -162,6 +282,8 @@ export function App() {
 
     setError("");
     setInput("");
+    setTimeline([]);
+
     const now = new Date().toISOString();
     const userMessage: UiMessage = {
       id: buildId("user"),
@@ -182,6 +304,8 @@ export function App() {
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setIsStreaming(true);
 
+    let finalStatus = "completed";
+
     try {
       await streamChat({
         sessionId,
@@ -199,17 +323,29 @@ export function App() {
             )
           );
         },
+        onEvent: (eventName, payload) => {
+          const item = buildTimelineItem(eventName, payload);
+          if (item) {
+            setTimeline((prev) => [...prev, item]);
+          }
+          if (eventName === "done") {
+            finalStatus = readString(payload, "status", "completed");
+          }
+        },
       });
 
       setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantId
-            ? {
-                ...msg,
-                status: "completed",
-              }
-            : msg
-        )
+        prev.map((msg) => {
+          if (msg.id !== assistantId) {
+            return msg;
+          }
+          const normalizedStatus = finalStatus || "completed";
+          return {
+            ...msg,
+            status: normalizedStatus,
+            text: msg.text || (normalizedStatus === "interrupted" ? "流程已中断。" : msg.text),
+          };
+        })
       );
     } catch (err) {
       setError((err as Error).message || "发送失败");
@@ -237,6 +373,7 @@ export function App() {
     try {
       await clearHistory(sessionId);
       setMessages([]);
+      setTimeline([]);
     } catch (err) {
       setError((err as Error).message || "清空失败");
     }
@@ -280,6 +417,19 @@ export function App() {
               <div className="message-text">{msg.text || (msg.status === "running" ? "思考中..." : "")}</div>
             </article>
           ))}
+        </section>
+
+        <section className="timeline-panel">
+          <div className="timeline-title">阶段时间线</div>
+          <div className="timeline-list">
+            {timeline.length === 0 ? <p className="empty-state">流式事件将在这里展示。</p> : null}
+            {timeline.map((item) => (
+              <article key={item.id} className={`timeline-item ${item.kind}`}>
+                <div className="timeline-item-title">{item.title}</div>
+                <div className="timeline-item-detail">{item.detail}</div>
+              </article>
+            ))}
+          </div>
         </section>
 
         <form className="composer" onSubmit={handleSubmit}>
