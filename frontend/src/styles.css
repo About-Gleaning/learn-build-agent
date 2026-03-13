@@ -173,15 +173,16 @@ select:focus-visible {
 .conversation-card,
 .timeline-card {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
 }
 
 .dialogue-panel {
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 202px;
+  /* 输入区需要容纳左侧配置和右侧文本框，使用自适应高度避免表单项被裁切。 */
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 12px;
   overflow: hidden;
 }
@@ -396,6 +397,7 @@ button:disabled {
 .message-list,
 .timeline-list {
   min-height: 0;
+  flex: 1;
   overflow: auto;
   padding-right: 6px;
 }
@@ -548,7 +550,7 @@ button:disabled {
   display: grid;
   gap: 12px;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .composer-panel {

@@ -167,15 +167,6 @@ async function loadHistory(sessionId: string): Promise<UiMessage[]> {
   }));
 }
 
-async function clearHistory(sessionId: string): Promise<void> {
-  const resp = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "DELETE",
-  });
-  if (!resp.ok) {
-    throw new Error(`清空失败: ${resp.status}`);
-  }
-}
-
 async function streamChat(params: {
   sessionId: string;
   userInput: string;
@@ -381,7 +372,6 @@ export function App() {
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [error, setError] = useState("");
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeOptionsResp | null>(null);
-  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingOptions, setIsLoadingOptions] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [copyHint, setCopyHint] = useState("");
@@ -395,9 +385,6 @@ export function App() {
   const timelineListRef = useRef<HTMLDivElement>(null);
 
   const canSubmit = useMemo(() => input.trim().length > 0 && !isStreaming, [input, isStreaming]);
-  const messageCount = messages.length;
-  const timelineCount = timeline.length;
-  const statusText = isStreaming ? "运行中" : "空闲";
   const latestMessage = messages[messages.length - 1] || null;
 
   const modeDefaults = useMemo(() => {
@@ -431,9 +418,6 @@ export function App() {
     "--";
   const currentRuntimeSummary = `${mode} / ${displayProvider} / ${displayModel}`;
   const followText = shouldFollow ? "自动跟随开启" : "自动跟随关闭";
-  const composerHint =
-    copyHint || (isStreaming ? "助手正在实时生成响应。" : "Enter 发送，Shift + Enter 换行，Shift + Tab 切换 Agent。");
-  const workspaceTone = isStreaming ? "实时协作中" : "准备就绪";
 
   useEffect(() => {
     if (!copyHint) {
@@ -478,15 +462,12 @@ export function App() {
   }, [runtimeOptions, mode, provider, providerNames, modeDefaults]);
 
   const refreshHistory = async () => {
-    setIsLoadingHistory(true);
     setError("");
     try {
       const history = await loadHistory(sessionId);
       setMessages(history.filter((msg) => msg.role === "user" || msg.role === "assistant"));
     } catch (err) {
       setError((err as Error).message || "历史加载失败");
-    } finally {
-      setIsLoadingHistory(false);
     }
   };
 
@@ -613,22 +594,6 @@ export function App() {
     }
   };
 
-  const handleClear = async () => {
-    if (isStreaming) {
-      return;
-    }
-    setError("");
-    try {
-      await clearHistory(sessionId);
-      setMessages([]);
-      setTimeline([]);
-      setActiveProvider("");
-      setActiveModel("");
-    } catch (err) {
-      setError((err as Error).message || "清空失败");
-    }
-  };
-
   const handleMessageScroll = () => {
     const listEl = messageListRef.current;
     if (!listEl) {
@@ -685,32 +650,6 @@ export function App() {
 
           <section className="dialogue-panel" aria-label="消息工作台">
             <section className="conversation-card" aria-label="消息区">
-              <div className="card-header conversation-head">
-                <div>
-                  <p className="card-kicker">对话中心</p>
-                  <h2>消息流</h2>
-                </div>
-                <div className="head-actions">
-                  <span className="metric-chip subtle-chip">{workspaceTone}</span>
-                  <span className="runtime-pill" title={currentRuntimeSummary}>
-                    {currentRuntimeSummary}
-                  </span>
-                  <span className="metric-chip">{messageCount} 条消息</span>
-                  <span className={`metric-chip ${isStreaming ? "is-live" : ""}`}>{statusText}</span>
-                  <button
-                    type="button"
-                    onClick={() => void refreshHistory()}
-                    disabled={isLoadingHistory || isStreaming}
-                    className="secondary-btn"
-                  >
-                    {isLoadingHistory ? "加载中..." : "刷新历史"}
-                  </button>
-                  <button type="button" onClick={handleClear} disabled={isStreaming} className="danger-btn compact">
-                    清空会话
-                  </button>
-                </div>
-              </div>
-
               <div className="message-list" ref={messageListRef} onScroll={handleMessageScroll}>
                 {messages.length === 0 ? (
                   <div className="empty-panel">
@@ -745,14 +684,6 @@ export function App() {
             </section>
 
             <form className="composer-card compact" onSubmit={handleSubmit}>
-              <div className="composer-topbar">
-                <div>
-                  <p className="card-kicker">输入区</p>
-                  <h2>发送消息</h2>
-                </div>
-                <span className="composer-status">{composerHint}</span>
-              </div>
-
               <div className="composer-panel">
                 <div className="composer-config" aria-label="运行配置快捷选择">
                   <div className="config-intro">
@@ -828,14 +759,6 @@ export function App() {
 
         <aside className="workspace-side" aria-label="执行轨迹区">
           <section className="timeline-card">
-            <div className="card-header">
-              <div>
-                <p className="card-kicker">执行轨迹</p>
-                <h2>阶段时间线</h2>
-              </div>
-              <span className="metric-chip">{timelineCount} 条事件</span>
-            </div>
-
             <div className="timeline-list" ref={timelineListRef}>
               {timeline.length === 0 ? (
                 <div className="empty-panel compact">

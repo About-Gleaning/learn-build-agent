@@ -29,6 +29,10 @@ frontend/dist/
 frontend/*.tsbuildinfo
 .runtime/
 
+# 运行期会话与工具输出
+src/storage/tool-output/
+src/storage/todo/s_*.json
+
 # IDE 与系统文件
 .DS_Store
 .idea/
