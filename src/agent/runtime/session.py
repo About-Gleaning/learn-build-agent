@@ -21,6 +21,7 @@ from ..core.message import (
     get_message_text,
     utc_now_iso,
 )
+from ..runtime.agents import get_agent
 from ..skills.runtime import SkillRegistry
 from ..tools.handlers import (
     build_plan_placeholder_path,
@@ -33,7 +34,7 @@ from ..tools.handlers import (
     run_write,
     validate_readonly_bash,
 )
-from ..tools.specs import BASE_TOOL, BUILD_AGENT_TOOL, PLAN_AGENT_TOOL
+from ..tools.specs import build_agent_tools, build_base_tools
 from ..tools.todo_manager import TodoManager
 from ..tools.webfetch import webfetch
 from ..tools.websearch import websearch
@@ -84,8 +85,9 @@ def _resolve_prompt_path(agent: str, model: str) -> Path:
         return _resolve_build_prompt_path(model)
     if agent_name == "plan":
         return PROMPTS_DIR / "plan.txt"
-    if agent_name == "explore":
-        return PROMPTS_DIR / "explore.txt"
+    candidate = PROMPTS_DIR / f"{agent_name}.txt"
+    if candidate.exists():
+        return candidate
     raise ValueError(f"未知的 prompt agent: {agent}")
 
 
@@ -158,7 +160,7 @@ def _get_system_prompt_for_mode(mode: MainAgentMode, *, model: str, provider: st
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
-    return PLAN_AGENT_TOOL if mode == "plan" else BUILD_AGENT_TOOL
+    return build_agent_tools(mode)
 
 
 def _ensure_system_prompt(messages: list[Message], prompt: str, session_id: str) -> list[Message]:
@@ -423,20 +425,23 @@ def subagent_loop(
     llm_config: ResolvedLLMConfig | None = None,
 ) -> str:
     agent_name = (agent or "explore").strip().lower()
-    if agent_name != "explore":
+    agent_definition = get_agent(agent_name)
+    if agent_definition is None:
         return f"Error: Unknown subagent '{agent_name}'. 当前仅支持 explore。"
+    if agent_definition.model != "subagent":
+        return f"Error: Agent '{agent_name}' 不是 subagent，不能通过 task 调用。"
 
     logger.info("subagent.start agent=%s prompt_preview=%s", agent_name, prompt[:120].replace("\n", "\\n"))
     result = run_session(
         user_input=prompt,
         session_id=session_id,
-        tools=BASE_TOOL,
+        tools=build_base_tools(),
         system_prompt=build_system_prompt(
-            agent="explore",
+            agent=agent_name,
             model=(llm_config.model if llm_config else ""),
             provider=(llm_config.provider if llm_config else ""),
         ),
-        runtime_agent="explore",
+        runtime_agent=agent_name,
         todo_tool_names={"todo_write", "todo_read"},
         llm_config=llm_config,
     )
@@ -551,7 +556,7 @@ def run_session(
     else:
         initial_runtime = llm_config or resolve_llm_config("build")
         initial_provider_explicit = False
-    initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
+    initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else build_agent_tools("build"))
     initial_system_prompt = (
         _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
         if mode_enabled
@@ -811,7 +816,7 @@ def run_session_stream_events(
     else:
         initial_runtime = llm_config or resolve_llm_config("build")
         initial_provider_explicit = False
-    initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else BUILD_AGENT_TOOL)
+    initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else build_agent_tools("build"))
     initial_system_prompt = (
         _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
         if mode_enabled

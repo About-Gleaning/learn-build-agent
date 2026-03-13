@@ -2,6 +2,7 @@ from pathlib import Path
 
 import agent.runtime.session as session_module
 from agent.tools.handlers import run_read
+from agent.tools.specs import build_task_tool
 from agent.runtime.session import (
     build_system_prompt,
     clear_session_memory,
@@ -245,6 +246,40 @@ def test_task_with_unknown_subagent_should_return_error(monkeypatch):
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     result = run_session("调用未知子代理", session_id="s_task_unknown")
     assert "Unknown subagent" in get_message_text(result)
+
+
+def test_task_tool_description_should_include_registered_subagents():
+    task_tool = build_task_tool()
+    function_spec = task_tool["function"]
+
+    assert "explore" in function_spec["description"]
+    assert "上下文探索" in function_spec["description"]
+    assert function_spec["parameters"]["properties"]["agent"]["enum"] == ["explore"]
+
+
+def test_task_with_primary_agent_should_return_error(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_task_primary",
+                name="task",
+                arguments='{"prompt":"测试","agent":"build"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("调用主代理", session_id="s_task_primary")
+
+    assert "不是 subagent" in get_message_text(result)
 
 
 def test_run_session_should_expose_webfetch_to_build_agent(monkeypatch):
