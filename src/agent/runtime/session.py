@@ -1,6 +1,5 @@
 import logging
 import re
-import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +48,6 @@ MainAgentMode = Literal["build", "plan"]
 SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
 registry = SkillRegistry(SKILLS_ROOT)
 registry.discover()
-skills_catalog = registry.build_brief_catalog_for_model()
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -94,8 +92,7 @@ def _resolve_prompt_path(agent: str, model: str) -> Path:
 def _read_prompt_file(path: Path) -> str:
     if not path.exists():
         raise ValueError(f"未找到 prompt 文件: {path}")
-    template = path.read_text(encoding="utf-8").strip()
-    return template.format(skills_catalog=skills_catalog)
+    return path.read_text(encoding="utf-8").strip()
 
 
 def _read_local_agent_appendix() -> str:
@@ -160,7 +157,7 @@ def _get_system_prompt_for_mode(mode: MainAgentMode, *, model: str, provider: st
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
-    return build_agent_tools(mode)
+    return build_agent_tools(mode, registry.list_briefs())
 
 
 def _ensure_system_prompt(messages: list[Message], prompt: str, session_id: str) -> list[Message]:
@@ -435,7 +432,7 @@ def subagent_loop(
     result = run_session(
         user_input=prompt,
         session_id=session_id,
-        tools=build_base_tools(),
+        tools=build_base_tools(registry.list_briefs()),
         system_prompt=build_system_prompt(
             agent=agent_name,
             model=(llm_config.model if llm_config else ""),
@@ -556,7 +553,11 @@ def run_session(
     else:
         initial_runtime = llm_config or resolve_llm_config("build")
         initial_provider_explicit = False
-    initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else build_agent_tools("build"))
+    initial_tools = (
+        _get_tools_for_mode(initial_mode)
+        if mode_enabled
+        else (tools if tools is not None else build_agent_tools("build", registry.list_briefs()))
+    )
     initial_system_prompt = (
         _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
         if mode_enabled
@@ -816,7 +817,11 @@ def run_session_stream_events(
     else:
         initial_runtime = llm_config or resolve_llm_config("build")
         initial_provider_explicit = False
-    initial_tools = _get_tools_for_mode(initial_mode) if mode_enabled else (tools if tools is not None else build_agent_tools("build"))
+    initial_tools = (
+        _get_tools_for_mode(initial_mode)
+        if mode_enabled
+        else (tools if tools is not None else build_agent_tools("build", registry.list_briefs()))
+    )
     initial_system_prompt = (
         _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
         if mode_enabled

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import agent.runtime.session as session_module
 from agent.tools.handlers import run_read
-from agent.tools.specs import build_task_tool
+from agent.tools.specs import build_base_tools, build_task_tool
 from agent.runtime.session import (
     build_system_prompt,
     clear_session_memory,
@@ -255,6 +255,36 @@ def test_task_tool_description_should_include_registered_subagents():
     assert "explore" in function_spec["description"]
     assert "上下文探索" in function_spec["description"]
     assert function_spec["parameters"]["properties"]["agent"]["enum"] == ["explore"]
+
+
+def test_load_skill_tool_description_should_include_available_skills_without_path():
+    tools = build_base_tools(
+        [
+            {
+                "name": "python_development_guide",
+                "description": "提供 Python 开发规范、测试与性能优化建议。",
+                "path": "/tmp/skills/python_development_guide",
+            }
+        ]
+    )
+    load_skill_tool = next(tool for tool in tools if tool["function"]["name"] == "load_skill")
+    description = load_skill_tool["function"]["description"]
+
+    assert "Skills 提供专门的知识和分步骤的指导。" in description
+    assert "<available_skills>" in description
+    assert "<name>python_development_guide</name>" in description
+    assert "<description>提供 Python 开发规范、测试与性能优化建议。</description>" in description
+    assert "/tmp/skills/python_development_guide" not in description
+
+
+def test_load_skill_tool_description_should_show_empty_message_when_no_skills():
+    tools = build_base_tools([])
+    load_skill_tool = next(tool for tool in tools if tool["function"]["name"] == "load_skill")
+
+    assert (
+        load_skill_tool["function"]["description"]
+        == "加载一个 skill，以获取完成某个特定任务的详细指导。目前没有可用的 skills。"
+    )
 
 
 def test_task_with_primary_agent_should_return_error(monkeypatch):
@@ -757,6 +787,9 @@ def test_build_system_prompt_should_include_git_environment(monkeypatch):
     assert "- is_git_repo: true" in prompt
     assert "- git_root: /tmp/repo" in prompt
     assert "- provider: gemini" in prompt
+    assert "当前可用 skills catalog" not in prompt
+    assert "{skills_catalog}" not in prompt
+    assert "你可以通过工具 `load_skill` 了解当前可用 skills 的简短介绍。" in prompt
 
 
 def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch):

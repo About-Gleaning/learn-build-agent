@@ -15,6 +15,43 @@ WEBFETCH_TOOL_DESCRIPTION = WEBFETCH_DESC_FILE.read_text().strip()
 WEBSEARCH_DESC_FILE = Path(__file__).with_name("websearch.txt")
 WEBSEARCH_TOOL_DESCRIPTION = WEBSEARCH_DESC_FILE.read_text().strip()
 
+
+def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
+    normalized_skills = skills or []
+    if not normalized_skills:
+        return "加载一个 skill，以获取完成某个特定任务的详细指导。目前没有可用的 skills。"
+
+    skill_lines: list[str] = []
+    for skill in normalized_skills:
+        name = str(skill.get("name", "")).strip()
+        description = str(skill.get("description", "")).strip()
+        if not name:
+            continue
+        # 这里仅暴露技能路由所需信息，避免把本地实现路径泄露给模型。
+        skill_lines.extend(
+            [
+                "    <skill>",
+                f"        <name>{name}</name>",
+                f"        <description>{description}</description>",
+                "    </skill>",
+            ]
+        )
+
+    if not skill_lines:
+        return "加载一个 skill，以获取完成某个特定任务的详细指导。目前没有可用的 skills。"
+
+    return "\n".join(
+        [
+            "加载一个 skill，以获取完成某个特定任务的详细指导。",
+            "Skills 提供专门的知识和分步骤的指导。",
+            "当某个任务与某个 skill 的描述相匹配时，应使用它。",
+            "这里只列出了当前可用的 skills：",
+            "<available_skills>",
+            *skill_lines,
+            "</available_skills>",
+        ]
+    )
+
 def _build_subagent_listing() -> str:
     subagents = get_subagents()
     if not subagents:
@@ -24,10 +61,11 @@ def _build_subagent_listing() -> str:
 
 def _build_task_tool_description() -> str:
     template = TASK_DESC_FILE.read_text(encoding="utf-8").strip()
-    return template.format(agents=_build_subagent_listing())
+    # task 模板里可能包含示例代码的花括号，使用定点替换避免被 str.format 误解析。
+    return template.replace("{agents}", _build_subagent_listing())
 
 
-def build_base_tools() -> list[dict[str, Any]]:
+def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
@@ -163,7 +201,7 @@ def build_base_tools() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "load_skill",
-                "description": "加载一个或多个 skill 的完整内容。当你需要查看某个 skill 的详细说明时调用。",
+                "description": _build_load_skill_tool_description(skills),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -251,8 +289,8 @@ def build_plan_exit_tool() -> dict[str, Any]:
     }
 
 
-def build_agent_tools(mode: str) -> list[dict[str, Any]]:
-    base_tools = build_base_tools()
+def build_agent_tools(mode: str, skills: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    base_tools = build_base_tools(skills)
     task_tool = build_task_tool()
     if (mode or "").strip().lower() == "plan":
         return base_tools + [task_tool, build_plan_exit_tool()]

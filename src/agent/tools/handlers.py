@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 WORKDIR = Path.cwd()
-PLAN_WRITE_ROOT = (WORKDIR / "src" / "storage" / "plan").resolve()
+PLAN_WRITE_ROOT = (WORKDIR / "src" / "plan").resolve()
 logger = logging.getLogger(__name__)
 
 DANGEROUS_PATTERNS = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
