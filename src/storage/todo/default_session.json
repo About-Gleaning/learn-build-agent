@@ -1,0 +1,24 @@
+{
+  "session_id": "default_session",
+  "updated_at": "2026-03-13T07:07:54.114595+00:00",
+  "todo_list": [
+    {
+      "id": "1",
+      "text": "搜索并分析 'lang graph' 相关信息",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "text": "整理 LangGraph 核心概念与使用方法",
+      "status": "in_progress",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "text": "提供 LangGraph 快速入门示例",
+      "status": "pending",
+      "priority": "medium"
+    }
+  ]
+}
