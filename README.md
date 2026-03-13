@@ -47,7 +47,7 @@ frontend/
 
 ## 快速开始
 
-1. 准备环境变量：复制 `.env.example` 为 `.env`，并配置 `API_KEY`。
+1. 准备环境变量：复制 `.env.example` 为 `.env`，并配置所需密钥；如果使用 `websearch`，还要配置 `EXA_API_KEY`。
 2. 安装依赖：`pip install -r requirements.txt`。
 3. 运行 CLI 示例：`python3 src/main.py`。
 4. 启动 Web 后端：`uvicorn src.web_main:app --reload --host 127.0.0.1 --port 8000`。

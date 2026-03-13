@@ -40,6 +40,10 @@ def _last_user_agent(messages):
     return ""
 
 
+def _tool_names(tools):
+    return [tool["function"]["name"] for tool in tools]
+
+
 def test_run_session_with_tool_call(monkeypatch):
     call_state = {"count": 0}
 
@@ -228,6 +232,160 @@ def test_task_with_unknown_subagent_should_return_error(monkeypatch):
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     result = run_session("调用未知子代理", session_id="s_task_unknown")
     assert "Unknown subagent" in get_message_text(result)
+
+
+def test_run_session_should_expose_webfetch_to_build_agent(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del messages, max_tokens, hooks, llm_config
+        assert "webfetch" in _tool_names(tools)
+        assistant = create_message("assistant", "s_build_webfetch", status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("检查 build agent 工具", session_id="s_build_webfetch")
+
+    assert get_message_text(result) == "ok"
+
+
+def test_run_session_should_expose_webfetch_to_plan_agent(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del messages, max_tokens, hooks, llm_config
+        assert "webfetch" in _tool_names(tools)
+        assistant = create_message("assistant", "s_plan_webfetch", status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("检查 plan agent 工具", session_id="s_plan_webfetch", mode="plan")
+
+    assert get_message_text(result) == "ok"
+
+
+def test_subagent_loop_should_expose_webfetch_to_explore_agent(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del messages, max_tokens, hooks, llm_config
+        assert "webfetch" in _tool_names(tools)
+        assistant = create_message("assistant", "s_explore_webfetch", status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = session_module.subagent_loop("检查 explore agent 工具", session_id="s_explore_webfetch")
+
+    assert result == "ok"
+
+
+def test_run_session_should_execute_webfetch_tool(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_webfetch(params):
+        return {
+            "output": f"抓取成功:{params['url']}",
+            "metadata": {"status": "completed"},
+        }
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_webfetch",
+                name="webfetch",
+                arguments='{"url":"http://example.com","format":"text"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.webfetch", fake_webfetch)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("执行 webfetch", session_id="s_run_webfetch")
+
+    assert "抓取成功:http://example.com" in get_message_text(result)
+
+
+def test_run_session_should_expose_websearch_to_build_agent(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del messages, max_tokens, hooks, llm_config
+        assert "websearch" in _tool_names(tools)
+        assistant = create_message("assistant", "s_build_websearch", status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("检查 build agent websearch 工具", session_id="s_build_websearch")
+
+    assert get_message_text(result) == "ok"
+
+
+def test_run_session_should_expose_websearch_to_plan_agent(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del messages, max_tokens, hooks, llm_config
+        assert "websearch" in _tool_names(tools)
+        assistant = create_message("assistant", "s_plan_websearch", status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("检查 plan agent websearch 工具", session_id="s_plan_websearch", mode="plan")
+
+    assert get_message_text(result) == "ok"
+
+
+def test_subagent_loop_should_expose_websearch_to_explore_agent(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del messages, max_tokens, hooks, llm_config
+        assert "websearch" in _tool_names(tools)
+        assistant = create_message("assistant", "s_explore_websearch", status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = session_module.subagent_loop("检查 explore agent websearch 工具", session_id="s_explore_websearch")
+
+    assert result == "ok"
+
+
+def test_run_session_should_execute_websearch_tool(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_websearch(params):
+        return {
+            "output": f"搜索成功:{params['query']}",
+            "metadata": {"status": "completed"},
+        }
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_websearch",
+                name="websearch",
+                arguments='{"query":"python agent","type":"fast"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.websearch", fake_websearch)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("执行 websearch", session_id="s_run_websearch")
+
+    assert "搜索成功:python agent" in get_message_text(result)
 
 
 def test_run_session_should_use_memory_between_calls(monkeypatch):

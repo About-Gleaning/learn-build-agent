@@ -3,6 +3,14 @@ from typing import Any
 
 TODO_DESC_FILE = Path(__file__).with_name("todo_write.txt")
 TODO_TOOL_DESCRIPTION = TODO_DESC_FILE.read_text().strip()
+PLAN_ENTER_DESC_FILE = Path(__file__).with_name("plan_enter.txt")
+PLAN_ENTER_TOOL_DESCRIPTION = PLAN_ENTER_DESC_FILE.read_text().strip()
+PLAN_EXIT_DESC_FILE = Path(__file__).with_name("plan_exit.txt")
+PLAN_EXIT_TOOL_DESCRIPTION = PLAN_EXIT_DESC_FILE.read_text().strip()
+WEBFETCH_DESC_FILE = Path(__file__).with_name("webfetch.txt")
+WEBFETCH_TOOL_DESCRIPTION = WEBFETCH_DESC_FILE.read_text().strip()
+WEBSEARCH_DESC_FILE = Path(__file__).with_name("websearch.txt")
+WEBSEARCH_TOOL_DESCRIPTION = WEBSEARCH_DESC_FILE.read_text().strip()
 
 BASE_TOOL: list[dict[str, Any]] = [
     {
@@ -54,6 +62,40 @@ BASE_TOOL: list[dict[str, Any]] = [
                     "new_text": {"type": "string"},
                 },
                 "required": ["path", "old_text", "new_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "webfetch",
+            "description": WEBFETCH_TOOL_DESCRIPTION,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "format": {"type": "string", "enum": ["text", "markdown", "html"]},
+                    "timeout": {"type": "number"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "websearch",
+            "description": WEBSEARCH_TOOL_DESCRIPTION,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "numResults": {"type": "integer"},
+                    "livecrawl": {"type": "string", "enum": ["fallback", "preferred"]},
+                    "type": {"type": "string", "enum": ["auto", "fast", "deep"]},
+                    "contextMaxCharacters": {"type": "integer"},
+                },
+                "required": ["query"],
             },
         },
     },
@@ -144,7 +186,7 @@ PLAN_ENTER_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "plan_enter",
-        "description": "请求切换到 plan 模式。首次调用会返回确认请求，确认后再次调用并传入 confirmed=true。",
+        "description": PLAN_ENTER_TOOL_DESCRIPTION,
         "parameters": {
             "type": "object",
             "properties": {
@@ -161,7 +203,7 @@ PLAN_EXIT_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "plan_exit",
-        "description": "请求退出 plan 模式。需要用户确认后再次调用并传入 confirmed=true 才会真正切换回 build。",
+        "description": PLAN_EXIT_TOOL_DESCRIPTION,
         "parameters": {
             "type": "object",
             "properties": {

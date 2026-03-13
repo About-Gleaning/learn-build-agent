@@ -35,6 +35,8 @@ from ..tools.handlers import (
 )
 from ..tools.specs import BASE_TOOL, BUILD_AGENT_TOOL, PLAN_AGENT_TOOL
 from ..tools.todo_manager import TodoManager
+from ..tools.webfetch import webfetch
+from ..tools.websearch import websearch
 from .compaction import compact
 from .session_memory import InMemorySessionMemoryStore, SessionMemoryStore
 from .tool_executor import ToolExecutor, ToolHook, ToolResult, get_global_tool_hooks
@@ -496,6 +498,8 @@ def _build_tool_handlers(
         "read_file": lambda **kw: run_read(kw["path"], kw.get("limit")),
         "write_file": lambda **kw: _run_mode_aware_write(kw["path"], kw["content"]),
         "edit_file": lambda **kw: _run_mode_aware_edit(kw["path"], kw["old_text"], kw["new_text"]),
+        "webfetch": lambda **kw: webfetch(kw),
+        "websearch": lambda **kw: websearch(kw),
         "todo_write": lambda **kw: TODO.update(kw["todo_list"]),
         "todo_read": lambda **kw: TODO.read_current_session(),
         "task": lambda **kw: subagent_loop(
