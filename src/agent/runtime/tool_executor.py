@@ -1,9 +1,11 @@
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable, TypedDict
 
 from ..core.hooks import HookDispatcher
+from .compaction import apply_tool_output_truncation
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,7 @@ class ToolHookContext(TypedDict, total=False):
     started_at: float
     duration_ms: int
     result_size: int
+    task_available: bool
 
 
 class ToolNormalizedError(TypedDict, total=False):
@@ -36,6 +39,14 @@ class ToolResult(TypedDict, total=False):
     output: str
     metadata: dict[str, Any]
     attachments: list[FilePart]
+
+
+class ToolExecutionOptions(TypedDict, total=False):
+    task_available: bool
+    workdir: str
+
+
+ToolOutputProcessor = Callable[[ToolResult, ToolHookContext, ToolExecutionOptions], ToolResult]
 
 
 class ToolHook:
@@ -171,11 +182,44 @@ def normalize_tool_result(result: object) -> ToolResult:
     }
 
 
+def default_tool_output_processor(
+    result: ToolResult,
+    ctx: ToolHookContext,
+    options: ToolExecutionOptions,
+) -> ToolResult:
+    metadata = dict(result.get("metadata", {}))
+    truncated = apply_tool_output_truncation(
+        text=result.get("output", ""),
+        session_id=ctx.get("session_id", "default_session"),
+        tool_name=ctx.get("tool_name", "tool"),
+        tool_call_id=ctx.get("tool_call_id", "call"),
+        workdir=Path(options.get("workdir", Path.cwd())),
+        task_available=bool(options.get("task_available", False)),
+        metadata=metadata,
+    )
+    processed: ToolResult = {
+        "output": truncated["output"],
+        "metadata": truncated["metadata"],
+    }
+    attachments = result.get("attachments")
+    if isinstance(attachments, list):
+        processed["attachments"] = attachments
+    return processed
+
+
 class ToolExecutor:
     """执行工具调用并分发 Hook。"""
 
-    def __init__(self, handlers: dict[str, Callable[..., object]]) -> None:
+    def __init__(
+        self,
+        handlers: dict[str, Callable[..., object]],
+        *,
+        output_processors: dict[str, ToolOutputProcessor] | None = None,
+        default_output_processor: ToolOutputProcessor | None = None,
+    ) -> None:
         self.handlers = handlers
+        self.output_processors = output_processors or {}
+        self.default_output_processor = default_output_processor or default_tool_output_processor
 
     def _run_tool_hooks(
         self,
@@ -207,6 +251,8 @@ class ToolExecutor:
         tool_call_id: str,
         round_no: int,
         hooks: list[ToolHook],
+        task_available: bool = False,
+        workdir: str | None = None,
     ) -> ToolResult:
         ctx: ToolHookContext = {
             "session_id": session_id,
@@ -214,6 +260,7 @@ class ToolExecutor:
             "tool_call_id": tool_call_id,
             "arguments": arguments,
             "round_no": round_no,
+            "task_available": task_available,
         }
 
         started = time.perf_counter()
@@ -267,6 +314,12 @@ class ToolExecutor:
 
         result["metadata"] = dict(result.get("metadata", {}))
         result["metadata"].setdefault("status", "completed")
+        processor = self.output_processors.get(tool_name, self.default_output_processor)
+        options: ToolExecutionOptions = {
+            "task_available": task_available,
+            "workdir": workdir or str(Path.cwd()),
+        }
+        result = processor(result, ctx, options)
         ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
         ctx["result_size"] = len(result.get("output", ""))
         self._run_tool_hooks(hooks, "after", ctx=ctx, result=result)

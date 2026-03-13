@@ -29,10 +29,14 @@ BASE_TOOL: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read file contents.",
+            "description": "Read file contents. Supports offset and limit for chunked reading.",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
                 "required": ["path"],
             },
         },

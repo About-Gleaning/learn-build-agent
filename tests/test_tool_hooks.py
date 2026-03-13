@@ -1,10 +1,12 @@
 import pytest
 
+from agent.runtime.compaction import TOOL_OUTPUT_MAX_BYTES
 from agent.runtime.session import run_session
 from agent.core.message import append_text_part, append_tool_call_part, create_message, get_message_text
 from agent.runtime.tool_executor import (
     ToolHook,
     ToolLoggingHook,
+    ToolExecutor,
     clear_global_tool_hooks,
     register_global_tool_hook,
 )
@@ -143,3 +145,56 @@ def test_tool_error_hook_unknown_tool(monkeypatch):
 
     assert get_message_text(result) == "final"
     assert records == ["unknown_tool"]
+
+
+def test_tool_executor_should_truncate_long_output_and_write_full_file(tmp_path):
+    executor = ToolExecutor({"demo_tool": lambda: "x" * (TOOL_OUTPUT_MAX_BYTES + 32)})
+
+    result = executor.execute(
+        "demo_tool",
+        "{}",
+        session_id="s_truncate",
+        tool_call_id="call_demo",
+        round_no=1,
+        hooks=[],
+        task_available=False,
+        workdir=str(tmp_path),
+    )
+
+    metadata = result["metadata"]
+    assert metadata["truncated"] is True
+    assert "full_output_path" in metadata
+    assert "bash + rg" in result["output"]
+    full_output_path = tmp_path / "src" / "storage" / "tool-output" / "s_truncate" / "demo_tool-call_demo.log"
+    assert full_output_path.exists()
+    assert full_output_path.read_text(encoding="utf-8") == "x" * (TOOL_OUTPUT_MAX_BYTES + 32)
+
+
+def test_tool_executor_should_allow_custom_output_processor_override(tmp_path):
+    def custom_processor(result, ctx, options):
+        del ctx, options
+        metadata = dict(result.get("metadata", {}))
+        metadata["truncated"] = "custom"
+        result["metadata"] = metadata
+        result["output"] = "custom-output"
+        return result
+
+    executor = ToolExecutor(
+        {"demo_tool": lambda: "x" * (TOOL_OUTPUT_MAX_BYTES + 32)},
+        output_processors={"demo_tool": custom_processor},
+    )
+
+    result = executor.execute(
+        "demo_tool",
+        "{}",
+        session_id="s_override",
+        tool_call_id="call_override",
+        round_no=1,
+        hooks=[],
+        task_available=True,
+        workdir=str(tmp_path),
+    )
+
+    assert result["output"] == "custom-output"
+    assert result["metadata"]["truncated"] == "custom"
+    assert not (tmp_path / "src" / "storage" / "tool-output").exists()

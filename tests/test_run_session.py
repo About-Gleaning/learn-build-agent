@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import agent.runtime.session as session_module
+from agent.tools.handlers import run_read
 from agent.runtime.session import (
     build_system_prompt,
     clear_session_memory,
@@ -38,6 +39,18 @@ def _last_user_agent(messages):
             if isinstance(meta, dict) and "agent" in meta:
                 return str(meta["agent"])
     return ""
+
+
+def _last_tool_result_metadata(messages):
+    for part in messages[-1]["parts"]:
+        if part.get("type") != "tool":
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        output = state.get("output") if isinstance(state.get("output"), dict) else {}
+        metadata = output.get("metadata")
+        if isinstance(metadata, dict):
+            return metadata
+    return {}
 
 
 def _tool_names(tools):
@@ -386,6 +399,132 @@ def test_run_session_should_execute_websearch_tool(monkeypatch):
     result = run_session("执行 websearch", session_id="s_run_websearch")
 
     assert "搜索成功:python agent" in get_message_text(result)
+
+
+def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    call_state = {"count": 0}
+    long_output = "\n".join(f"line {i}" for i in range(2505))
+
+    def fake_webfetch(params):
+        del params
+        return {
+            "output": long_output,
+            "metadata": {"status": "completed"},
+        }
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_webfetch_long",
+                name="webfetch",
+                arguments='{"url":"http://example.com","format":"text"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.webfetch", fake_webfetch)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("执行长输出 webfetch", session_id="s_long_task")
+
+    text = get_message_text(result)
+    assert "Task 工具委托 explore agent" in text
+    assert "read_file 配合 offset/limit" in text
+    assert "src/storage/tool-output" in text
+
+
+def test_subagent_loop_should_truncate_tool_output_without_task_guidance(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    call_state = {"count": 0}
+    long_output = "\n".join(f"line {i}" for i in range(2505))
+
+    def fake_webfetch(params):
+        del params
+        return {
+            "output": long_output,
+            "metadata": {"status": "completed"},
+        }
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_webfetch_long_explore",
+                name="webfetch",
+                arguments='{"url":"http://example.com","format":"text"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.webfetch", fake_webfetch)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = session_module.subagent_loop("执行长输出 webfetch", session_id="s_long_no_task")
+
+    assert "bash + rg" in result
+    assert "read_file 配合 offset/limit" in result
+    assert "Task 工具委托 explore agent" not in result
+
+
+def test_run_session_should_store_truncation_metadata(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    call_state = {"count": 0}
+    long_output = "\n".join(f"line {i}" for i in range(2505))
+    seen_metadata: dict[str, object] = {}
+
+    def fake_webfetch(params):
+        del params
+        return {
+            "output": long_output,
+            "metadata": {"status": "completed"},
+        }
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_webfetch_metadata",
+                name="webfetch",
+                arguments='{"url":"http://example.com","format":"text"}',
+            )
+        else:
+            seen_metadata.update(_last_tool_result_metadata(messages))
+            append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.webfetch", fake_webfetch)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("执行长输出 webfetch", session_id="s_long_metadata")
+
+    assert get_message_text(result) == "ok"
+    assert seen_metadata["truncated"] is True
+    assert str(seen_metadata["full_output_path"]).endswith("src/storage/tool-output/s_long_metadata/webfetch-call_webfetch_metadata.log")
+
+
+def test_run_read_should_support_offset_and_limit(monkeypatch, tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    monkeypatch.setattr("agent.tools.handlers.WORKDIR", tmp_path)
+    content = run_read("sample.txt", limit=2, offset=1)
+
+    assert content == "b\nc\n... (1 more lines)"
 
 
 def test_run_session_should_use_memory_between_calls(monkeypatch):

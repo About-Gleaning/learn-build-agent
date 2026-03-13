@@ -1,5 +1,6 @@
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, TypedDict
 
 from ..adapters.llm.client import create_chat_completion
 from ..core.message import (
@@ -13,6 +14,154 @@ from ..core.message import (
 
 THRESHOLD = 50000
 KEEP_RECENT = 3
+TOOL_OUTPUT_MAX_LINES = 2000
+TOOL_OUTPUT_MAX_BYTES = 50 * 1024
+
+
+class ToolOutputTruncationResult(TypedDict):
+    output: str
+    metadata: dict[str, Any]
+
+
+def _safe_name(value: str, fallback: str) -> str:
+    normalized = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value).strip("._")
+    return normalized or fallback
+
+
+def _utf8_size(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _line_count(text: str) -> int:
+    if not text:
+        return 0
+    return len(text.splitlines())
+
+
+def _build_tool_output_path(workdir: Path, session_id: str, tool_name: str, tool_call_id: str) -> Path:
+    session_segment = _safe_name(session_id, "default_session")
+    tool_segment = _safe_name(tool_name, "tool")
+    call_segment = _safe_name(tool_call_id, "call")
+    return (workdir / "src" / "storage" / "tool-output" / session_segment / f"{tool_segment}-{call_segment}.log").resolve()
+
+
+def _build_preview_text(text: str, *, max_lines: int, max_bytes: int) -> str:
+    if not text:
+        return text
+
+    kept_lines: list[str] = []
+    total_bytes = 0
+    line_count = 0
+
+    for line in text.splitlines(keepends=True):
+        encoded = line.encode("utf-8")
+        if line_count >= max_lines or total_bytes + len(encoded) > max_bytes:
+            break
+        kept_lines.append(line)
+        total_bytes += len(encoded)
+        line_count += 1
+
+    preview = "".join(kept_lines)
+    if preview:
+        return preview
+
+    clipped = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+    return clipped
+
+
+def _build_truncation_notice(
+    *,
+    full_output_path: str,
+    original_lines: int,
+    original_bytes: int,
+    task_available: bool,
+    tool_succeeded: bool,
+) -> str:
+    status_text = "这次 tool 调用成功了，但输出已被截断。" if tool_succeeded else "这次 tool 调用返回了错误输出，但内容已被截断。"
+    size_text = f"原始输出共 {original_lines} 行、{original_bytes} 字节。"
+    path_text = f"完整输出已保存到: {full_output_path}"
+    if task_available:
+        suggestion = (
+            "不要直接把整份长文件重新塞回上下文。"
+            "建议优先使用 Task 工具委托 explore agent，通过 bash + rg 搜索关键片段，"
+            "再用 read_file 配合 offset/limit 分段读取，以节省上下文。"
+        )
+    else:
+        suggestion = "建议先用 bash + rg 搜索关键内容，或者用 read_file 配合 offset/limit 分段查看完整输出。"
+    return "\n".join([status_text, size_text, path_text, suggestion])
+
+
+def apply_tool_output_truncation(
+    *,
+    text: str,
+    session_id: str,
+    tool_name: str,
+    tool_call_id: str,
+    workdir: Path,
+    task_available: bool,
+    metadata: dict[str, Any] | None = None,
+    max_lines: int = TOOL_OUTPUT_MAX_LINES,
+    max_bytes: int = TOOL_OUTPUT_MAX_BYTES,
+) -> ToolOutputTruncationResult:
+    base_metadata = dict(metadata or {})
+    original_lines = _line_count(text)
+    original_bytes = _utf8_size(text)
+    tool_succeeded = str(base_metadata.get("status", "completed")).strip().lower() == "completed"
+
+    if original_lines <= max_lines and original_bytes <= max_bytes:
+        base_metadata.setdefault("truncated", False)
+        return {
+            "output": text,
+            "metadata": base_metadata,
+        }
+
+    preview = _build_preview_text(text, max_lines=max_lines, max_bytes=max_bytes)
+    preview_lines = _line_count(preview)
+    preview_bytes = _utf8_size(preview)
+    output_path = _build_tool_output_path(workdir, session_id, tool_name, tool_call_id)
+
+    base_metadata.update(
+        {
+            "truncated": True,
+            "original_lines": original_lines,
+            "original_bytes": original_bytes,
+            "preview_lines": preview_lines,
+            "preview_bytes": preview_bytes,
+        }
+    )
+
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text, encoding="utf-8")
+        base_metadata["full_output_path"] = str(output_path)
+        notice = _build_truncation_notice(
+            full_output_path=str(output_path),
+            original_lines=original_lines,
+            original_bytes=original_bytes,
+            task_available=task_available,
+            tool_succeeded=tool_succeeded,
+        )
+    except OSError as exc:
+        base_metadata["full_output_write_error"] = f"{type(exc).__name__}: {exc}"
+        notice = "\n".join(
+            [
+                "这次 tool 调用成功了，但输出已被截断。" if tool_succeeded else "这次 tool 调用返回了错误输出，但内容已被截断。",
+                f"原始输出共 {original_lines} 行、{original_bytes} 字节。",
+                f"完整输出落盘失败: {type(exc).__name__}: {exc}",
+                (
+                    "不要直接把整份长文件重新塞回上下文。建议优先使用 Task 工具委托 explore agent，"
+                    "通过 bash + rg 搜索关键片段，再用 read_file 配合 offset/limit 分段读取，以节省上下文。"
+                    if task_available
+                    else "建议先用 bash + rg 搜索关键内容，或者用 read_file 配合 offset/limit 分段查看。"
+                ),
+            ]
+        )
+
+    truncated_output = f"{preview.rstrip()}\n\n{notice}".strip()
+    return {
+        "output": truncated_output,
+        "metadata": base_metadata,
+    }
 
 
 def _part_content(part: dict[str, Any]) -> str:

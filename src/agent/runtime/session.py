@@ -495,7 +495,7 @@ def _build_tool_handlers(
 
     return {
         "bash": lambda **kw: _run_mode_aware_bash(kw["command"]),
-        "read_file": lambda **kw: run_read(kw["path"], kw.get("limit")),
+        "read_file": lambda **kw: run_read(kw["path"], kw.get("limit"), kw.get("offset", 0)),
         "write_file": lambda **kw: _run_mode_aware_write(kw["path"], kw["content"]),
         "edit_file": lambda **kw: _run_mode_aware_edit(kw["path"], kw["old_text"], kw["new_text"]),
         "webfetch": lambda **kw: webfetch(kw),
@@ -670,6 +670,7 @@ def run_session(
             return assistant_message
 
         should_interrupt = False
+        task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
         for tool_call in tool_calls:
             result = tool_executor.execute(
                 tool_call["name"],
@@ -678,6 +679,8 @@ def run_session(
                 tool_call_id=tool_call["id"],
                 round_no=round_no,
                 hooks=effective_tool_hooks,
+                task_available=task_available,
+                workdir=str(_get_workdir()),
             )
             messages.append(
                 _build_tool_message(
@@ -982,6 +985,7 @@ def run_session_stream_events(
             return
 
         should_interrupt = False
+        task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
         for tool_call in tool_calls:
             result = tool_executor.execute(
                 tool_call["name"],
@@ -990,6 +994,8 @@ def run_session_stream_events(
                 tool_call_id=tool_call["id"],
                 round_no=round_no,
                 hooks=effective_tool_hooks,
+                task_available=task_available,
+                workdir=str(_get_workdir()),
             )
             messages.append(
                 _build_tool_message(

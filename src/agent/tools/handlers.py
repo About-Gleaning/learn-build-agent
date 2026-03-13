@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 WORKDIR = Path.cwd()
-PLAN_WRITE_ROOT = (WORKDIR / "src" / "plan").resolve()
+PLAN_WRITE_ROOT = (WORKDIR / "src" / "storage" / "plan").resolve()
 logger = logging.getLogger(__name__)
 
 DANGEROUS_PATTERNS = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
@@ -79,13 +79,15 @@ def validate_readonly_bash(command: str) -> str | None:
     return None
 
 
-def run_read(path: str, limit: int | None = None) -> str:
+def run_read(path: str, limit: int | None = None, offset: int = 0) -> str:
     try:
         text = safe_path(path).read_text()
         lines = text.splitlines()
-        if limit is not None and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
-        return "\n".join(lines)[:50000]
+        start = max(offset, 0)
+        selected = lines[start:]
+        if limit is not None and limit < len(selected):
+            selected = selected[:limit] + [f"... ({len(lines) - start - limit} more lines)"]
+        return "\n".join(selected)[:50000]
     except Exception as exc:
         return f"Error: {exc}"
 
