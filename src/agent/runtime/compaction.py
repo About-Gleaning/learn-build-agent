@@ -5,11 +5,13 @@ from typing import Any, TypedDict
 from ..adapters.llm.client import create_chat_completion
 from ..core.message import (
     Message,
+    append_compaction_part,
     append_compact_summary_part,
     append_text_part,
     create_message,
     get_message_text,
     get_role,
+    trim_messages_by_compaction_checkpoint,
 )
 
 THRESHOLD = 50000
@@ -225,13 +227,13 @@ def _estimate_tokens(messages: list[Message]) -> int:
 
 
 def compaction_summary(messages: list[Message]) -> list[Message]:
-    """当上下文超过阈值时，调用 LLM 生成摘要并替换历史非 system 消息。"""
+    """当上下文超过阈值时，生成 compaction checkpoint 并折叠更早历史。"""
     if not messages:
         return messages
 
     token_size = _estimate_tokens(messages)
     if token_size <= THRESHOLD:
-        return messages
+        return trim_messages_by_compaction_checkpoint(messages)
 
     system_messages = [m for m in messages if get_role(m) == "system"]
     summarize_messages = [m for m in messages if get_role(m) != "system"]
@@ -265,7 +267,7 @@ def compaction_summary(messages: list[Message]) -> list[Message]:
     append_text_part(system_message, "你是一个擅长上下文压缩的助手，请输出简洁、结构化的中文摘要。")
     summary_messages.append(system_message)
 
-    user_message = create_message("user", session_id=session_id)
+    user_message = create_message("user", session_id=session_id, status="completed")
     append_text_part(user_message, summary_prompt)
     summary_messages.append(user_message)
 
@@ -277,13 +279,16 @@ def compaction_summary(messages: list[Message]) -> list[Message]:
     if not summary_text:
         return messages
 
-    compact_message = create_message("user", session_id=session_id)
-    append_compact_summary_part(compact_message, "以下是历史对话摘要（自动压缩生成）：\n" + summary_text)
+    compaction_message = create_message("user", session_id=session_id, status="completed")
+    append_compaction_part(compaction_message, "以下历史消息已完成压缩总结，请结合下一条摘要继续当前任务。")
+    append_compact_summary_part(compaction_message, "以下是历史对话摘要请求，请参考下一条 summary assistant。")
 
-    continue_message = create_message("assistant", session_id=session_id)
-    append_text_part(continue_message, "Understood. Continuing.")
+    response_message["info"]["parent_id"] = str(compaction_message["info"].get("message_id", ""))
+    response_message["info"]["summary"] = True
+    if not str(response_message["info"].get("finish_reason", "")).strip():
+        response_message["info"]["finish_reason"] = "stop"
 
-    return system_messages + [compact_message, continue_message]
+    return system_messages + trim_messages_by_compaction_checkpoint([*summarize_messages, compaction_message, response_message])
 
 
 def compact(messages: list[Message]) -> list[Message]:

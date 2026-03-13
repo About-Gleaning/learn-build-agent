@@ -38,6 +38,7 @@ class MessageInfo(TypedDict, total=False):
     agent: str
     turn_started_at: str
     turn_completed_at: str
+    summary: bool
 
 
 class Part(TypedDict, total=False):
@@ -159,6 +160,10 @@ def append_text_part(message: Message, content: str, meta: dict[str, Any] | None
     return append_part(message, "text", content=content, meta=meta)
 
 
+def append_compaction_part(message: Message, content: str, meta: dict[str, Any] | None = None) -> Part:
+    return append_part(message, "compaction", content=content, meta=meta)
+
+
 def append_compact_summary_part(message: Message, content: str) -> Part:
     return append_part(message, "compact_summary", content=content)
 
@@ -243,9 +248,51 @@ def get_role(message: Message) -> MessageRole:
 def get_message_text(message: Message) -> str:
     lines: list[str] = []
     for part in message["parts"]:
-        if part.get("type") in {"text", "compact_summary", "reasoning", "error"} and part.get("content"):
+        if part.get("type") in {"text", "compaction", "compact_summary", "reasoning", "error"} and part.get("content"):
             lines.append(str(part["content"]))
     return "\n".join(lines).strip()
+
+
+def has_compaction_part(message: Message) -> bool:
+    return any(part.get("type") == "compaction" for part in message["parts"])
+
+
+def is_completed_summary_message(message: Message) -> bool:
+    info = message.get("info", {})
+    if get_role(message) != "assistant":
+        return False
+    if not bool(info.get("summary")):
+        return False
+    return bool(str(info.get("finish_reason", "")).strip())
+
+
+def trim_messages_by_compaction_checkpoint(messages: list[Message]) -> list[Message]:
+    completed: set[str] = set()
+    suffix: list[Message] = []
+    found_boundary = False
+
+    for message in reversed(messages):
+        suffix.append(message)
+        info = message.get("info", {})
+
+        if is_completed_summary_message(message):
+            parent_id = str(info.get("parent_id", "")).strip()
+            if parent_id:
+                completed.add(parent_id)
+
+        if get_role(message) != "user":
+            continue
+
+        message_id = str(info.get("message_id", "")).strip()
+        if message_id and message_id in completed and has_compaction_part(message):
+            found_boundary = True
+            break
+
+    if not found_boundary:
+        return messages
+
+    suffix.reverse()
+    return suffix
 
 
 def extract_tool_calls(message: Message) -> list[ToolFunctionCall]:

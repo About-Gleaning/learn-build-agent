@@ -5,6 +5,11 @@
       "model": "qwen3-max",
       "api_key_env": "QWEN_API_KEY"
     },
+    "qwen-coder": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen3-coder-next",
+      "api_key_env": "QWEN_API_KEY"
+    },
     "gemini": {
       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
       "model": "gemini-2.0-flash",

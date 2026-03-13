@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from copy import deepcopy
 
-from ..core.message import Message, get_role
+from ..core.message import Message, get_role, trim_messages_by_compaction_checkpoint
 
 
 class SessionMemoryStore(ABC):
@@ -31,11 +31,12 @@ class InMemorySessionMemoryStore(SessionMemoryStore):
 
     def load(self, session_id: str) -> list[Message]:
         stored = self._store.get(session_id, [])
-        return deepcopy(stored)
+        return deepcopy(trim_messages_by_compaction_checkpoint(stored))
 
     def save(self, session_id: str, messages: list[Message]) -> None:
         non_system_messages = [msg for msg in messages if get_role(msg) != "system"]
-        self._store[session_id] = deepcopy(non_system_messages[-self._max_messages :])
+        trimmed_messages = trim_messages_by_compaction_checkpoint(non_system_messages)
+        self._store[session_id] = deepcopy(trimmed_messages)
 
     def clear(self, session_id: str | None = None) -> None:
         normalized = (session_id or "").strip()
