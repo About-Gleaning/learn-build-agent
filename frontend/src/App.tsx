@@ -1,4 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type Role = "user" | "assistant" | "tool" | "system";
 
@@ -385,6 +387,30 @@ function getNextAgent(current: AgentName, agents: AgentName[]): AgentName {
   return agents[nextIndex];
 }
 
+function renderMessageBody(message: UiMessage) {
+  const content = message.text || (message.status === "running" ? "正在生成响应..." : "");
+  if (!content) {
+    return null;
+  }
+  if (message.role !== "assistant") {
+    return <div className="message-text">{content}</div>;
+  }
+  return (
+    <div className="message-text message-markdown">
+      {/* 助手回复按 Markdown 渲染，但不直出 HTML 与图片，降低内容注入和外链资源风险。 */}
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer noopener nofollow" />,
+          img: ({ alt }) => <span className="message-markdown-image-alt">[图片已省略{alt ? `: ${alt}` : ""}]</span>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export function App() {
   const [sessionId] = useState(() => buildSessionId());
   const [input, setInput] = useState("");
@@ -699,7 +725,7 @@ export function App() {
                             </button>
                           </div>
                         </div>
-                        <div className="message-text">{msg.text || (msg.status === "running" ? "正在生成响应..." : "")}</div>
+                        {renderMessageBody(msg)}
                       </div>
                     </div>
                   </article>
