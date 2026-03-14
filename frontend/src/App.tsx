@@ -18,6 +18,12 @@ type TimelineItem = {
   title: string;
   detail: string;
   createdAt: string;
+  agent: string;
+  agentKind: string;
+  depth: number;
+  round: number;
+  delegationId: string;
+  parentToolCallId: string;
 };
 
 type RuntimeOptionsResp = {
@@ -152,6 +158,13 @@ function getTimelineBadgeLabel(kind: string): string {
   return "事件";
 }
 
+function getAgentKindLabel(agentKind: string): string {
+  if (agentKind === "subagent") {
+    return "子代理";
+  }
+  return "主代理";
+}
+
 async function loadHistory(sessionId: string): Promise<UiMessage[]> {
   const resp = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=50`);
   if (!resp.ok) {
@@ -269,91 +282,98 @@ function describeRuntime(payload: Record<string, unknown>): string {
   return tags.join(" / ");
 }
 
+function describeAgent(payload: Record<string, unknown>): string {
+  const agent = readString(payload, "agent", "unknown");
+  const agentKind = getAgentKindLabel(readString(payload, "agent_kind", "primary"));
+  return `${agentKind} · ${agent}`;
+}
+
 function buildTimelineItem(eventName: string, payload: Record<string, unknown>): TimelineItem | null {
-  const now = new Date().toISOString();
+  const createdAt =
+    readString(payload, "timestamp") ||
+    readString(payload, "started_at") ||
+    readString(payload, "completed_at") ||
+    new Date().toISOString();
+  const agent = readString(payload, "agent", "unknown");
+  const agentKind = readString(payload, "agent_kind", "primary");
+  const depth = readNumber(payload, "depth", 0);
+  const round = readNumber(payload, "round", 0);
+  const delegationId = readString(payload, "delegation_id");
+  const parentToolCallId = readString(payload, "parent_tool_call_id");
+
+  const createItem = (kind: string, title: string, detail: string): TimelineItem => ({
+    id: readString(payload, "event_id", buildId("timeline")),
+    kind,
+    title,
+    detail,
+    createdAt,
+    agent,
+    agentKind,
+    depth,
+    round,
+    delegationId,
+    parentToolCallId,
+  });
+
   if (eventName === "text_delta") {
     return null;
   }
 
   if (eventName === "start") {
-    return {
-      id: buildId("timeline"),
-      kind: "start",
-      title: "会话开始",
-      detail: describeRuntime(payload) || `模式: ${readString(payload, "mode", "build")}`,
-      createdAt: readString(payload, "started_at", now),
-    };
+    return createItem(
+      "start",
+      `${agent} 会话开始`,
+      `${describeAgent(payload)}${describeRuntime(payload) ? ` · ${describeRuntime(payload)}` : ""}`,
+    );
   }
 
   if (eventName === "round_start") {
-    const roundNo = readNumber(payload, "round", 0);
-    return {
-      id: buildId("timeline"),
-      kind: "round_start",
-      title: `第 ${roundNo} 轮开始`,
-      detail: describeRuntime(payload) || `执行代理: ${readString(payload, "agent", "unknown")}`,
-      createdAt: readString(payload, "started_at", now),
-    };
+    return createItem(
+      "round_start",
+      `${agent} 第 ${round} 轮开始`,
+      describeRuntime(payload) || describeAgent(payload),
+    );
   }
 
   if (eventName === "tool_call") {
-    return {
-      id: buildId("timeline"),
-      kind: "tool_call",
-      title: `调用工具: ${readString(payload, "name", "unknown")}`,
-      detail: readString(payload, "arguments", "{}"),
-      createdAt: now,
-    };
+    return createItem(
+      "tool_call",
+      `${agent} 调用工具: ${readString(payload, "name", "unknown")}`,
+      readString(payload, "arguments", "{}"),
+    );
   }
 
   if (eventName === "tool_result") {
-    return {
-      id: buildId("timeline"),
-      kind: "tool_result",
-      title: `工具结果: ${readString(payload, "name", "unknown")}`,
-      detail: `${readString(payload, "status", "completed")} ${readString(payload, "output_preview")}`.trim(),
-      createdAt: now,
-    };
+    const toolName = readString(payload, "name", "unknown");
+    const title = toolName === "task" ? `${agent} 委派结果` : `${agent} 工具结果: ${toolName}`;
+    return createItem(
+      "tool_result",
+      title,
+      `${readString(payload, "status", "completed")} ${readString(payload, "output_preview")}`.trim(),
+    );
   }
 
   if (eventName === "round_end") {
-    const roundNo = readNumber(payload, "round", 0);
-    return {
-      id: buildId("timeline"),
-      kind: "round_end",
-      title: `第 ${roundNo} 轮结束`,
-      detail: `状态: ${readString(payload, "status", "completed")}`,
-      createdAt: readString(payload, "completed_at", now),
-    };
+    return createItem(
+      "round_end",
+      `${agent} 第 ${round} 轮结束`,
+      `状态: ${readString(payload, "status", "completed")}`,
+    );
   }
 
   if (eventName === "done") {
-    return {
-      id: buildId("timeline"),
-      kind: "done",
-      title: "会话完成",
-      detail: `${readString(payload, "status", "completed")} ${describeRuntime(payload)}`.trim(),
-      createdAt: readString(payload, "completed_at", now),
-    };
+    return createItem(
+      "done",
+      `${agent} 会话完成`,
+      `${readString(payload, "status", "completed")} ${describeRuntime(payload)}`.trim(),
+    );
   }
 
   if (eventName === "error") {
-    return {
-      id: buildId("timeline"),
-      kind: "error",
-      title: "会话异常",
-      detail: readString(payload, "message", "未知错误"),
-      createdAt: now,
-    };
+    return createItem("error", `${agent} 会话异常`, readString(payload, "message", "未知错误"));
   }
 
-  return {
-    id: buildId("timeline"),
-    kind: eventName,
-    title: `事件: ${eventName}`,
-    detail: JSON.stringify(payload),
-    createdAt: now,
-  };
+  return createItem(eventName, `${agent} 事件: ${eventName}`, JSON.stringify(payload));
 }
 
 function getNextAgent(current: AgentName, agents: AgentName[]): AgentName {
@@ -498,7 +518,6 @@ export function App() {
 
     setError("");
     setInput("");
-    setTimeline([]);
     setShouldFollow(true);
 
     const now = new Date().toISOString();
@@ -547,7 +566,12 @@ export function App() {
         onEvent: (eventName, payload) => {
           const item = buildTimelineItem(eventName, payload);
           if (item) {
-            setTimeline((prev) => [...prev, item]);
+            setTimeline((prev) => {
+              if (prev.some((current) => current.id === item.id)) {
+                return prev;
+              }
+              return [...prev, item];
+            });
           }
           const providerName = readString(payload, "provider");
           const modelName = readString(payload, "model");
@@ -768,10 +792,19 @@ export function App() {
               ) : null}
 
               {timeline.map((item) => (
-                <article key={item.id} className={`timeline-entry ${item.kind}`}>
+                <article
+                  key={item.id}
+                  className={`timeline-entry ${item.kind} ${item.agentKind}`}
+                  style={{ marginLeft: `${Math.max(0, item.depth) * 18}px` }}
+                >
                   <div className="timeline-entry-head">
                     <span className={`timeline-kind kind-${item.kind}`}>{getTimelineBadgeLabel(item.kind)}</span>
                     <time>{formatTime(item.createdAt)}</time>
+                  </div>
+                  <div className="timeline-entry-meta">
+                    <span className={`agent-pill ${item.agentKind}`}>{describeAgent({ agent: item.agent, agent_kind: item.agentKind })}</span>
+                    {item.round > 0 ? <span className="timeline-meta-text">第 {item.round} 轮</span> : null}
+                    {item.delegationId ? <span className="timeline-meta-text">委派: {item.delegationId}</span> : null}
                   </div>
                   <div className="timeline-entry-title">{item.title}</div>
                   <div className="timeline-entry-detail">{item.detail}</div>

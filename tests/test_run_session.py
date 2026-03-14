@@ -707,6 +707,58 @@ def test_run_session_stream_events_should_emit_tool_events(monkeypatch):
     assert "tool_call" in event_names
     assert "tool_result" in event_names
     assert event_names[-1] == "done"
+    assert all(event.get("event_id") for event in events)
+    assert all("depth" in event for event in events)
+
+
+def test_run_session_stream_events_should_include_subagent_timeline(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_task_1",
+                name="task",
+                arguments='{"agent":"explore","prompt":"子任务"}',
+            )
+            return assistant
+
+        if call_state["count"] == 2:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_sub_1",
+                name="todo_read",
+                arguments="{}",
+            )
+            return assistant
+
+        if call_state["count"] == 3:
+            append_text_part(assistant, "子代理完成")
+            return assistant
+
+        append_text_part(assistant, "主流程完成")
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("测试 task 委派", session_id="s_stream_task"))
+    task_tool_call = next(event for event in events if event["type"] == "tool_call" and event["name"] == "task")
+    subagent_start = next(event for event in events if event["type"] == "start" and event["agent_kind"] == "subagent")
+    subagent_tool_call = next(event for event in events if event["type"] == "tool_call" and event["agent_kind"] == "subagent")
+    subagent_done = next(event for event in events if event["type"] == "done" and event["agent_kind"] == "subagent")
+    task_tool_result = next(event for event in events if event["type"] == "tool_result" and event["name"] == "task")
+
+    assert task_tool_call["tool_call_id"] == "call_task_1"
+    assert subagent_start["parent_tool_call_id"] == "call_task_1"
+    assert subagent_tool_call["depth"] == 1
+    assert subagent_done["delegation_id"] == task_tool_result["delegation_id"]
+    assert task_tool_result["output_preview"] == "子代理完成"
 
 
 def test_run_session_should_remember_explicit_provider(monkeypatch):

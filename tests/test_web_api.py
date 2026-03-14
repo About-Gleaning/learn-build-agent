@@ -40,17 +40,50 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
         assert kwargs["provider_specified"] is True
         yield {
             "type": "start",
+            "event_id": "evt_1",
             "session_id": session_id or "default",
+            "agent": mode or "build",
+            "agent_kind": "primary",
+            "depth": 0,
             "mode": mode or "build",
             "provider": "gpt",
             "model": "gpt-4.1",
             "started_at": "t1",
         }
-        yield {"type": "round_start", "round": 1, "agent": "build", "provider": "gpt", "model": "gpt-4.1", "started_at": "t2"}
-        yield {"type": "text_delta", "round": 1, "delta": "回答"}
-        yield {"type": "text_delta", "round": 1, "delta": ": 你好"}
-        yield {"type": "round_end", "round": 1, "status": "completed", "finish_reason": "stop", "completed_at": "t3"}
-        yield {"type": "done", "session_id": session_id or "default", "message_id": "m_1", "status": "completed"}
+        yield {
+            "type": "round_start",
+            "event_id": "evt_2",
+            "round": 1,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "provider": "gpt",
+            "model": "gpt-4.1",
+            "started_at": "t2",
+        }
+        yield {"type": "text_delta", "event_id": "evt_3", "round": 1, "agent": "build", "agent_kind": "primary", "depth": 0, "delta": "回答"}
+        yield {"type": "text_delta", "event_id": "evt_4", "round": 1, "agent": "build", "agent_kind": "primary", "depth": 0, "delta": ": 你好"}
+        yield {
+            "type": "round_end",
+            "event_id": "evt_5",
+            "round": 1,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "status": "completed",
+            "finish_reason": "stop",
+            "completed_at": "t3",
+        }
+        yield {
+            "type": "done",
+            "event_id": "evt_6",
+            "session_id": session_id or "default",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "m_1",
+            "status": "completed",
+        }
 
     monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
 
@@ -67,6 +100,7 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     assert any(evt == "round_start" for evt, _ in events)
     assert any(evt == "text_delta" for evt, _ in events)
     assert any(evt == "done" for evt, _ in events)
+    assert any(payload.get("event_id") == "evt_1" for evt, payload in events if evt == "start")
 
 
 def test_runtime_options_should_return_backend_config():

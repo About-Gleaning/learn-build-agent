@@ -72,6 +72,8 @@ pnpm dev
 - 工具实现统一放在 `tools/handlers.py`，工具协议统一放在 `tools/specs.py`。
 - 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
 - 子 Agent 统一通过 `task` 工具路由；`task` 可见的 subagent 列表必须来自 `runtime/agents.py`，不在会话层硬编码分支逻辑。
+- Web 时间线按 `session` 维度累计展示，前端禁止在新一轮提交时清空既有执行轨迹。
+- `task` 委派子 Agent 时，流式事件必须透传子 Agent 内部进度，并携带后端生成的 `delegation_id` 作为稳定关联键。
 
 ## Agent 约定
 
