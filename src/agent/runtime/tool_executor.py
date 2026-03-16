@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypedDict
 
+from ..config.logging_setup import build_log_extra, sanitize_log_text
 from ..core.hooks import HookDispatcher
 from .compaction import apply_tool_output_truncation
 
@@ -12,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 class ToolHookContext(TypedDict, total=False):
     session_id: str
+    agent: str
+    model: str
     tool_name: str
     tool_call_id: str
     arguments: str
@@ -74,34 +77,29 @@ class ToolLoggingHook(ToolHook):
 
     def before_call(self, ctx: ToolHookContext) -> None:
         logger.info(
-            "tool.request session_id=%s tool=%s tool_call_id=%s args_size=%d round=%d",
-            ctx.get("session_id", ""),
+            "tool.request tool=%s args=%s",
             ctx.get("tool_name", ""),
-            ctx.get("tool_call_id", ""),
-            len(ctx.get("arguments", "")),
-            ctx.get("round_no", 0),
+            sanitize_log_text(ctx.get("arguments", "")),
+            extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
         )
 
     def after_call(self, ctx: ToolHookContext, result: ToolResult) -> None:
         logger.info(
-            "tool.response session_id=%s tool=%s tool_call_id=%s duration_ms=%d result_size=%d",
-            ctx.get("session_id", ""),
+            "tool.response tool=%s result=%s",
             ctx.get("tool_name", ""),
-            ctx.get("tool_call_id", ""),
-            ctx.get("duration_ms", 0),
-            len(result.get("output", "")),
+            sanitize_log_text(result.get("output", "")),
+            extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
         )
 
     def on_error(self, ctx: ToolHookContext, error: Exception, normalized_error: ToolNormalizedError) -> None:
-        logger.warning(
-            "tool.error session_id=%s tool=%s tool_call_id=%s duration_ms=%d error_code=%s error_type=%s",
-            ctx.get("session_id", ""),
+        logger.exception(
+            "tool.error tool=%s args=%s error_code=%s error_type=%s detail=%s",
             ctx.get("tool_name", ""),
-            ctx.get("tool_call_id", ""),
-            ctx.get("duration_ms", 0),
+            sanitize_log_text(ctx.get("arguments", "")),
             normalized_error.get("code", "execution_error"),
             normalized_error.get("details", type(error).__name__),
-            exc_info=True,
+            sanitize_log_text(normalized_error.get("message", str(error))),
+            extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
         )
 
 
@@ -251,11 +249,15 @@ class ToolExecutor:
         tool_call_id: str,
         round_no: int,
         hooks: list[ToolHook],
+        agent: str = "",
+        model: str = "",
         task_available: bool = False,
         workdir: str | None = None,
     ) -> ToolResult:
         ctx: ToolHookContext = {
             "session_id": session_id,
+            "agent": agent,
+            "model": model,
             "tool_name": tool_name,
             "tool_call_id": tool_call_id,
             "arguments": arguments,

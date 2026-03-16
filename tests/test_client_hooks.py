@@ -11,7 +11,7 @@ from agent.adapters.llm.client import (
     create_chat_completion_stream,
     register_global_hook,
 )
-from agent.core.message import append_text_part, create_message
+from agent.core.message import append_text_part, append_tool_part, create_message
 
 
 @pytest.fixture(autouse=True)
@@ -62,10 +62,40 @@ def _build_success_response(content: str = "ok"):
     return SimpleNamespace(choices=[choice], usage=usage)
 
 
+def _build_tool_call_response(name: str = "todo_read"):
+    tool_call = SimpleNamespace(
+        id="call_1",
+        function=SimpleNamespace(name=name, arguments="{}"),
+    )
+    provider_message = SimpleNamespace(content="", tool_calls=[tool_call])
+    choice = SimpleNamespace(message=provider_message, finish_reason="tool_calls")
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
 def _build_user_message(session_id: str = "s_hook"):
     msg = create_message("user", session_id)
     append_text_part(msg, "hello")
     return [msg]
+
+
+def _build_tool_followup_messages(session_id: str = "s_hook"):
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "plan_enter工具的描述怎么写的")
+
+    assistant_msg = create_message("assistant", session_id)
+    append_text_part(assistant_msg, "我来读取工具描述")
+
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_1",
+        name="read_file",
+        status="completed",
+        arguments='{"path":"src/agent/tools/plan_enter.txt"}',
+        output={"output": "使用这个工具来建议用户切换到 plan agent"},
+    )
+    return [user_msg, assistant_msg, tool_msg]
 
 
 def _patch_openai_client(monkeypatch, create_fn):
@@ -189,24 +219,41 @@ def test_stream_should_yield_delta_and_return_message(monkeypatch):
     assert final_message["info"]["status"] == "completed"
 
 
-def test_logging_hook_should_log_prompt_when_enabled(monkeypatch, caplog):
-    monkeypatch.setattr(client_module, "LOG_LLM_PROMPT", True)
-    monkeypatch.setattr(client_module, "LOG_LLM_PROMPT_LIMIT", 2000)
+def test_logging_hook_should_log_latest_message(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     with caplog.at_level("INFO"):
-        create_chat_completion(_build_user_message(), tools=[])
+        create_chat_completion(_build_user_message(), tools=[], agent="build")
 
-    assert "llm.prompt" in caplog.text
-    assert '"role":"user"' in caplog.text
-    assert "hello" in caplog.text
+    assert "llm.request latest_message=hello" in caplog.text
+    assert all(record.agent == "build" for record in caplog.records)
+    assert all(record.model == "unknown" or isinstance(record.model, str) for record in caplog.records)
 
 
-def test_logging_hook_should_not_log_prompt_when_disabled(monkeypatch, caplog):
-    monkeypatch.setattr(client_module, "LOG_LLM_PROMPT", False)
+def test_logging_hook_should_log_response_text(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     with caplog.at_level("INFO"):
-        create_chat_completion(_build_user_message(), tools=[])
+        create_chat_completion(_build_user_message(), tools=[], agent="plan")
 
-    assert "llm.prompt" not in caplog.text
+    assert "llm.response message=done" in caplog.text
+    assert any(record.agent == "plan" for record in caplog.records)
+
+
+def test_logging_hook_should_log_tool_name_when_model_requests_tool(monkeypatch, caplog):
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_tool_call_response("todo_read"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_user_message(), tools=[{"type": "function"}], agent="build")
+
+    assert "llm.response tool_names=todo_read" in caplog.text
+
+
+def test_logging_hook_should_not_repeat_previous_user_message_on_tool_followup(monkeypatch, caplog):
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_tool_followup_messages(), tools=[], agent="build")
+
+    assert "llm.request latest_message=plan_enter工具的描述怎么写的" not in caplog.text
+    assert "llm.request" in caplog.text

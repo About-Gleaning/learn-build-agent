@@ -135,63 +135,33 @@ def run_plan_enter(
     plan_path: str,
     plan_exists: bool,
     latest_model: str,
-    confirmed: bool | None = None,
 ) -> dict[str, Any]:
     if current_mode == "plan":
         return {
             "title": "已在 plan 模式",
             "output": "当前已处于 plan 模式，无需重复切换。",
             "metadata": {
-                "status": "cancelled",
+                "status": "completed",
                 "target_agent": "plan",
                 "plan_path": plan_path,
                 "model": latest_model,
                 "requires_confirmation": False,
             },
         }
-
-    if confirmed is False:
-        return {
-            "title": "已取消切换",
-            "output": "用户取消进入 plan 模式，保持当前 build 模式。",
-            "metadata": {
-                "status": "cancelled",
-                "target_agent": "build",
-                "plan_path": plan_path,
-                "model": latest_model,
-                "requires_confirmation": False,
-            },
-        }
-
-    if confirmed is not True:
-        return {
-            "title": "切换确认",
-            "output": "请确认是否切换到 plan 模式。",
-            "metadata": {
-                "status": "confirmation_required",
-                "target_agent": "plan",
-                "plan_path": plan_path,
-                "model": latest_model,
-                "requires_confirmation": True,
-                "confirmation_question": "是否切换到 plan 模式？",
-            },
-        }
-
-    base_message = "用户请求进入plan模式。切换到plan模式并开始计划。"
-    extra = "已有计划文件，去编辑它。" if plan_exists else "还没有，去创建它。"
-    synthetic_message = f"{base_message}{extra}"
 
     return {
-        "title": "已切换到 plan 模式",
-        "output": synthetic_message,
+        "title": "等待确认",
+        "output": "等待用户确认是否切换到 plan 模式。",
         "metadata": {
-            "status": "switched",
+            "status": "confirmation_required",
             "target_agent": "plan",
+            "current_agent": "build",
             "plan_path": plan_path,
             "model": latest_model,
-            "requires_confirmation": False,
-            "synthetic_user_message": synthetic_message,
-            "synthetic_agent": "plan",
+            "plan_exists": plan_exists,
+            "requires_confirmation": True,
+            "confirmation_question": "是否切换到 plan 模式？",
+            "action_type": "enter_plan",
         },
     }
 
@@ -202,62 +172,32 @@ def run_plan_exit(
     plan_path: str,
     plan_exists: bool,
     latest_model: str,
-    confirmed: bool | None = None,
 ) -> dict[str, Any]:
     if current_mode != "plan":
         return {
             "title": "当前不在 plan 模式",
             "output": "当前不在 plan 模式，无需退出。",
             "metadata": {
-                "status": "cancelled",
+                "status": "completed",
                 "target_agent": "build",
                 "plan_path": plan_path,
                 "model": latest_model,
                 "requires_confirmation": False,
             },
         }
-
-    if confirmed is False:
-        return {
-            "title": "已取消切换",
-            "output": "用户取消退出 plan 模式，继续留在 plan 模式。",
-            "metadata": {
-                "status": "cancelled",
-                "target_agent": "plan",
-                "plan_path": plan_path,
-                "model": latest_model,
-                "requires_confirmation": False,
-            },
-        }
-
-    if confirmed is not True:
-        return {
-            "title": "切换确认",
-            "output": "请确认计划是否已完成并切换到 build 模式。",
-            "metadata": {
-                "status": "confirmation_required",
-                "target_agent": "build",
-                "plan_path": plan_path,
-                "model": latest_model,
-                "requires_confirmation": True,
-                "confirmation_question": "计划是否已完成，并切换到 build 模式？",
-            },
-        }
-
-    base_message = "计划已被批准，您现在可以编辑文件了。执行计划。"
-    extra = f"计划文件在 {plan_path}，按它执行。" if plan_exists else ""
-    synthetic_message = f"{base_message}{extra}"
 
     return {
-        "title": "已切换到 build 模式",
-        "output": synthetic_message,
+        "title": "等待确认",
+        "output": "等待用户确认计划是否已完成，并切换到 build 模式。",
         "metadata": {
-            "status": "switched",
+            "status": "confirmation_required",
             "target_agent": "build",
+            "current_agent": "plan",
             "plan_path": plan_path,
             "model": latest_model,
-            "requires_confirmation": False,
-            "synthetic_user_message": synthetic_message,
-            "synthetic_agent": "build",
+            "plan_exists": plan_exists,
+            "requires_confirmation": True,
+            "confirmation_question": "计划是否已完成，并切换到 build 模式？",
+            "action_type": "exit_plan",
         },
     }

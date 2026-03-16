@@ -21,6 +21,41 @@ class TokenUsage(TypedDict, total=False):
     total_tokens: int
 
 
+class ResponseMeta(TypedDict, total=False):
+    round_count: int
+    tool_call_count: int
+    tool_names: list[str]
+    delegation_count: int
+    delegated_agents: list[str]
+    duration_ms: int
+
+
+class ProcessItem(TypedDict, total=False):
+    id: str
+    kind: str
+    title: str
+    detail: str
+    created_at: str
+    agent: str
+    agent_kind: str
+    depth: int
+    round: int
+    status: str
+    delegation_id: str
+    parent_tool_call_id: str
+    tool_name: str
+    tool_call_id: str
+
+
+class ConfirmationInfo(TypedDict, total=False):
+    tool: str
+    question: str
+    target_agent: str
+    current_agent: str
+    action_type: str
+    plan_path: str
+
+
 class MessageInfo(TypedDict, total=False):
     message_id: str
     session_id: str
@@ -39,6 +74,9 @@ class MessageInfo(TypedDict, total=False):
     turn_started_at: str
     turn_completed_at: str
     summary: bool
+    response_meta: ResponseMeta
+    process_items: list[ProcessItem]
+    confirmation: ConfirmationInfo
 
 
 class Part(TypedDict, total=False):

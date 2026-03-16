@@ -1,36 +1,33 @@
 import logging
-import json
 import time
 from collections.abc import Generator
 from typing import Any, TypedDict
 
 from openai import OpenAI
 
-from ...config.settings import LOG_LEVEL, LOG_LLM_PROMPT, LOG_LLM_PROMPT_LIMIT, ResolvedLLMConfig, resolve_llm_config
+from ...config.logging_setup import build_log_extra, sanitize_log_text
+from ...config.settings import ResolvedLLMConfig, resolve_llm_config
 from ...core.hooks import HookDispatcher
 from ...core.message import (
     Message,
     append_text_part,
     append_tool_part,
-    count_parts,
     create_error_message,
     create_message,
     estimate_message_size,
+    extract_tool_calls,
+    get_role,
     mark_message_completed,
     normalize_error,
     parse_provider_response,
     to_provider_messages,
-)
-
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 
 class HookContext(TypedDict, total=False):
     session_id: str
+    agent: str
     provider: str
     model: str
     parent_id: str
@@ -39,6 +36,7 @@ class HookContext(TypedDict, total=False):
     tools_count: int
     request_size: int
     request_payload: dict[str, Any]
+    source_messages: list[Message]
     start_time: float
     latency_ms: int
 
@@ -67,60 +65,60 @@ class LoggingHook(LLMHook):
         super().__init__(name="logging", fail_fast=fail_fast)
 
     def before_call(self, ctx: HookContext) -> None:
-        logger.info(
-            "llm.request session_id=%s provider=%s model=%s message_count=%d tools_count=%d request_size=%d",
-            ctx.get("session_id", "default_session"),
-            ctx.get("provider", ""),
-            ctx.get("model", ""),
-            ctx.get("message_count", 0),
-            ctx.get("tools_count", 0),
-            ctx.get("request_size", 0),
-        )
-        if LOG_LLM_PROMPT:
-            logger.info(
-                "llm.prompt session_id=%s provider=%s model=%s prompt=%s",
-                ctx.get("session_id", "default_session"),
-                ctx.get("provider", ""),
-                ctx.get("model", ""),
-                _build_prompt_preview(ctx.get("request_payload", {})),
-            )
+        latest_message = _build_latest_message_preview(ctx.get("source_messages", []))
+        log_extra = build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", ""))
+        if latest_message is None:
+            logger.info("llm.request", extra=log_extra)
+            return
+        logger.info("llm.request latest_message=%s", latest_message, extra=log_extra)
 
     def after_call(self, ctx: HookContext, message: Message) -> None:
-        content_preview = _mask_text(
-            "\n".join(part.get("content", "") for part in message["parts"] if part.get("type") in {"text", "error"})
-        )
-        logger.info(
-            "llm.response session_id=%s provider=%s model=%s latency_ms=%d status=%s finish_reason=%s tool_calls=%d preview=%s",
-            ctx.get("session_id", "default_session"),
-            ctx.get("provider", ""),
-            ctx.get("model", ""),
-            ctx.get("latency_ms", 0),
-            message["info"].get("status", "unknown"),
-            message["info"].get("finish_reason", ""),
-            count_parts(message, "tool"),
-            content_preview,
-        )
+        tool_names = [tool_call["name"] for tool_call in extract_tool_calls(message) if tool_call.get("name")]
+        if tool_names:
+            info_text = f"tool_names={','.join(tool_names)}"
+        else:
+            info_text = f"message={_build_response_preview(message)}"
 
-        usage = message["info"].get("token_usage", {})
-        if usage:
-            logger.debug(
-                "llm.usage session_id=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
-                ctx.get("session_id", "default_session"),
-                usage.get("prompt_tokens", 0),
-                usage.get("completion_tokens", 0),
-                usage.get("total_tokens", 0),
-            )
+        logger.info(
+            "llm.response %s",
+            info_text,
+            extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
+        )
 
     def on_error(self, ctx: HookContext, error: Exception, normalized_error: dict[str, str]) -> None:
         logger.exception(
-            "llm.error session_id=%s provider=%s model=%s latency_ms=%d error_code=%s error_type=%s",
-            ctx.get("session_id", "default_session"),
-            ctx.get("provider", ""),
-            ctx.get("model", ""),
-            ctx.get("latency_ms", 0),
+            "llm.error error_code=%s error_type=%s detail=%s",
             normalized_error.get("code", "api_error"),
             normalized_error.get("details", type(error).__name__),
+            sanitize_log_text(normalized_error.get("message", str(error))),
+            extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
         )
+
+
+def _build_latest_message_preview(messages: list[Message]) -> str | None:
+    if not messages:
+        return None
+
+    latest_message = messages[-1]
+    if get_role(latest_message) != "user":
+        return None
+
+    for part in reversed(latest_message.get("parts", [])):
+        if part.get("type") != "text":
+            continue
+        content = str(part.get("content", "")).strip()
+        if content:
+            return sanitize_log_text(content)
+    return ""
+
+
+def _build_response_preview(message: Message) -> str:
+    text_parts = [
+        str(part.get("content", "")).strip()
+        for part in message.get("parts", [])
+        if part.get("type") in {"text", "error"} and str(part.get("content", "")).strip()
+    ]
+    return sanitize_log_text("\n".join(text_parts))
 
 
 class OpenAICompatibleAdapter:
@@ -150,22 +148,6 @@ class OpenAICompatibleAdapter:
 
 _GLOBAL_HOOKS: list[LLMHook] = []
 _DISPATCHER = HookDispatcher[LLMHook, HookContext, dict[str, str]](logger=logger, name="llm")
-
-
-def _mask_text(text: str, limit: int = 300) -> str:
-    cleaned = text.replace("\n", "\\n")
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[:limit] + "...<truncated>"
-
-
-def _build_prompt_preview(request_payload: dict[str, Any]) -> str:
-    messages = request_payload.get("messages", [])
-    try:
-        serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        serialized = str(messages)
-    return _mask_text(serialized, limit=LOG_LLM_PROMPT_LIMIT)
 
 
 def register_global_hook(hook: LLMHook) -> None:
@@ -221,6 +203,7 @@ def create_chat_completion(
     max_tokens: int = 4096,
     hooks: list[LLMHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
+    agent: str = "",
 ) -> Message:
     """统一封装大模型调用入口，返回内部 Message 结构。"""
     session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
@@ -234,6 +217,7 @@ def create_chat_completion(
 
     ctx: HookContext = {
         "session_id": session_id,
+        "agent": agent,
         "provider": adapter.provider,
         "model": adapter.model,
         "parent_id": parent_id,
@@ -242,6 +226,7 @@ def create_chat_completion(
         "tools_count": len(tools),
         "request_size": sum(estimate_message_size(msg) for msg in messages),
         "request_payload": request_payload,
+        "source_messages": messages,
     }
 
     effective_hooks = get_global_hooks() + (hooks or [])
@@ -281,6 +266,7 @@ def create_chat_completion_stream(
     max_tokens: int = 4096,
     hooks: list[LLMHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
+    agent: str = "",
 ) -> Generator[dict[str, Any], None, Message]:
     """流式调用大模型，逐步产出文本增量并在结束时返回完整 Message。"""
     session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
@@ -295,6 +281,7 @@ def create_chat_completion_stream(
 
     ctx: HookContext = {
         "session_id": session_id,
+        "agent": agent,
         "provider": adapter.provider,
         "model": adapter.model,
         "parent_id": parent_id,
@@ -303,6 +290,7 @@ def create_chat_completion_stream(
         "tools_count": len(tools),
         "request_size": sum(estimate_message_size(msg) for msg in messages),
         "request_payload": request_payload,
+        "source_messages": messages,
     }
 
     effective_hooks = get_global_hooks() + (hooks or [])

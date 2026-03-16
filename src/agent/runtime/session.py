@@ -3,17 +3,19 @@ import re
 import subprocess
 import uuid
 import json
+import inspect
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Generator
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TypedDict
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..config.settings import ResolvedLLMConfig, resolve_llm_config
 from ..core.context import set_session_id
 from ..core.message import (
-    EVENT_BUS,
     Message,
+    ProcessItem,
+    ResponseMeta,
     append_tool_part,
     append_text_part,
     create_message,
@@ -55,6 +57,22 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 TODO = TodoManager()
 SESSION_MEMORY_STORE: SessionMemoryStore = InMemorySessionMemoryStore(max_messages=24)
+ModeSwitchAction = Literal["confirm", "cancel"]
+
+
+class PendingModeSwitch(TypedDict):
+    tool_name: str
+    question: str
+    target_agent: str
+    current_agent: str
+    action_type: str
+    plan_path: str
+    plan_exists: bool
+    model: str
+    requested_at: str
+
+
+PENDING_MODE_SWITCHES: dict[str, PendingModeSwitch] = {}
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
@@ -62,8 +80,8 @@ _SECRET_PATTERNS = [
 ]
 
 
-def _normalize_model_name(model: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", model.strip().lower()).strip("._-")
+def _normalize_prompt_key(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip().lower()).strip("._-")
     return normalized or "default"
 
 
@@ -71,18 +89,18 @@ def _get_workdir() -> Path:
     return Path.cwd()
 
 
-def _resolve_build_prompt_path(model: str) -> Path:
-    normalized_model = _normalize_model_name(model)
-    candidate = PROMPTS_DIR / f"build.{normalized_model}.txt"
+def _resolve_build_prompt_path(vendor: str) -> Path:
+    normalized_vendor = _normalize_prompt_key(vendor)
+    candidate = PROMPTS_DIR / f"build.{normalized_vendor}.txt"
     if candidate.exists():
         return candidate
     return PROMPTS_DIR / "build.default.txt"
 
 
-def _resolve_prompt_path(agent: str, model: str) -> Path:
+def _resolve_prompt_path(agent: str, vendor: str) -> Path:
     agent_name = agent.strip().lower()
     if agent_name == "build":
-        return _resolve_build_prompt_path(model)
+        return _resolve_build_prompt_path(vendor)
     if agent_name == "plan":
         return PROMPTS_DIR / "plan.txt"
     candidate = PROMPTS_DIR / f"{agent_name}.txt"
@@ -127,13 +145,14 @@ def _detect_git_repository(workdir: Path) -> tuple[bool, str]:
     return True, result.stdout.strip()
 
 
-def _build_environment_appendix(*, agent: str, model: str, provider: str) -> str:
+def _build_environment_appendix(*, agent: str, model: str, provider: str, vendor: str) -> str:
     workdir = _get_workdir()
     is_git_repo, git_root = _detect_git_repository(workdir)
     now_text = datetime.now().astimezone().isoformat(timespec="seconds")
     lines = [
         "以下是当前运行环境信息：",
         f"- agent: {agent}",
+        f"- vendor: {vendor or 'unknown'}",
         f"- provider: {provider or 'unknown'}",
         f"- model: {model or 'unknown'}",
         f"- workdir: {workdir}",
@@ -144,18 +163,18 @@ def _build_environment_appendix(*, agent: str, model: str, provider: str) -> str
     return "\n".join(lines)
 
 
-def build_system_prompt(*, agent: str, model: str, provider: str) -> str:
-    base_prompt = _read_prompt_file(_resolve_prompt_path(agent, model))
+def build_system_prompt(*, agent: str, model: str, provider: str, vendor: str) -> str:
+    base_prompt = _read_prompt_file(_resolve_prompt_path(agent, vendor))
     parts = [
         base_prompt,
         _read_local_agent_appendix(),
-        _build_environment_appendix(agent=agent, model=model, provider=provider),
+        _build_environment_appendix(agent=agent, model=model, provider=provider, vendor=vendor),
     ]
     return "\n\n".join(part for part in parts if part)
 
 
-def _get_system_prompt_for_mode(mode: MainAgentMode, *, model: str, provider: str) -> str:
-    return build_system_prompt(agent=mode, model=model, provider=provider)
+def _get_system_prompt_for_mode(mode: MainAgentMode, *, model: str, provider: str, vendor: str) -> str:
+    return build_system_prompt(agent=mode, model=model, provider=provider, vendor=vendor)
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
@@ -275,7 +294,68 @@ def _build_confirmation_interrupted_message(
             "tool_metadata": metadata,
         },
     )
+    message["info"]["confirmation"] = {
+        "tool": tool_name,
+        "question": question,
+        "target_agent": str(metadata.get("target_agent", "")).strip(),
+        "current_agent": str(metadata.get("current_agent", "")).strip(),
+        "action_type": str(metadata.get("action_type", "")).strip(),
+        "plan_path": str(metadata.get("plan_path", "")).strip(),
+    }
     return message
+
+
+def _save_pending_mode_switch(session_id: str, metadata: dict[str, Any]) -> None:
+    target_agent = str(metadata.get("target_agent", "")).strip().lower()
+    current_agent = str(metadata.get("current_agent", "")).strip().lower()
+    action_type = str(metadata.get("action_type", "")).strip().lower()
+    if target_agent not in {"build", "plan"}:
+        raise ValueError("无效的目标模式")
+    if current_agent not in {"build", "plan"}:
+        raise ValueError("无效的当前模式")
+    if action_type not in {"enter_plan", "exit_plan"}:
+        raise ValueError("无效的模式切换动作")
+    PENDING_MODE_SWITCHES[session_id] = PendingModeSwitch(
+        tool_name=str(metadata.get("tool_name", "")).strip() or ("plan_enter" if action_type == "enter_plan" else "plan_exit"),
+        question=str(metadata.get("confirmation_question", "是否继续？")).strip() or "是否继续？",
+        target_agent=target_agent,
+        current_agent=current_agent,
+        action_type=action_type,
+        plan_path=str(metadata.get("plan_path", "")).strip(),
+        plan_exists=bool(metadata.get("plan_exists")),
+        model=str(metadata.get("model", "")).strip(),
+        requested_at=utc_now_iso(),
+    )
+
+
+def get_pending_mode_switch(session_id: str) -> PendingModeSwitch | None:
+    return PENDING_MODE_SWITCHES.get(session_id)
+
+
+def _clear_pending_mode_switch(session_id: str | None = None) -> None:
+    normalized = (session_id or "").strip()
+    if not normalized:
+        PENDING_MODE_SWITCHES.clear()
+        return
+    PENDING_MODE_SWITCHES.pop(normalized, None)
+
+
+def _build_mode_switch_confirm_input(pending: PendingModeSwitch) -> str:
+    action_type = str(pending.get("action_type", "")).strip().lower()
+    plan_path = str(pending.get("plan_path", "")).strip()
+    plan_exists = bool(pending.get("plan_exists"))
+    if action_type == "enter_plan":
+        extra = "已有计划文件，请继续完善它。" if plan_exists else "当前还没有计划文件，请创建计划。"
+        return f"用户已确认切换到 plan 模式。请切换到 plan 模式并开始制定计划。{extra}"
+    extra = f"计划文件在 {plan_path}，请按计划开始实施。" if plan_exists and plan_path else "请按已确认的计划开始实施。"
+    return f"用户已确认计划已完成，请切换到 build 模式并开始执行。{extra}"
+
+
+def _build_mode_switch_cancel_text(pending: PendingModeSwitch) -> str:
+    target_agent = str(pending.get('target_agent', '')).strip().lower()
+    if target_agent == "plan":
+        return "已取消切换到 plan 模式，继续保持当前 build 模式。"
+    return "已取消切换到 build 模式，继续保持当前 plan 模式。"
 
 
 def _append_synthetic_user_message(
@@ -306,20 +386,6 @@ def _append_synthetic_user_message(
     )
     messages.append(synthetic)
 
-
-def _on_message_completed(event: dict) -> None:
-    payload = event.get("payload", {})
-    logger.debug(
-        "event.message_completed session_id=%s message_id=%s finish_reason=%s",
-        event.get("session_id", ""),
-        event.get("message_id", ""),
-        payload.get("finish_reason", ""),
-    )
-
-
-EVENT_BUS.subscribe("message_completed", _on_message_completed)
-
-
 def _build_text_message(
     role: str,
     content: str,
@@ -332,6 +398,53 @@ def _build_text_message(
     message = create_message(role=role, session_id=session_id, model=model, provider=provider)
     append_text_part(message, content, meta=text_meta)
     return message
+
+
+def _supports_keyword_arg(func: Callable[..., Any], arg_name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == arg_name:
+            return True
+    return False
+
+
+def _call_chat_completion(
+    *,
+    messages: list[Message],
+    tools: list[dict[str, Any]],
+    llm_config: ResolvedLLMConfig,
+    agent: str,
+) -> Message:
+    kwargs: dict[str, Any] = {
+        "messages": messages,
+        "tools": tools,
+        "llm_config": llm_config,
+    }
+    if _supports_keyword_arg(create_chat_completion, "agent"):
+        kwargs["agent"] = agent
+    return create_chat_completion(**kwargs)
+
+
+def _call_chat_completion_stream(
+    *,
+    messages: list[Message],
+    tools: list[dict[str, Any]],
+    llm_config: ResolvedLLMConfig,
+    agent: str,
+) -> Generator[dict[str, Any], None, Message]:
+    kwargs: dict[str, Any] = {
+        "messages": messages,
+        "tools": tools,
+        "llm_config": llm_config,
+    }
+    if _supports_keyword_arg(create_chat_completion_stream, "agent"):
+        kwargs["agent"] = agent
+    return create_chat_completion_stream(**kwargs)
 
 
 def _set_message_runtime_info(
@@ -449,6 +562,144 @@ def _build_stream_event(
     return event
 
 
+def _describe_runtime(payload: dict[str, Any]) -> str:
+    mode = str(payload.get("mode", "")).strip()
+    agent = str(payload.get("agent", "")).strip()
+    provider = str(payload.get("provider", "")).strip()
+    model = str(payload.get("model", "")).strip()
+    tags = [mode or agent, provider, model]
+    return " / ".join([tag for tag in tags if tag])
+
+
+def _describe_agent(payload: dict[str, Any]) -> str:
+    agent = str(payload.get("agent", "unknown")).strip() or "unknown"
+    agent_kind = "子代理" if str(payload.get("agent_kind", "primary")).strip() == "subagent" else "主代理"
+    return f"{agent_kind} · {agent}"
+
+
+def _build_process_item(event: dict[str, Any]) -> ProcessItem | None:
+    event_type = str(event.get("type", "")).strip()
+    if not event_type or event_type == "text_delta":
+        return None
+
+    payload = dict(event)
+    created_at = str(payload.get("timestamp", "")).strip() or utc_now_iso()
+    agent = str(payload.get("agent", "unknown")).strip() or "unknown"
+    agent_kind = str(payload.get("agent_kind", "primary")).strip() or "primary"
+    depth = int(payload.get("depth", 0) or 0)
+    round_no = int(payload.get("round", 0) or 0)
+    delegation_id = str(payload.get("delegation_id", "")).strip()
+    parent_tool_call_id = str(payload.get("parent_tool_call_id", "")).strip()
+    status = str(payload.get("status", "")).strip()
+    tool_name = str(payload.get("name", "")).strip()
+    tool_call_id = str(payload.get("tool_call_id", "")).strip()
+
+    title = f"{agent} 事件: {event_type}"
+    detail = json.dumps(payload, ensure_ascii=False)
+    if event_type == "start":
+        runtime_desc = _describe_runtime(payload)
+        title = f"{agent} 会话开始"
+        detail = f"{_describe_agent(payload)}{f' · {runtime_desc}' if runtime_desc else ''}"
+    elif event_type == "round_start":
+        runtime_desc = _describe_runtime(payload)
+        title = f"{agent} 第 {round_no} 轮开始"
+        detail = runtime_desc or _describe_agent(payload)
+    elif event_type == "tool_call":
+        title = f"{agent} 调用工具: {tool_name or 'unknown'}"
+        detail = str(payload.get("arguments", "{}"))
+    elif event_type == "tool_result":
+        title = f"{agent} 工具结果: {tool_name or 'unknown'}"
+        if tool_name == "task":
+            title = f"{agent} 委派结果"
+        detail = f"{status or 'completed'} {str(payload.get('output_preview', '')).strip()}".strip()
+    elif event_type == "round_end":
+        title = f"{agent} 第 {round_no} 轮结束"
+        detail = f"状态: {status or 'completed'}"
+    elif event_type == "done":
+        runtime_desc = _describe_runtime(payload)
+        title = f"{agent} 会话完成"
+        detail = f"{status or 'completed'} {runtime_desc}".strip()
+    elif event_type == "error":
+        title = f"{agent} 会话异常"
+        detail = str(payload.get("message", "未知错误"))
+
+    return {
+        "id": str(payload.get("event_id", "")),
+        "kind": event_type,
+        "title": title,
+        "detail": detail,
+        "created_at": created_at,
+        "agent": agent,
+        "agent_kind": agent_kind,
+        "depth": depth,
+        "round": round_no,
+        "status": status,
+        "delegation_id": delegation_id,
+        "parent_tool_call_id": parent_tool_call_id,
+        "tool_name": tool_name,
+        "tool_call_id": tool_call_id,
+    }
+
+
+def _compute_duration_ms(started_at: str, completed_at: str) -> int:
+    if not started_at or not completed_at:
+        return 0
+    try:
+        start_dt = datetime.fromisoformat(started_at)
+        completed_dt = datetime.fromisoformat(completed_at)
+    except ValueError:
+        return 0
+    duration = int((completed_dt - start_dt).total_seconds() * 1000)
+    return max(duration, 0)
+
+
+def _build_response_meta(process_items: list[ProcessItem], *, turn_started_at: str, turn_completed_at: str) -> ResponseMeta:
+    tool_names: list[str] = []
+    delegated_agents: list[str] = []
+    delegation_ids: set[str] = set()
+    round_count = 0
+    tool_call_count = 0
+
+    for item in process_items:
+        kind = str(item.get("kind", "")).strip()
+        if kind == "round_start":
+            round_count += 1
+        if kind == "tool_call":
+            tool_call_count += 1
+            tool_name = str(item.get("tool_name", "")).strip()
+            if tool_name and tool_name not in tool_names:
+                tool_names.append(tool_name)
+        if kind == "start" and str(item.get("agent_kind", "primary")).strip() == "subagent":
+            delegated_agent = str(item.get("agent", "")).strip()
+            if delegated_agent and delegated_agent not in delegated_agents:
+                delegated_agents.append(delegated_agent)
+        delegation_id = str(item.get("delegation_id", "")).strip()
+        if delegation_id:
+            delegation_ids.add(delegation_id)
+
+    return {
+        "round_count": round_count,
+        "tool_call_count": tool_call_count,
+        "tool_names": tool_names,
+        "delegation_count": len(delegation_ids),
+        "delegated_agents": delegated_agents,
+        "duration_ms": _compute_duration_ms(turn_started_at, turn_completed_at),
+    }
+
+
+def _attach_response_summary(
+    message: Message,
+    *,
+    process_items: list[ProcessItem],
+    turn_started_at: str,
+    turn_completed_at: str,
+) -> ResponseMeta:
+    response_meta = _build_response_meta(process_items, turn_started_at=turn_started_at, turn_completed_at=turn_completed_at)
+    message["info"]["process_items"] = [dict(item) for item in process_items]
+    message["info"]["response_meta"] = dict(response_meta)
+    return response_meta
+
+
 def configure_session_memory_store(store: SessionMemoryStore) -> None:
     """配置会话记忆存储实现，便于替换为 Redis 等后端。"""
     global SESSION_MEMORY_STORE
@@ -457,6 +708,114 @@ def configure_session_memory_store(store: SessionMemoryStore) -> None:
 
 def clear_session_memory(session_id: str | None = None) -> None:
     SESSION_MEMORY_STORE.clear(session_id)
+    _clear_pending_mode_switch(session_id)
+
+
+def apply_mode_switch_action(session_id: str, action: ModeSwitchAction) -> Message:
+    normalized_session_id = (session_id or "").strip()
+    pending = get_pending_mode_switch(normalized_session_id)
+    if pending is None:
+        raise ValueError("当前没有待确认的模式切换。")
+
+    action_name = (action or "").strip().lower()
+    if action_name not in {"confirm", "cancel"}:
+        raise ValueError("不支持的模式切换动作。")
+
+    if action_name == "confirm":
+        synthetic_input = _build_mode_switch_confirm_input(pending)
+        target_agent = str(pending.get("target_agent", "build")).strip().lower()
+        _clear_pending_mode_switch(normalized_session_id)
+        return run_session(
+            synthetic_input,
+            session_id=normalized_session_id,
+            mode=target_agent,  # type: ignore[arg-type]
+        )
+
+    history_messages = SESSION_MEMORY_STORE.load(normalized_session_id)
+    turn_started_at = utc_now_iso()
+    current_agent = str(pending.get("current_agent", "build")).strip().lower() or "build"
+
+    user_message = _build_text_message(
+        "user",
+        f"取消切换到 {str(pending.get('target_agent', '')).strip() or '目标'} 模式。",
+        normalized_session_id,
+        text_meta={
+            "agent": current_agent,
+            "synthetic": True,
+            "mode_switch_action": "cancel",
+        },
+    )
+    assistant_message = create_message(
+        role="assistant",
+        session_id=normalized_session_id,
+        status="interrupted",
+        finish_reason="cancelled",
+    )
+    append_text_part(assistant_message, _build_mode_switch_cancel_text(pending))
+    _set_message_runtime_info(
+        assistant_message,
+        agent=current_agent,
+        model=_latest_model(history_messages),
+        provider=_latest_provider(history_messages),
+        turn_started_at=turn_started_at,
+        turn_completed_at=utc_now_iso(),
+    )
+    _attach_response_summary(
+        assistant_message,
+        process_items=[],
+        turn_started_at=turn_started_at,
+        turn_completed_at=str(assistant_message["info"].get("turn_completed_at", "")),
+    )
+    _clear_pending_mode_switch(normalized_session_id)
+    SESSION_MEMORY_STORE.save(normalized_session_id, [*history_messages, user_message, assistant_message])
+    return assistant_message
+
+
+def run_mode_switch_stream_events(
+    session_id: str,
+    action: ModeSwitchAction,
+) -> Generator[dict[str, Any], None, None]:
+    """由程序控制模式切换确认，并以流式事件形式继续后续会话。"""
+    normalized_session_id = (session_id or "").strip()
+    pending = get_pending_mode_switch(normalized_session_id)
+    if pending is None:
+        raise ValueError("当前没有待确认的模式切换。")
+
+    action_name = (action or "").strip().lower()
+    if action_name not in {"confirm", "cancel"}:
+        raise ValueError("不支持的模式切换动作。")
+
+    if action_name == "cancel":
+        message = apply_mode_switch_action(normalized_session_id, "cancel")
+        yield {
+            "type": "done",
+            "event_id": _new_stream_event_id(),
+            "timestamp": utc_now_iso(),
+            "session_id": normalized_session_id,
+            "agent": str(message["info"].get("agent", "build")),
+            "agent_kind": _resolve_agent_kind(str(message["info"].get("agent", "build"))),
+            "depth": 0,
+            "message_id": str(message["info"].get("message_id", "")),
+            "status": str(message["info"].get("status", "interrupted")),
+            "finish_reason": str(message["info"].get("finish_reason", "cancelled")),
+            "turn_started_at": str(message["info"].get("turn_started_at", "")),
+            "turn_completed_at": str(message["info"].get("turn_completed_at", "")),
+            "response_meta": message["info"].get("response_meta", {}),
+            "process_items": message["info"].get("process_items", []),
+            "confirmation": message["info"].get("confirmation"),
+            "provider": str(message["info"].get("provider", "")),
+            "model": str(message["info"].get("model", "")),
+        }
+        return
+
+    target_agent = str(pending.get("target_agent", "build")).strip().lower()
+    synthetic_input = _build_mode_switch_confirm_input(pending)
+    _clear_pending_mode_switch(normalized_session_id)
+    yield from run_session_stream_events(
+        synthetic_input,
+        session_id=normalized_session_id,
+        mode=target_agent,  # type: ignore[arg-type]
+    )
 
 
 def subagent_loop(
@@ -473,7 +832,6 @@ def subagent_loop(
     if agent_definition.model != "subagent":
         return f"Error: Agent '{agent_name}' 不是 subagent，不能通过 task 调用。"
 
-    logger.info("subagent.start agent=%s prompt_preview=%s", agent_name, prompt[:120].replace("\n", "\\n"))
     result = run_session(
         user_input=prompt,
         session_id=session_id,
@@ -482,6 +840,7 @@ def subagent_loop(
             agent=agent_name,
             model=(llm_config.model if llm_config else ""),
             provider=(llm_config.provider if llm_config else ""),
+            vendor=(llm_config.vendor if llm_config else ""),
         ),
         runtime_agent=agent_name,
         todo_tool_names={"todo_write", "todo_read"},
@@ -506,6 +865,7 @@ def _run_session_stream(
     depth: int = 0,
     delegation_id: str | None = None,
     parent_tool_call_id: str | None = None,
+    process_items: list[ProcessItem] | None = None,
 ) -> Generator[dict[str, Any], None, Message]:
     """内部流式会话入口：支持递归转发 subagent 事件，并返回最终助手消息。"""
     active_session_id = set_session_id(session_id)
@@ -536,7 +896,12 @@ def _run_session_stream(
         else (tools if tools is not None else build_agent_tools("build", registry.list_briefs()))
     )
     initial_system_prompt = (
-        _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
+        _get_system_prompt_for_mode(
+            initial_mode,
+            model=initial_runtime.model,
+            provider=initial_runtime.provider,
+            vendor=initial_runtime.vendor,
+        )
         if mode_enabled
         else (
             system_prompt
@@ -544,12 +909,14 @@ def _run_session_stream(
                 agent=runtime_agent or "build",
                 model=(llm_config.model if llm_config else ""),
                 provider=(llm_config.provider if llm_config else ""),
+                vendor=(llm_config.vendor if llm_config else ""),
             )
         )
     )
 
     todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
+    active_process_items = process_items if process_items is not None else []
 
     todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
     non_todo_round_streak = 0
@@ -583,6 +950,22 @@ def _run_session_stream(
     initial_agent = initial_mode if mode_enabled else (runtime_agent or "build")
     agent_kind = _resolve_agent_kind(initial_agent)
 
+    def _emit_event(event_type: str, **payload: Any) -> dict[str, Any]:
+        event = _build_stream_event(
+            event_type,
+            session_id=active_session_id,
+            agent=payload.pop("agent", initial_agent),
+            agent_kind=payload.pop("agent_kind", agent_kind),
+            depth=payload.pop("depth", depth),
+            delegation_id=payload.pop("delegation_id", delegation_id),
+            parent_tool_call_id=payload.pop("parent_tool_call_id", parent_tool_call_id),
+            **payload,
+        )
+        process_item = _build_process_item(event)
+        if process_item is not None:
+            active_process_items.append(process_item)
+        return event
+
     tool_executor = ToolExecutor(
         _build_tool_handlers(
             session_id=active_session_id,
@@ -593,9 +976,8 @@ def _run_session_stream(
         )
     )
 
-    yield _build_stream_event(
+    yield _emit_event(
         "start",
-        session_id=active_session_id,
         agent=initial_agent,
         agent_kind=agent_kind,
         depth=depth,
@@ -612,13 +994,6 @@ def _run_session_stream(
         round_no += 1
         messages = compact(messages)
 
-        logger.debug(
-            "session.stream.round.start session_id=%s round=%d message_count=%d",
-            active_session_id,
-            round_no,
-            len(messages),
-        )
-
         selected_tools = initial_tools
         if mode_enabled:
             current_mode = _resolve_mode_from_messages(messages, fallback=initial_mode)
@@ -631,15 +1006,19 @@ def _run_session_stream(
             selected_tools = _get_tools_for_mode(current_mode)
             messages = _ensure_system_prompt(
                 messages,
-                _get_system_prompt_for_mode(current_mode, model=current_runtime.model, provider=current_runtime.provider),
+                _get_system_prompt_for_mode(
+                    current_mode,
+                    model=current_runtime.model,
+                    provider=current_runtime.provider,
+                    vendor=current_runtime.vendor,
+                ),
                 active_session_id,
             )
         active_agent = current_mode if mode_enabled else (runtime_agent or "build")
         agent_kind = _resolve_agent_kind(active_agent)
 
-        yield _build_stream_event(
+        yield _emit_event(
             "round_start",
-            session_id=active_session_id,
             agent=active_agent,
             agent_kind=agent_kind,
             depth=depth,
@@ -651,7 +1030,12 @@ def _run_session_stream(
             started_at=utc_now_iso(),
         )
 
-        stream_iter = create_chat_completion_stream(messages=messages, tools=selected_tools, llm_config=current_runtime)
+        stream_iter = _call_chat_completion_stream(
+            messages=messages,
+            tools=selected_tools,
+            llm_config=current_runtime,
+            agent=active_agent,
+        )
         while True:
             try:
                 stream_event = next(stream_iter)
@@ -694,9 +1078,8 @@ def _run_session_stream(
                 non_todo_round_streak += 1
 
             for tool_call in tool_calls:
-                yield _build_stream_event(
+                yield _emit_event(
                     "tool_call",
-                    session_id=active_session_id,
                     agent=active_agent,
                     agent_kind=agent_kind,
                     depth=depth,
@@ -709,12 +1092,10 @@ def _run_session_stream(
                 )
 
         if not has_tool_calls:
-            assistant_message["info"]["turn_completed_at"] = utc_now_iso()
-            if mode_enabled:
-                SESSION_MEMORY_STORE.save(active_session_id, messages)
-            yield _build_stream_event(
+            completed_at = utc_now_iso()
+            assistant_message["info"]["turn_completed_at"] = completed_at
+            yield _emit_event(
                 "round_end",
-                session_id=active_session_id,
                 agent=active_agent,
                 agent_kind=agent_kind,
                 depth=depth,
@@ -725,11 +1106,18 @@ def _run_session_stream(
                 finish_reason=assistant_message["info"].get("finish_reason", "stop"),
                 provider=current_runtime.provider,
                 model=current_runtime.model,
-                completed_at=utc_now_iso(),
+                completed_at=completed_at,
             )
-            yield _build_stream_event(
+            response_meta = _attach_response_summary(
+                assistant_message,
+                process_items=active_process_items,
+                turn_started_at=turn_started_at,
+                turn_completed_at=completed_at,
+            )
+            if mode_enabled:
+                SESSION_MEMORY_STORE.save(active_session_id, messages)
+            yield _emit_event(
                 "done",
-                session_id=active_session_id,
                 agent=active_agent,
                 agent_kind=agent_kind,
                 depth=depth,
@@ -737,9 +1125,15 @@ def _run_session_stream(
                 parent_tool_call_id=parent_tool_call_id,
                 message_id=str(assistant_message["info"].get("message_id", "")),
                 status=assistant_message["info"].get("status", "completed"),
+                finish_reason=assistant_message["info"].get("finish_reason", "stop"),
                 provider=current_runtime.provider,
                 model=current_runtime.model,
-                completed_at=utc_now_iso(),
+                completed_at=completed_at,
+                turn_started_at=turn_started_at,
+                turn_completed_at=completed_at,
+                response_meta=response_meta,
+                process_items=[dict(item) for item in active_process_items],
+                confirmation=assistant_message["info"].get("confirmation"),
             )
             return assistant_message
 
@@ -786,6 +1180,7 @@ def _run_session_stream(
                             agent=delegated_agent,
                             model=current_runtime.model,
                             provider=current_runtime.provider,
+                            vendor=current_runtime.vendor,
                         ),
                         runtime_agent=delegated_agent,
                         todo_tool_names={"todo_write", "todo_read"},
@@ -793,6 +1188,7 @@ def _run_session_stream(
                         depth=depth + 1,
                         delegation_id=delegation_instance_id,
                         parent_tool_call_id=tool_call["id"],
+                        process_items=active_process_items,
                     )
                     task_result["output"] = get_message_text(delegated_message)
                 result = task_result
@@ -804,6 +1200,8 @@ def _run_session_stream(
                     tool_call_id=tool_call["id"],
                     round_no=round_no,
                     hooks=effective_tool_hooks,
+                    agent=active_agent,
+                    model=current_runtime.model,
                     task_available=task_available,
                     workdir=str(_get_workdir()),
                 )
@@ -820,9 +1218,8 @@ def _run_session_stream(
                 )
             )
             metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-            yield _build_stream_event(
+            yield _emit_event(
                 "tool_result",
-                session_id=active_session_id,
                 agent=active_agent,
                 agent_kind=agent_kind,
                 depth=depth,
@@ -843,6 +1240,12 @@ def _run_session_stream(
             if status == "confirmation_required":
                 output_text = str(result.get("output", "请确认后继续。"))
                 question = str(metadata.get("confirmation_question", "是否继续？"))
+                metadata = {
+                    **metadata,
+                    "tool_name": tool_call["name"],
+                    "current_agent": str(metadata.get("current_agent", active_agent)).strip() or active_agent,
+                }
+                _save_pending_mode_switch(active_session_id, metadata)
                 interrupted_message = _build_confirmation_interrupted_message(
                     active_session_id,
                     tool_name=tool_call["name"],
@@ -858,12 +1261,10 @@ def _run_session_stream(
                     turn_started_at=turn_started_at,
                     turn_completed_at=utc_now_iso(),
                 )
+                completed_at = str(interrupted_message["info"].get("turn_completed_at", ""))
                 messages.append(interrupted_message)
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
-                yield _build_stream_event(
+                yield _emit_event(
                     "round_end",
-                    session_id=active_session_id,
                     agent=active_agent,
                     agent_kind=agent_kind,
                     depth=depth,
@@ -874,11 +1275,18 @@ def _run_session_stream(
                     finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
                     provider=current_runtime.provider,
                     model=current_runtime.model,
-                    completed_at=utc_now_iso(),
+                    completed_at=completed_at,
                 )
-                yield _build_stream_event(
+                response_meta = _attach_response_summary(
+                    interrupted_message,
+                    process_items=active_process_items,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                )
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                yield _emit_event(
                     "done",
-                    session_id=active_session_id,
                     agent=active_agent,
                     agent_kind=agent_kind,
                     depth=depth,
@@ -886,9 +1294,15 @@ def _run_session_stream(
                     parent_tool_call_id=parent_tool_call_id,
                     message_id=str(interrupted_message["info"].get("message_id", "")),
                     status=interrupted_message["info"].get("status", "interrupted"),
+                    finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
                     provider=current_runtime.provider,
                     model=current_runtime.model,
-                    completed_at=utc_now_iso(),
+                    completed_at=completed_at,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                    response_meta=response_meta,
+                    process_items=[dict(item) for item in active_process_items],
+                    confirmation=interrupted_message["info"].get("confirmation"),
                 )
                 return interrupted_message
 
@@ -934,12 +1348,10 @@ def _run_session_stream(
                 turn_started_at=turn_started_at,
                 turn_completed_at=utc_now_iso(),
             )
+            completed_at = str(message["info"].get("turn_completed_at", ""))
             messages.append(message)
-            if mode_enabled:
-                SESSION_MEMORY_STORE.save(active_session_id, messages)
-            yield _build_stream_event(
+            yield _emit_event(
                 "round_end",
-                session_id=active_session_id,
                 agent=active_agent,
                 agent_kind=agent_kind,
                 depth=depth,
@@ -950,11 +1362,18 @@ def _run_session_stream(
                 finish_reason="cancelled",
                 provider=current_runtime.provider,
                 model=current_runtime.model,
-                completed_at=utc_now_iso(),
+                completed_at=completed_at,
             )
-            yield _build_stream_event(
+            response_meta = _attach_response_summary(
+                message,
+                process_items=active_process_items,
+                turn_started_at=turn_started_at,
+                turn_completed_at=completed_at,
+            )
+            if mode_enabled:
+                SESSION_MEMORY_STORE.save(active_session_id, messages)
+            yield _emit_event(
                 "done",
-                session_id=active_session_id,
                 agent=active_agent,
                 agent_kind=agent_kind,
                 depth=depth,
@@ -962,15 +1381,20 @@ def _run_session_stream(
                 parent_tool_call_id=parent_tool_call_id,
                 message_id=str(message["info"].get("message_id", "")),
                 status="interrupted",
+                finish_reason="cancelled",
                 provider=current_runtime.provider,
                 model=current_runtime.model,
-                completed_at=utc_now_iso(),
+                completed_at=completed_at,
+                turn_started_at=turn_started_at,
+                turn_completed_at=completed_at,
+                response_meta=response_meta,
+                process_items=[dict(item) for item in active_process_items],
+                confirmation=message["info"].get("confirmation"),
             )
             return message
 
-        yield _build_stream_event(
+        yield _emit_event(
             "round_end",
-            session_id=active_session_id,
             agent=active_agent,
             agent_kind=agent_kind,
             depth=depth,
@@ -996,11 +1420,6 @@ def _build_tool_handlers(
     get_current_runtime: Callable[[], ResolvedLLMConfig],
     get_provider_explicit: Callable[[], bool],
 ) -> dict[str, Callable[..., object]]:
-    def _normalize_confirmed(raw_args: dict[str, Any]) -> bool | None:
-        if "confirmed" not in raw_args:
-            return None
-        return bool(raw_args.get("confirmed"))
-
     def _run_mode_aware_bash(command: str) -> str:
         if get_mode() == "plan":
             validation_error = validate_readonly_bash(command)
@@ -1025,7 +1444,6 @@ def _build_tool_handlers(
             plan_path=plan_path,
             plan_exists=Path(plan_path).exists(),
             latest_model=get_latest_model(),
-            confirmed=_normalize_confirmed(kw),
         )
 
     def _run_plan_exit_tool(**kw: Any) -> dict[str, Any]:
@@ -1035,7 +1453,6 @@ def _build_tool_handlers(
             plan_path=plan_path,
             plan_exists=Path(plan_path).exists(),
             latest_model=get_latest_model(),
-            confirmed=_normalize_confirmed(kw),
         )
 
     return {
@@ -1102,7 +1519,12 @@ def run_session(
         else (tools if tools is not None else build_agent_tools("build", registry.list_briefs()))
     )
     initial_system_prompt = (
-        _get_system_prompt_for_mode(initial_mode, model=initial_runtime.model, provider=initial_runtime.provider)
+        _get_system_prompt_for_mode(
+            initial_mode,
+            model=initial_runtime.model,
+            provider=initial_runtime.provider,
+            vendor=initial_runtime.vendor,
+        )
         if mode_enabled
         else (
             system_prompt
@@ -1110,6 +1532,7 @@ def run_session(
                 agent=runtime_agent or "build",
                 model=(llm_config.model if llm_config else ""),
                 provider=(llm_config.provider if llm_config else ""),
+                vendor=(llm_config.vendor if llm_config else ""),
             )
         )
     )
@@ -1162,13 +1585,6 @@ def run_session(
         round_no += 1
         messages = compact(messages)
 
-        logger.debug(
-            "session.round.start session_id=%s round=%d message_count=%d",
-            active_session_id,
-            round_no,
-            len(messages),
-        )
-
         selected_tools = initial_tools
         if mode_enabled:
             current_mode = _resolve_mode_from_messages(messages, fallback=initial_mode)
@@ -1181,12 +1597,22 @@ def run_session(
             selected_tools = _get_tools_for_mode(current_mode)
             messages = _ensure_system_prompt(
                 messages,
-                _get_system_prompt_for_mode(current_mode, model=current_runtime.model, provider=current_runtime.provider),
+                _get_system_prompt_for_mode(
+                    current_mode,
+                    model=current_runtime.model,
+                    provider=current_runtime.provider,
+                    vendor=current_runtime.vendor,
+                ),
                 active_session_id,
             )
         active_agent = current_mode if mode_enabled else (runtime_agent or "build")
 
-        assistant_message = create_chat_completion(messages=messages, tools=selected_tools, llm_config=current_runtime)
+        assistant_message = _call_chat_completion(
+            messages=messages,
+            tools=selected_tools,
+            llm_config=current_runtime,
+            agent=active_agent,
+        )
         _set_message_runtime_info(
             assistant_message,
             agent=active_agent,
@@ -1208,12 +1634,6 @@ def run_session(
 
         if not has_tool_calls:
             assistant_message["info"]["turn_completed_at"] = utc_now_iso()
-            logger.info(
-                "session.round.finish session_id=%s round=%d status=%s",
-                active_session_id,
-                round_no,
-                assistant_message["info"].get("status", "unknown"),
-            )
             if mode_enabled:
                 SESSION_MEMORY_STORE.save(active_session_id, messages)
             return assistant_message
@@ -1228,6 +1648,8 @@ def run_session(
                 tool_call_id=tool_call["id"],
                 round_no=round_no,
                 hooks=effective_tool_hooks,
+                agent=active_agent,
+                model=current_runtime.model,
                 task_available=task_available,
                 workdir=str(_get_workdir()),
             )
@@ -1252,6 +1674,12 @@ def run_session(
             if status == "confirmation_required":
                 output_text = str(result.get("output", "请确认后继续。"))
                 question = str(metadata.get("confirmation_question", "是否继续？"))
+                metadata = {
+                    **metadata,
+                    "tool_name": tool_call["name"],
+                    "current_agent": str(metadata.get("current_agent", active_agent)).strip() or active_agent,
+                }
+                _save_pending_mode_switch(active_session_id, metadata)
                 interrupted_message = _build_confirmation_interrupted_message(
                     active_session_id,
                     tool_name=tool_call["name"],

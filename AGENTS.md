@@ -16,6 +16,7 @@
 - `src/agent/runtime/tool_executor.py`：工具执行器与 Tool Hook 分发。
 - `src/agent/runtime/compaction.py`：上下文压缩逻辑。
 - `src/agent/adapters/llm/client.py`：LLM 适配与 LLM Hook。
+- `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
 - `src/agent/tools/`：工具实现（`handlers.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/task.txt`：`task` 工具描述模板，使用 `{agents}` 占位注入 subagent 列表。
 - `src/agent/core/`：消息模型、上下文与通用 HookDispatcher。
@@ -27,12 +28,18 @@
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
 - 工具实现统一在 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
+- Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
 - 主 Agent 模式状态统一收敛在 `runtime/main_agent_mode.py`（若启用该模块），禁止散落存储。
 - 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
 - `task` 工具中的 subagent 名单与说明，必须从 `runtime/agents.py` 动态生成，禁止在 `specs.py` 或 `session.py` 中手写支持列表。
 - Web 时间线必须按 `session` 维度累计展示，禁止在前端新一轮提交时覆盖上一轮执行轨迹。
 - `task` 委派 subagent 时，流式事件必须透传 subagent 内部进度，并使用后端生成的 `delegation_id` 作为稳定关联键。
+- 日志必须通过程序显式传递 `agent`、`model` 等上下文字段，禁止依赖 LLM 生成或推断日志元信息。
+- 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
+- 日志文件统一写入 `logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容。
+- `build` 主模式的提示词文件必须按厂商 `vendor` 选择，命名统一为 `build.<vendor>.txt`；厂商归属在 `src/agent/config/llm_runtime.json` 中显式声明，缺省时回退 `build.default.txt`。
 
 ## 开发与验证命令
 

@@ -198,3 +198,24 @@ def test_tool_executor_should_allow_custom_output_processor_override(tmp_path):
     assert result["output"] == "custom-output"
     assert result["metadata"]["truncated"] == "custom"
     assert not (tmp_path / "src" / "storage" / "tool-output").exists()
+
+
+def test_tool_logging_hook_should_log_agent_model_args_and_result(caplog):
+    executor = ToolExecutor({"demo_tool": lambda value: f"result:{value}"})
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "demo_tool",
+            '{"value":"ok"}',
+            session_id="s_log",
+            tool_call_id="call_log",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert "tool.request tool=demo_tool args={\"value\":\"ok\"}" in caplog.text
+    assert "tool.response tool=demo_tool result=result:ok" in caplog.text
+    assert any(record.agent == "build" and record.model == "demo-model" for record in caplog.records)

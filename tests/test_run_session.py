@@ -1,6 +1,5 @@
-from pathlib import Path
-
 import agent.runtime.session as session_module
+from agent.config.settings import clear_runtime_settings_cache, resolve_llm_config
 from agent.tools.handlers import run_read
 from agent.tools.specs import build_base_tools, build_task_tool
 from agent.runtime.session import (
@@ -8,6 +7,7 @@ from agent.runtime.session import (
     clear_session_memory,
     configure_session_memory_store,
     run_session,
+    run_mode_switch_stream_events,
     run_session_stream_events,
 )
 from agent.runtime.session_memory import InMemorySessionMemoryStore, SessionMemoryStore
@@ -119,10 +119,12 @@ def test_plan_enter_should_interrupt_on_confirmation_required(monkeypatch):
     result = run_session("切到 plan", session_id="s_plan_confirm")
     assert result["info"]["status"] == "interrupted"
     text = get_message_text(result)
-    assert "请确认是否切换到 plan 模式" in text
+    assert "等待用户确认是否切换到 plan 模式" in text
+    assert result["info"]["confirmation"]["target_agent"] == "plan"
+    assert session_module.get_pending_mode_switch("s_plan_confirm") is not None
 
 
-def test_plan_enter_confirmed_should_switch_by_synthetic_user_message(monkeypatch):
+def test_plan_enter_confirmed_should_switch_by_program_control(monkeypatch):
     call_state = {"count": 0}
 
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
@@ -133,20 +135,23 @@ def test_plan_enter_confirmed_should_switch_by_synthetic_user_message(monkeypatc
         if call_state["count"] == 1:
             append_tool_call_part(
                 assistant,
-                tool_call_id="call_plan_enter_yes",
+                tool_call_id="call_plan_enter",
                 name="plan_enter",
-                arguments='{"confirmed": true}',
+                arguments="{}",
             )
         else:
             last_agent = _last_user_agent(messages)
             provider = str(messages[-1]["info"].get("provider", ""))
-            final_text = "ok" if (last_agent == "plan" and provider) else "bad"
+            final_text = "ok" if (last_agent == "plan" and provider and "用户已确认切换到 plan 模式" in get_message_text(messages[-1])) else "bad"
             append_text_part(assistant, final_text)
         return assistant
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
-    result = run_session("进入 plan", session_id="s_plan_yes")
+    first_result = run_session("进入 plan", session_id="s_plan_yes")
+    assert first_result["info"]["finish_reason"] == "confirmation_required"
+    result = session_module.apply_mode_switch_action("s_plan_yes", "confirm")
     assert get_message_text(result) == "ok"
+    assert session_module.get_pending_mode_switch("s_plan_yes") is None
 
 
 def test_plan_exit_confirmed_should_append_plan_path_when_file_exists(monkeypatch, tmp_path):
@@ -165,18 +170,87 @@ def test_plan_exit_confirmed_should_append_plan_path_when_file_exists(monkeypatc
         if call_state["count"] == 1:
             append_tool_call_part(
                 assistant,
-                tool_call_id="call_plan_exit_yes",
+                tool_call_id="call_plan_exit",
                 name="plan_exit",
-                arguments='{"confirmed": true}',
+                arguments="{}",
             )
         else:
             last_user_text = get_message_text(messages[-1])
-            append_text_part(assistant, "ok" if str(placeholder) in last_user_text else "bad")
+            append_text_part(
+                assistant,
+                "ok" if ("用户已确认计划已完成" in last_user_text and str(placeholder) in last_user_text) else "bad",
+            )
         return assistant
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
-    result = run_session("退出 plan", session_id="s_plan_exit_yes", mode="plan")
+    first_result = run_session("退出 plan", session_id="s_plan_exit_yes", mode="plan")
+    assert first_result["info"]["finish_reason"] == "confirmation_required"
+    result = session_module.apply_mode_switch_action("s_plan_exit_yes", "confirm")
     assert get_message_text(result) == "ok"
+
+
+def test_plan_enter_confirmed_should_continue_with_stream_events(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id="call_plan_enter_stream",
+            name="plan_enter",
+            arguments="{}",
+        )
+        return assistant
+
+    def fake_stream_chat(messages, tools, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+
+        def _generator():
+            yield {"type": "text_delta", "delta": "进入 plan 流式执行"}
+            assistant = create_message("assistant", session_id, status="completed")
+            append_text_part(assistant, "进入 plan 流式执行")
+            return assistant
+
+        return _generator()
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream_chat)
+    first_result = run_session("进入 plan", session_id="s_plan_stream_confirm")
+    assert first_result["info"]["finish_reason"] == "confirmation_required"
+
+    events = list(run_mode_switch_stream_events("s_plan_stream_confirm", "confirm"))
+
+    assert any(event["type"] == "start" for event in events)
+    assert any(event["type"] == "text_delta" for event in events)
+    done_event = next(event for event in events if event["type"] == "done")
+    assert done_event["agent"] == "plan"
+    assert done_event["status"] == "completed"
+    assert call_state["count"] == 1
+    assert session_module.get_pending_mode_switch("s_plan_stream_confirm") is None
+
+
+def test_mode_switch_cancel_should_be_program_controlled(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id="call_plan_enter_cancel",
+            name="plan_enter",
+            arguments="{}",
+        )
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    first_result = run_session("进入 plan", session_id="s_plan_cancel")
+    assert first_result["info"]["finish_reason"] == "confirmation_required"
+
+    cancelled = session_module.apply_mode_switch_action("s_plan_cancel", "cancel")
+    assert cancelled["info"]["finish_reason"] == "cancelled"
+    assert "已取消切换到 plan 模式" in get_message_text(cancelled)
+    assert session_module.get_pending_mode_switch("s_plan_cancel") is None
 
 
 def test_plan_mode_write_should_be_limited_to_src_plan(monkeypatch):
@@ -759,6 +833,32 @@ def test_run_session_stream_events_should_include_subagent_timeline(monkeypatch)
     assert subagent_tool_call["depth"] == 1
     assert subagent_done["delegation_id"] == task_tool_result["delegation_id"]
     assert task_tool_result["output_preview"] == "子代理完成"
+    assert isinstance(subagent_done.get("process_items"), list)
+
+
+def test_run_session_stream_done_should_include_response_summary(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_stream_with_result(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(assistant, tool_call_id="call_read_1", name="todo_read", arguments="{}")
+            return assistant
+        append_text_part(assistant, "ok")
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream_with_result)
+
+    events = list(run_session_stream_events("测试 summary", session_id="s_stream_summary"))
+    done_event = next(event for event in events if event["type"] == "done")
+
+    assert done_event["response_meta"]["tool_call_count"] == 1
+    assert done_event["response_meta"]["round_count"] >= 2
+    assert "todo_read" in done_event["response_meta"]["tool_names"]
+    assert any(item["kind"] == "tool_call" for item in done_event["process_items"])
 
 
 def test_run_session_should_remember_explicit_provider(monkeypatch):
@@ -805,19 +905,31 @@ def test_run_session_should_reset_to_agent_default_provider(monkeypatch):
 
 def test_build_system_prompt_should_use_model_specific_prompt(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
-    prompt = build_system_prompt(agent="build", model="qwen3-max", provider="qwen")
+    prompt = build_system_prompt(agent="build", model="qwen3-max", provider="qwen", vendor="qwen")
 
     assert "你是 **爪爪**" in prompt
+    assert "- vendor: qwen" in prompt
     assert "- model: qwen3-max" in prompt
 
 
 def test_build_system_prompt_should_fallback_to_default_prompt(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
-    prompt = build_system_prompt(agent="build", model="gpt-4.1", provider="gpt")
+    prompt = build_system_prompt(agent="build", model="gpt-4.1", provider="gpt", vendor="openai")
 
     assert "Qwen 系列模型" not in prompt
     assert "你是 **爪爪**" in prompt
+    assert "- vendor: openai" in prompt
     assert "- model: gpt-4.1" in prompt
+
+
+def test_build_system_prompt_should_share_vendor_prompt_for_qwen_coder(monkeypatch):
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    prompt = build_system_prompt(agent="build", model="qwen3-coder-next", provider="qwen-coder", vendor="qwen")
+
+    assert "你是 **爪爪**" in prompt
+    assert "- provider: qwen-coder" in prompt
+    assert "- vendor: qwen" in prompt
+    assert "- model: qwen3-coder-next" in prompt
 
 
 def test_build_system_prompt_should_append_agents_md(monkeypatch, tmp_path):
@@ -825,7 +937,7 @@ def test_build_system_prompt_should_append_agents_md(monkeypatch, tmp_path):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
     (tmp_path / "AGENTS.md").write_text("请始终先写测试。", encoding="utf-8")
 
-    prompt = build_system_prompt(agent="plan", model="qwen3-max", provider="qwen")
+    prompt = build_system_prompt(agent="plan", model="qwen3-max", provider="qwen", vendor="qwen")
 
     assert "请始终先写测试。" in prompt
     assert "以下是当前工作目录下的 AGENTS.md 内容" in prompt
@@ -834,11 +946,12 @@ def test_build_system_prompt_should_append_agents_md(monkeypatch, tmp_path):
 
 def test_build_system_prompt_should_include_git_environment(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (True, "/tmp/repo"))
-    prompt = build_system_prompt(agent="explore", model="gemini-2.0-flash", provider="gemini")
+    prompt = build_system_prompt(agent="explore", model="gemini-2.0-flash", provider="gemini", vendor="google")
 
     assert "- is_git_repo: true" in prompt
     assert "- git_root: /tmp/repo" in prompt
     assert "- provider: gemini" in prompt
+    assert "- vendor: google" in prompt
     assert "当前可用 skills catalog" not in prompt
     assert "{skills_catalog}" not in prompt
     assert "你可以通过工具 `load_skill` 了解当前可用 skills 的简短介绍。" in prompt
@@ -846,22 +959,20 @@ def test_build_system_prompt_should_include_git_environment(monkeypatch):
 
 def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch):
     seen_system_prompts: list[str] = []
-    call_state = {"count": 0}
 
-    def fake_prompt(agent: str, model: str, provider: str) -> str:
-        return f"PROMPT::{agent}::{provider}::{model}"
+    def fake_prompt(agent: str, model: str, provider: str, vendor: str) -> str:
+        return f"PROMPT::{agent}::{vendor}::{provider}::{model}"
 
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         seen_system_prompts.append(get_message_text(messages[0]))
-        call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
-        if call_state["count"] == 1:
+        if len(seen_system_prompts) == 1:
             append_tool_call_part(
                 assistant,
-                tool_call_id="call_plan_enter_yes",
+                tool_call_id="call_plan_enter",
                 name="plan_enter",
-                arguments='{"confirmed": true}',
+                arguments="{}",
             )
         else:
             append_text_part(assistant, "ok")
@@ -870,18 +981,20 @@ def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch)
     monkeypatch.setattr(session_module, "build_system_prompt", fake_prompt)
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
 
-    result = run_session("进入 plan", session_id="s_prompt_mode_switch")
+    first_result = run_session("进入 plan", session_id="s_prompt_mode_switch")
+    assert first_result["info"]["finish_reason"] == "confirmation_required"
+    result = session_module.apply_mode_switch_action("s_prompt_mode_switch", "confirm")
 
     assert get_message_text(result) == "ok"
-    assert seen_system_prompts[0] == "PROMPT::build::qwen::qwen3-max"
-    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen3-max"
+    assert seen_system_prompts[0] == "PROMPT::build::qwen::qwen::qwen3-max"
+    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen::qwen3-max"
 
 
 def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
     seen_system_prompts: list[str] = []
 
-    def fake_prompt(agent: str, model: str, provider: str) -> str:
-        return f"STREAM::{agent}::{provider}::{model}"
+    def fake_prompt(agent: str, model: str, provider: str, vendor: str) -> str:
+        return f"STREAM::{agent}::{vendor}::{provider}::{model}"
 
     def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
@@ -897,4 +1010,53 @@ def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
     events = list(run_session_stream_events("你好", session_id="s_stream_prompt"))
 
     assert events[-1]["type"] == "done"
-    assert seen_system_prompts == ["STREAM::build::qwen::qwen3-max"]
+    assert seen_system_prompts == ["STREAM::build::qwen::qwen::qwen3-max"]
+
+
+def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
+    monkeypatch.setenv("QWEN_API_KEY", "test-qwen-key")
+    clear_runtime_settings_cache()
+
+    try:
+        config = resolve_llm_config("build", "qwen-coder")
+        assert config.provider == "qwen-coder"
+        assert config.vendor == "qwen"
+        assert config.model == "qwen3-coder-next"
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_runtime_settings_should_require_vendor(tmp_path, monkeypatch):
+    config_path = tmp_path / "llm_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "providers": {
+            "qwen": {
+              "base_url": "https://example.com/v1",
+              "model": "qwen3-max",
+              "api_key_env": "QWEN_API_KEY"
+            }
+          },
+          "agent_defaults": {
+            "build": {
+              "provider": "qwen"
+            },
+            "plan": {
+              "provider": "qwen"
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.LLM_CONFIG_PATH", config_path)
+
+    try:
+        resolve_llm_config("build")
+        raise AssertionError("期望缺少 vendor 时抛出异常")
+    except ValueError as exc:
+        assert "vendor" in str(exc)
+    finally:
+        clear_runtime_settings_cache()

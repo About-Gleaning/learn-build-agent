@@ -25,6 +25,7 @@ LLM_CONFIG_PATH = Path(
 @dataclass(frozen=True)
 class ProviderSettings:
     name: str
+    vendor: str
     base_url: str
     model: str
     api_key_env: str
@@ -46,6 +47,7 @@ class RuntimeSettings:
 class ResolvedLLMConfig:
     agent: MainAgentMode
     provider: str
+    vendor: str
     model: str
     base_url: str
     api_key: str
@@ -78,13 +80,15 @@ def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
             raise ValueError(f"provider '{name}' 配置必须是对象。")
 
         base_url = str(raw_value.get("base_url", "")).strip()
+        vendor = str(raw_value.get("vendor", "")).strip().lower()
         model = str(raw_value.get("model", "")).strip()
         api_key_env = str(raw_value.get("api_key_env", "")).strip()
-        if not base_url or not model or not api_key_env:
-            raise ValueError(f"provider '{name}' 必须配置 base_url、model、api_key_env。")
+        if not base_url or not vendor or not model or not api_key_env:
+            raise ValueError(f"provider '{name}' 必须配置 vendor、base_url、model、api_key_env。")
 
         providers[name] = ProviderSettings(
             name=name,
+            vendor=vendor,
             base_url=base_url,
             model=model,
             api_key_env=api_key_env,
@@ -137,6 +141,7 @@ def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None) -
     return ResolvedLLMConfig(
         agent=agent,
         provider=provider.name,
+        vendor=provider.vendor,
         model=model,
         base_url=provider.base_url,
         api_key=api_key,
@@ -148,6 +153,7 @@ def build_runtime_options() -> dict[str, Any]:
     providers = [
         {
             "name": provider.name,
+            "vendor": provider.vendor,
             "default_model": provider.model,
         }
         for provider in settings.providers.values()

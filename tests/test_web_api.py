@@ -83,6 +83,35 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
             "depth": 0,
             "message_id": "m_1",
             "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t3",
+            "response_meta": {
+                "round_count": 1,
+                "tool_call_count": 0,
+                "tool_names": [],
+                "delegation_count": 0,
+                "delegated_agents": [],
+                "duration_ms": 1200,
+            },
+            "process_items": [
+                {
+                    "id": "evt_1",
+                    "kind": "start",
+                    "title": "build 会话开始",
+                    "detail": "主代理 · build",
+                    "created_at": "t1",
+                    "agent": "build",
+                    "agent_kind": "primary",
+                    "depth": 0,
+                    "round": 0,
+                    "status": "",
+                    "delegation_id": "",
+                    "parent_tool_call_id": "",
+                    "tool_name": "",
+                    "tool_call_id": "",
+                }
+            ],
         }
 
     monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
@@ -101,6 +130,9 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     assert any(evt == "text_delta" for evt, _ in events)
     assert any(evt == "done" for evt, _ in events)
     assert any(payload.get("event_id") == "evt_1" for evt, payload in events if evt == "start")
+    done_payload = next(payload for evt, payload in events if evt == "done")
+    assert done_payload["response_meta"]["duration_ms"] == 1200
+    assert done_payload["process_items"][0]["kind"] == "start"
 
 
 def test_runtime_options_should_return_backend_config():
@@ -114,6 +146,7 @@ def test_runtime_options_should_return_backend_config():
     assert payload["default_agent"] == "build"
     assert any(item["name"] == "build" for item in payload["agents"])
     assert any(item["name"] == "qwen" for item in payload["providers"])
+    assert any(item["vendor"] == "qwen" for item in payload["providers"])
 
 
 def test_get_session_messages_and_clear():
@@ -124,6 +157,43 @@ def test_get_session_messages_and_clear():
     append_text_part(user_msg, "第一轮")
     assistant_msg = create_message("assistant", "s_hist", status="completed")
     append_text_part(assistant_msg, "第一轮回答")
+    assistant_msg["info"]["finish_reason"] = "stop"
+    assistant_msg["info"]["turn_started_at"] = "2026-03-14T00:00:00+00:00"
+    assistant_msg["info"]["turn_completed_at"] = "2026-03-14T00:00:02+00:00"
+    assistant_msg["info"]["response_meta"] = {
+        "round_count": 2,
+        "tool_call_count": 1,
+        "tool_names": ["todo_read"],
+        "delegation_count": 0,
+        "delegated_agents": [],
+        "duration_ms": 2000,
+    }
+    assistant_msg["info"]["process_items"] = [
+        {
+            "id": "evt_1",
+            "kind": "tool_call",
+            "title": "build 调用工具: todo_read",
+            "detail": "{}",
+            "created_at": "2026-03-14T00:00:01+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "todo_read",
+            "tool_call_id": "call_1",
+        }
+    ]
+    assistant_msg["info"]["confirmation"] = {
+        "tool": "plan_enter",
+        "question": "是否切换到 plan 模式？",
+        "target_agent": "plan",
+        "current_agent": "build",
+        "action_type": "enter_plan",
+        "plan_path": "/tmp/p.md",
+    }
     session_runtime.SESSION_MEMORY_STORE.save("s_hist", [user_msg, assistant_msg])
 
     app = create_app()
@@ -134,6 +204,11 @@ def test_get_session_messages_and_clear():
     payload = resp.json()
     assert payload["session_id"] == "s_hist"
     assert len(payload["messages"]) >= 2
+    assistant_payload = next(item for item in payload["messages"] if item["role"] == "assistant")
+    assert assistant_payload["finish_reason"] == "stop"
+    assert assistant_payload["response_meta"]["tool_call_count"] == 1
+    assert assistant_payload["process_items"][0]["tool_name"] == "todo_read"
+    assert assistant_payload["confirmation"]["target_agent"] == "plan"
 
     clear_resp = client.delete("/api/sessions/s_hist")
     assert clear_resp.status_code == 200
@@ -152,3 +227,106 @@ def test_chat_stream_should_validate_session_id():
         json={"session_id": "invalid id", "user_input": "hi", "mode": "build"},
     )
     assert resp.status_code == 422
+
+
+def test_apply_mode_switch_should_return_message(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    assistant = create_message("assistant", "s_mode", status="completed")
+    append_text_part(assistant, "已切换到 plan 模式")
+    assistant["info"]["agent"] = "plan"
+    assistant["info"]["finish_reason"] = "stop"
+
+    monkeypatch.setattr("agent.web.app.session_runtime.apply_mode_switch_action", lambda session_id, action: assistant)
+
+    resp = client.post("/api/sessions/s_mode/mode-switch", json={"action": "confirm"})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["session_id"] == "s_mode"
+    assert payload["current_mode"] == "plan"
+    assert payload["message"]["text"] == "已切换到 plan 模式"
+
+
+def test_apply_mode_switch_stream_should_return_sse_events(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def fake_mode_switch_stream(session_id: str, action: str):
+        assert session_id == "s_mode"
+        assert action == "confirm"
+        yield {
+            "type": "start",
+            "event_id": "evt_mode_1",
+            "session_id": session_id,
+            "agent": "plan",
+            "agent_kind": "primary",
+            "depth": 0,
+            "mode": "plan",
+            "provider": "qwen",
+            "model": "qwen3-max",
+            "started_at": "t1",
+        }
+        yield {
+            "type": "text_delta",
+            "event_id": "evt_mode_2",
+            "session_id": session_id,
+            "agent": "plan",
+            "agent_kind": "primary",
+            "depth": 0,
+            "delta": "开始制定计划",
+        }
+        yield {
+            "type": "done",
+            "event_id": "evt_mode_3",
+            "session_id": session_id,
+            "agent": "plan",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "m_mode_1",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {
+                "round_count": 1,
+                "tool_call_count": 0,
+                "tool_names": [],
+                "delegation_count": 0,
+                "delegated_agents": [],
+                "duration_ms": 500,
+            },
+            "process_items": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_mode_switch_stream_events", fake_mode_switch_stream)
+
+    with client.stream(
+        "POST",
+        "/api/sessions/s_mode/mode-switch/stream",
+        json={"action": "confirm"},
+    ) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+
+    events = _stream_events(body)
+    assert [evt for evt, _ in events] == ["start", "text_delta", "done"]
+    done_payload = next(payload for evt, payload in events if evt == "done")
+    assert done_payload["agent"] == "plan"
+    assert done_payload["response_meta"]["duration_ms"] == 500
+
+
+def test_apply_mode_switch_should_return_conflict_when_no_pending(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def raise_no_pending(session_id, action):
+        raise ValueError("当前没有待确认的模式切换。")
+
+    monkeypatch.setattr("agent.web.app.session_runtime.apply_mode_switch_action", raise_no_pending)
+
+    resp = client.post("/api/sessions/s_mode/mode-switch", json={"action": "confirm"})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "当前没有待确认的模式切换。"

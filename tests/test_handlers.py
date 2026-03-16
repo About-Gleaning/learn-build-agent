@@ -19,34 +19,30 @@ def test_run_plan_enter_should_return_confirmation_required_when_unconfirmed():
         plan_path="/tmp/p.md",
         plan_exists=False,
         latest_model="qwen-plus",
-        confirmed=None,
     )
     assert result["metadata"]["status"] == "confirmation_required"
     assert result["metadata"]["target_agent"] == "plan"
 
 
-def test_run_plan_enter_should_return_cancelled_when_rejected():
+def test_run_plan_enter_should_return_confirmation_without_llm_confirmation_flag():
     result = run_plan_enter(
         current_mode="build",
         plan_path="/tmp/p.md",
         plan_exists=False,
         latest_model="qwen-plus",
-        confirmed=False,
     )
-    assert result["metadata"]["status"] == "cancelled"
+    assert result["metadata"]["status"] == "confirmation_required"
+    assert result["metadata"]["action_type"] == "enter_plan"
 
 
-def test_run_plan_enter_should_return_switched_with_synthetic_message():
+def test_run_plan_enter_should_return_completed_when_already_in_plan_mode():
     result = run_plan_enter(
-        current_mode="build",
+        current_mode="plan",
         plan_path="/tmp/p.md",
         plan_exists=False,
         latest_model="qwen-plus",
-        confirmed=True,
     )
-    assert result["metadata"]["status"] == "switched"
-    assert result["metadata"]["synthetic_agent"] == "plan"
-    assert "用户请求进入plan模式" in result["metadata"]["synthetic_user_message"]
+    assert result["metadata"]["status"] == "completed"
 
 
 def test_run_plan_exit_should_require_confirmation():
@@ -55,33 +51,30 @@ def test_run_plan_exit_should_require_confirmation():
         plan_path="/tmp/p.md",
         plan_exists=True,
         latest_model="qwen-plus",
-        confirmed=None,
     )
     assert result["metadata"]["status"] == "confirmation_required"
     assert result["metadata"]["target_agent"] == "build"
 
 
-def test_run_plan_exit_should_return_cancelled_when_rejected():
+def test_run_plan_exit_should_return_confirmation_without_llm_confirmation_flag():
     result = run_plan_exit(
         current_mode="plan",
         plan_path="/tmp/p.md",
         plan_exists=True,
         latest_model="qwen-plus",
-        confirmed=False,
     )
-    assert result["metadata"]["status"] == "cancelled"
+    assert result["metadata"]["status"] == "confirmation_required"
+    assert result["metadata"]["action_type"] == "exit_plan"
 
 
-def test_run_plan_exit_should_switch_after_confirmation():
+def test_run_plan_exit_should_return_completed_when_not_in_plan():
     result = run_plan_exit(
-        current_mode="plan",
+        current_mode="build",
         plan_path="/tmp/p.md",
         plan_exists=True,
         latest_model="qwen-plus",
-        confirmed=True,
     )
-    assert result["metadata"]["status"] == "switched"
-    assert "计划文件在 /tmp/p.md" in result["metadata"]["synthetic_user_message"]
+    assert result["metadata"]["status"] == "completed"
 
 
 def test_validate_readonly_bash_should_block_redirection():

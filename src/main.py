@@ -1,8 +1,10 @@
+from agent.config.logging_setup import init_logging
 from agent.core.message import get_message_text
 from agent.runtime.session import clear_session_memory, run_session
 
 
 def main() -> None:
+    init_logging()
     session_id = "cli-session-002"
     mode = "build"
 

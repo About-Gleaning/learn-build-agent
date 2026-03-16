@@ -259,12 +259,7 @@ def build_plan_enter_tool() -> dict[str, Any]:
             "description": PLAN_ENTER_TOOL_DESCRIPTION,
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": "是否确认切换。true 表示用户已同意切换。",
-                    }
-                },
+                "properties": {},
             },
         },
     }
@@ -278,12 +273,7 @@ def build_plan_exit_tool() -> dict[str, Any]:
             "description": PLAN_EXIT_TOOL_DESCRIPTION,
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": "是否已获得用户确认。true 才会执行退出。",
-                    }
-                },
+                "properties": {},
             },
         },
     }

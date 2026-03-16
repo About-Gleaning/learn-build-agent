@@ -17,6 +17,7 @@ src/
   agent/
     config/
       settings.py                 # 环境与配置读取
+      logging_setup.py            # 统一日志初始化、格式与脱敏
     core/
       context.py                  # 会话上下文（ContextVar）
       message.py                  # 统一 Message/Part 协议与转换
@@ -31,7 +32,7 @@ src/
       tool_executor.py            # ToolExecutor 与 Tool Hook 调度
       compaction.py               # 上下文压缩
     web/
-      app.py                      # Web API（SSE 聊天、历史查询、清空会话）
+      app.py                      # Web API（SSE 聊天、历史查询、模式切换确认、清空会话）
       schemas.py                  # Web 层请求/响应模型
     tools/
       handlers.py                 # 各工具业务实现
@@ -68,6 +69,8 @@ pnpm dev
 ## 分层职责约束（必须遵守）
 
 - `runtime/session.py` 仅做会话编排（消息循环、模式切换、工具分发），不放工具业务逻辑。
+- `plan_enter` / `plan_exit` 仅负责发起模式切换申请，确认与取消必须由程序状态机和 Web 交互控制，禁止让 LLM 直接决定确认结果。
+- Web 端“确认切换”必须走流式接口继续执行后续会话，禁止退回阻塞式普通 POST，否则前端会丢失增量事件并表现为无响应。
 - `runtime/agents.py` 统一维护所有 agent 的元信息；每个 agent 必须声明 `model`（`primary` 或 `subagent`）与 `description`。
 - 工具实现统一放在 `tools/handlers.py`，工具协议统一放在 `tools/specs.py`。
 - 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
@@ -99,6 +102,12 @@ pnpm dev
 3. 如无特殊工具需求，复用 `build_base_tools()`；如有新增能力，在工具层扩展而不是在会话层写死分支。
 4. 在 `tests/test_run_session.py` 增加 subagent 路由、拒绝非法 agent、工具可见性等测试。
 
+### 额外约定：Build Prompt 选择
+
+- `build` 主模式的 prompt 文件按大模型厂商选择，命名规则为 `build.<vendor>.txt`。
+- 厂商归属必须在 `src/agent/config/llm_runtime.json` 的 provider 配置中显式声明 `vendor`，禁止在代码中硬编码映射或通过 `base_url` 推断。
+- 若对应厂商文件不存在，则回退到 `build.default.txt`。
+
 ### 3) 新增 Tool Hook
 
 1. 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`。
@@ -118,8 +127,19 @@ pnpm dev
 - 不在代码中硬编码密钥，统一使用环境变量。
 - 新逻辑默认考虑复杂度，优先 O(n) 线性处理，避免不必要的全量扫描。
 
+## 日志约定
+
+- 日志统一通过 `src/agent/config/logging_setup.py` 初始化，禁止在业务模块内直接调用 `logging.basicConfig()`。
+- 日志文件写入 `logs/app-YYYY-MM-dd.log`，使用追加模式，重启不会覆盖历史内容。
+- 正常链路仅保留关键节点日志：LLM 调用前后、工具调用前后。
+- 异常链路保留 `warning/error/exception`，用于定位失败原因。
+- 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
+- `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。
+
 ## 变更记录
 
 - 2026-03-12：同步文档结构与当前代码，补充 `session_memory.py`、Web/测试说明、分层职责约束。
 - 2026-03-13：补充 agent 注册约定、`task` 动态描述模板与 subagent 扩展说明。
 - 2026-03-13：将 skills 暴露方式从 `explore` prompt 占位符迁移为 `load_skill` 工具描述动态注入。
+- 2026-03-16：新增统一日志初始化模块，日志改为按天追加落盘，并收敛为 LLM/工具关键节点日志。
+- 2026-03-16：`build` 模式提示词改为按 `vendor` 选择 `build.<vendor>.txt`，`qwen` 与 `qwen-coder` 共用同一份 Qwen prompt。
