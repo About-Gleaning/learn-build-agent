@@ -36,6 +36,7 @@
 - `task` 工具中的 subagent 名单与说明，必须从 `runtime/agents.py` 动态生成，禁止在 `specs.py` 或 `session.py` 中手写支持列表。
 - Web 时间线必须按 `session` 维度累计展示，禁止在前端新一轮提交时覆盖上一轮执行轨迹。
 - `task` 委派 subagent 时，流式事件必须透传 subagent 内部进度，并使用后端生成的 `delegation_id` 作为稳定关联键。
+- Web 助手消息展示必须优先基于后端返回的 `display_parts` 顺序片段流，确保 `assistant_text` 与 `tool_call`/`tool_result` 按真实发生顺序穿插；仅在旧消息缺少该字段时才回退到 `process_items + text` 的兼容渲染。
 - 日志必须通过程序显式传递 `agent`、`model` 等上下文字段，禁止依赖 LLM 生成或推断日志元信息。
 - 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
 - 日志文件统一写入 `logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容。
@@ -79,3 +80,4 @@
 - 禁止硬编码任何密钥或令牌，统一使用环境变量。
 - 所有路径输入必须通过工作区边界校验（如 `safe_path`）。
 - Shell 执行默认高风险，优先白名单、超时与最小权限策略。
+- LLM 调用必须配置显式超时；当主代理在 `task` 委派后继续二轮推理发生超时时，必须记录错误日志并返回可解释失败结果，禁止无限等待。

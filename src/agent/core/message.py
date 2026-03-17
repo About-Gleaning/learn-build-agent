@@ -47,6 +47,24 @@ class ProcessItem(TypedDict, total=False):
     tool_call_id: str
 
 
+class DisplayPart(TypedDict, total=False):
+    id: str
+    kind: str
+    title: str
+    detail: str
+    text: str
+    created_at: str
+    agent: str
+    agent_kind: str
+    depth: int
+    round: int
+    status: str
+    delegation_id: str
+    parent_tool_call_id: str
+    tool_name: str
+    tool_call_id: str
+
+
 class ConfirmationInfo(TypedDict, total=False):
     tool: str
     question: str
@@ -76,6 +94,7 @@ class MessageInfo(TypedDict, total=False):
     summary: bool
     response_meta: ResponseMeta
     process_items: list[ProcessItem]
+    display_parts: list[DisplayPart]
     confirmation: ConfirmationInfo
 
 

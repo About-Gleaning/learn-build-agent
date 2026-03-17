@@ -18,6 +18,8 @@ type UiMessage = {
   turnCompletedAt: string;
   responseMeta: ResponseMeta;
   processItems: ProcessItem[];
+  displayParts: DisplayPart[];
+  displayTextMergeOpen: boolean;
   confirmation: ConfirmationInfo | null;
 };
 
@@ -35,6 +37,24 @@ type ProcessItem = {
   kind: string;
   title: string;
   detail: string;
+  createdAt: string;
+  agent: string;
+  agentKind: string;
+  depth: number;
+  round: number;
+  status: string;
+  delegationId: string;
+  parentToolCallId: string;
+  toolName: string;
+  toolCallId: string;
+};
+
+type DisplayPart = {
+  id: string;
+  kind: string;
+  title: string;
+  detail: string;
+  text: string;
   createdAt: string;
   agent: string;
   agentKind: string;
@@ -67,34 +87,12 @@ type ProgressEntry = {
   updatedAt: string;
   request?: string;
   result?: string;
+  toolCallId?: string;
   meta: string[];
-};
-
-type ProgressCard = {
-  id: string;
-  status: string;
-  agent: string;
-  agentKind: string;
-  createdAt: string;
-  updatedAt: string;
-  entries: ProgressEntry[];
+  isFinal?: boolean;
 };
 
 type AgentName = "build" | "plan";
-
-type TimelineItem = {
-  id: string;
-  kind: string;
-  title: string;
-  detail: string;
-  createdAt: string;
-  agent: string;
-  agentKind: string;
-  depth: number;
-  round: number;
-  delegationId: string;
-  parentToolCallId: string;
-};
 
 type RuntimeOptionsResp = {
   default_agent: AgentName;
@@ -136,6 +134,23 @@ type HistoryResp = {
       kind: string;
       title: string;
       detail: string;
+      created_at: string;
+      agent: string;
+      agent_kind: string;
+      depth: number;
+      round: number;
+      status: string;
+      delegation_id: string;
+      parent_tool_call_id: string;
+      tool_name: string;
+      tool_call_id: string;
+    }>;
+    display_parts?: Array<{
+      id: string;
+      kind: string;
+      title: string;
+      detail: string;
+      text: string;
       created_at: string;
       agent: string;
       agent_kind: string;
@@ -281,31 +296,6 @@ function getAvatarLabel(role: Role): string {
   return "系统";
 }
 
-function getTimelineBadgeLabel(kind: string): string {
-  if (kind === "start") {
-    return "开始";
-  }
-  if (kind === "round_start") {
-    return "轮次";
-  }
-  if (kind === "tool_call") {
-    return "工具";
-  }
-  if (kind === "tool_result") {
-    return "结果";
-  }
-  if (kind === "round_end") {
-    return "结束";
-  }
-  if (kind === "done") {
-    return "完成";
-  }
-  if (kind === "error") {
-    return "异常";
-  }
-  return "事件";
-}
-
 function getAgentKindLabel(agentKind: string): string {
   if (agentKind === "subagent") {
     return "子代理";
@@ -321,16 +311,32 @@ function filterVisibleProcessItems(items: ProcessItem[]): ProcessItem[] {
   return items.filter((item) => !shouldHideFrontendEvent(item.kind));
 }
 
-function filterVisibleTimelineItems(items: TimelineItem[]): TimelineItem[] {
-  return items.filter((item) => !shouldHideFrontendEvent(item.kind));
-}
-
 function mapProcessItem(item: HistoryResp["messages"][number]["process_items"][number]): ProcessItem {
   return {
     id: item.id,
     kind: item.kind,
     title: item.title,
     detail: item.detail,
+    createdAt: item.created_at,
+    agent: item.agent,
+    agentKind: item.agent_kind,
+    depth: item.depth,
+    round: item.round,
+    status: item.status,
+    delegationId: item.delegation_id,
+    parentToolCallId: item.parent_tool_call_id,
+    toolName: item.tool_name,
+    toolCallId: item.tool_call_id,
+  };
+}
+
+function mapDisplayPart(item: NonNullable<HistoryResp["messages"][number]["display_parts"]>[number]): DisplayPart {
+  return {
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    detail: item.detail,
+    text: item.text,
     createdAt: item.created_at,
     agent: item.agent,
     agentKind: item.agent_kind,
@@ -363,31 +369,57 @@ function mapProcessItemPayload(item: Record<string, unknown>): ProcessItem {
   };
 }
 
+function mapDisplayPartPayload(item: Record<string, unknown>): DisplayPart {
+  return {
+    id: readString(item, "id", buildId("display")),
+    kind: readString(item, "kind"),
+    title: readString(item, "title"),
+    detail: readString(item, "detail"),
+    text: readString(item, "text"),
+    createdAt: readString(item, "created_at"),
+    agent: readString(item, "agent"),
+    agentKind: readString(item, "agent_kind"),
+    depth: readNumber(item, "depth"),
+    round: readNumber(item, "round"),
+    status: readString(item, "status"),
+    delegationId: readString(item, "delegation_id"),
+    parentToolCallId: readString(item, "parent_tool_call_id"),
+    toolName: readString(item, "tool_name"),
+    toolCallId: readString(item, "tool_call_id"),
+  };
+}
+
 function buildLiveProcessItem(eventName: string, payload: Record<string, unknown>): ProcessItem | null {
   if (eventName === "text_delta") {
     return null;
   }
+  return buildTimelineItem(eventName, payload);
+}
 
-  const timelineItem = buildTimelineItem(eventName, payload);
-  if (!timelineItem) {
+function buildLiveDisplayPart(eventName: string, payload: Record<string, unknown>): DisplayPart | null {
+  if (eventName === "text_delta" || shouldHideFrontendEvent(eventName) || eventName === "done") {
     return null;
   }
-
+  const processItem = buildTimelineItem(eventName, payload);
+  if (!processItem) {
+    return null;
+  }
   return {
-    id: timelineItem.id,
-    kind: timelineItem.kind,
-    title: timelineItem.title,
-    detail: timelineItem.detail,
-    createdAt: timelineItem.createdAt,
-    agent: timelineItem.agent,
-    agentKind: timelineItem.agentKind,
-    depth: timelineItem.depth,
-    round: timelineItem.round,
-    status: readString(payload, "status", eventName === "error" ? "failed" : eventName === "done" ? "completed" : ""),
-    delegationId: timelineItem.delegationId,
-    parentToolCallId: timelineItem.parentToolCallId,
-    toolName: readString(payload, "name"),
-    toolCallId: readString(payload, "tool_call_id"),
+    id: processItem.id,
+    kind: processItem.kind,
+    title: processItem.title,
+    detail: processItem.detail,
+    text: "",
+    createdAt: processItem.createdAt,
+    agent: processItem.agent,
+    agentKind: processItem.agentKind,
+    depth: processItem.depth,
+    round: processItem.round,
+    status: processItem.status,
+    delegationId: processItem.delegationId,
+    parentToolCallId: processItem.parentToolCallId,
+    toolName: processItem.toolName,
+    toolCallId: processItem.toolCallId,
   };
 }
 
@@ -399,6 +431,71 @@ function appendProcessItem(items: ProcessItem[], nextItem: ProcessItem): Process
     return items;
   }
   return [...items, nextItem];
+}
+
+function appendDisplayPart(items: DisplayPart[], nextItem: DisplayPart): DisplayPart[] {
+  if (items.some((item) => item.id === nextItem.id)) {
+    return items;
+  }
+  return [...items, nextItem];
+}
+
+function appendDisplayTextDelta(message: UiMessage, delta: string, payload?: Record<string, unknown>): UiMessage {
+  if (!delta) {
+    return message;
+  }
+
+  const agent = readString(payload || {}, "agent", message.agent);
+  const agentKind = readString(payload || {}, "agent_kind", "primary");
+  const depth = readNumber(payload || {}, "depth", 0);
+  const round = readNumber(payload || {}, "round", 0);
+  const delegationId = readString(payload || {}, "delegation_id");
+  const parentToolCallId = readString(payload || {}, "parent_tool_call_id");
+  const createdAt = readString(payload || {}, "timestamp", new Date().toISOString());
+  const nextParts = [...message.displayParts];
+  const lastPart = nextParts[nextParts.length - 1];
+  if (
+    message.displayTextMergeOpen &&
+    lastPart &&
+    lastPart.kind === "assistant_text" &&
+    lastPart.agent === agent &&
+    lastPart.agentKind === agentKind &&
+    lastPart.depth === depth &&
+    lastPart.round === round &&
+    lastPart.delegationId === delegationId &&
+    lastPart.parentToolCallId === parentToolCallId
+  ) {
+    nextParts[nextParts.length - 1] = {
+      ...lastPart,
+      text: `${lastPart.text}${delta}`,
+    };
+  } else {
+    nextParts.push({
+      id: buildId("display"),
+      kind: "assistant_text",
+      title: `${agent || "assistant"} 回复`,
+      detail: "",
+      text: delta,
+      createdAt,
+      agent,
+      agentKind,
+      depth,
+      round,
+      status: "completed",
+      delegationId,
+      parentToolCallId,
+      toolName: "",
+      toolCallId: "",
+    });
+  }
+
+  return {
+    ...message,
+    text: message.text + delta,
+    status: "running",
+    displayParts: nextParts,
+    displayTextMergeOpen: true,
+  };
 }
 
 function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, finalPayload: Record<string, unknown>): UiMessage {
@@ -428,6 +525,10 @@ function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, f
     processItems: Array.isArray(finalPayload.process_items)
       ? filterVisibleProcessItems((finalPayload.process_items as Array<Record<string, unknown>>).map((item) => mapProcessItemPayload(item)))
       : message.processItems,
+    displayParts: Array.isArray(finalPayload.display_parts)
+      ? ((finalPayload.display_parts as Array<Record<string, unknown>>).map((item) => mapDisplayPartPayload(item)))
+      : message.displayParts,
+    displayTextMergeOpen: false,
     confirmation:
       finalPayload.confirmation && typeof finalPayload.confirmation === "object"
         ? {
@@ -469,6 +570,8 @@ async function loadHistory(sessionId: string): Promise<UiMessage[]> {
       durationMs: msg.response_meta?.duration_ms || 0,
     },
     processItems: filterVisibleProcessItems((msg.process_items || []).map((item) => mapProcessItem(item))),
+    displayParts: Array.isArray(msg.display_parts) ? msg.display_parts.map((item) => mapDisplayPart(item)) : [],
+    displayTextMergeOpen: false,
     confirmation: msg.confirmation
       ? {
           tool: msg.confirmation.tool || "",
@@ -523,6 +626,15 @@ async function streamSse(params: {
   let buffer = "";
   let hasDoneEvent = false;
 
+  const isTerminalDoneEvent = (eventName: string, payload: Record<string, unknown>): boolean => {
+    if (eventName !== "done") {
+      return false;
+    }
+    const agentKind = readString(payload, "agent_kind", "primary");
+    const depth = readNumber(payload, "depth", 0);
+    return agentKind === "primary" && depth === 0;
+  };
+
   const parseEvent = (rawEvent: string): { event: string; data: string } => {
     const lines = rawEvent.split("\n");
     let event = "message";
@@ -556,7 +668,7 @@ async function streamSse(params: {
           params.onDelta(readString(payload, "delta"));
         }
 
-        if (event.event === "done") {
+        if (isTerminalDoneEvent(event.event, payload)) {
           hasDoneEvent = true;
         }
 
@@ -638,7 +750,7 @@ function describeAgent(payload: Record<string, unknown>): string {
   return `${agentKind} · ${agent}`;
 }
 
-function buildTimelineItem(eventName: string, payload: Record<string, unknown>): TimelineItem | null {
+function buildTimelineItem(eventName: string, payload: Record<string, unknown>): ProcessItem | null {
   const createdAt =
     readString(payload, "timestamp") ||
     readString(payload, "started_at") ||
@@ -651,7 +763,7 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
   const delegationId = readString(payload, "delegation_id");
   const parentToolCallId = readString(payload, "parent_tool_call_id");
 
-  const createItem = (kind: string, title: string, detail: string): TimelineItem => ({
+  const createItem = (kind: string, title: string, detail: string): ProcessItem => ({
     id: readString(payload, "event_id", buildId("timeline")),
     kind,
     title,
@@ -661,8 +773,11 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
     agentKind,
     depth,
     round,
+    status: readString(payload, "status", eventName === "error" ? "failed" : eventName === "done" ? "completed" : ""),
     delegationId,
     parentToolCallId,
+    toolName: readString(payload, "name"),
+    toolCallId: readString(payload, "tool_call_id"),
   });
 
   if (eventName === "text_delta") {
@@ -735,13 +850,9 @@ function getNextAgent(current: AgentName, agents: AgentName[]): AgentName {
   return agents[nextIndex];
 }
 
-function renderMessageBody(message: UiMessage) {
-  const content = message.text || (message.status === "running" ? "正在生成响应..." : "");
+function renderMarkdownContent(content: string) {
   if (!content) {
     return null;
-  }
-  if (message.role !== "assistant") {
-    return <div className="message-text">{content}</div>;
   }
   return (
     <div className="message-text message-markdown">
@@ -757,6 +868,17 @@ function renderMessageBody(message: UiMessage) {
       </ReactMarkdown>
     </div>
   );
+}
+
+function renderMessageBody(message: UiMessage) {
+  const content = message.text || (message.status === "running" ? "正在生成响应..." : "");
+  if (!content) {
+    return null;
+  }
+  if (message.role !== "assistant") {
+    return <div className="message-text">{content}</div>;
+  }
+  return renderMarkdownContent(content);
 }
 
 function buildAssistantMetaLine(message: UiMessage): string {
@@ -870,58 +992,124 @@ function buildProgressMeta(item: ProcessItem): string[] {
   return meta;
 }
 
-function mergeProgressEntry(base: ProgressEntry, item: ProcessItem): ProgressEntry {
+function sortDisplayParts(parts: DisplayPart[]): DisplayPart[] {
+  return [...parts].sort((left, right) => {
+    const leftTime = left.createdAt || "";
+    const rightTime = right.createdAt || "";
+    return leftTime.localeCompare(rightTime);
+  });
+}
+
+function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: string): ProgressEntry {
+  if (part.kind === "assistant_text") {
+    const meta = [part.agentKind === "subagent" ? "子代理" : "主代理", part.agent].filter(Boolean);
+    if (part.round > 0) {
+      meta.push(`第 ${part.round} 轮`);
+    }
+    return {
+      id: `display_entry_${part.id}`,
+      kind: part.kind,
+      title: part.agentKind === "subagent" ? `子代理回复 · ${part.agent}` : "助手回复",
+      agent: part.agent,
+      agentKind: part.agentKind,
+      status: part.status || messageStatus,
+      createdAt: part.createdAt,
+      updatedAt: part.createdAt,
+      result: part.text,
+      meta,
+      isFinal: true,
+    };
+  }
+
+  const item: ProcessItem = {
+    id: part.id,
+    kind: part.kind,
+    title: part.title,
+    detail: part.detail,
+    createdAt: part.createdAt,
+    agent: part.agent,
+    agentKind: part.agentKind,
+    depth: part.depth,
+    round: part.round,
+    status: part.status,
+    delegationId: part.delegationId,
+    parentToolCallId: part.parentToolCallId,
+    toolName: part.toolName,
+    toolCallId: part.toolCallId,
+  };
   const summary = summarizeProcessItem(item);
   return {
-    ...base,
-    title: base.title || summary.title,
-    status: item.status || base.status,
-    updatedAt: item.createdAt || base.updatedAt,
-    request: base.request || summary.request,
-    result: summary.result || base.result,
+    id: `display_entry_${part.id}`,
+    kind: part.kind,
+    title: summary.title,
+    agent: part.agent,
+    agentKind: part.agentKind,
+    status: part.status || (part.kind === "error" ? "failed" : "running"),
+    createdAt: part.createdAt,
+    updatedAt: part.createdAt,
+    request: summary.request,
+    result: summary.result,
+    toolCallId: part.toolCallId,
     meta: buildProgressMeta(item),
   };
 }
 
-function buildProgressEntries(processItems: ProcessItem[]): ProgressEntry[] {
-  const orderedItems = [...processItems].sort((left, right) => {
+function mergeToolTimelineEntries(entries: ProgressEntry[]): ProgressEntry[] {
+  const mergedEntries: ProgressEntry[] = [];
+  const toolEntryIndexMap = new Map<string, number>();
+
+  for (const entry of entries) {
+    const isToolEvent = entry.kind === "tool_call" || entry.kind === "tool_result";
+    const toolKey = entry.toolCallId?.trim();
+
+    if (!isToolEvent || !toolKey) {
+      mergedEntries.push(entry);
+      continue;
+    }
+
+    if (entry.kind === "tool_call") {
+      toolEntryIndexMap.set(toolKey, mergedEntries.length);
+      mergedEntries.push(entry);
+      continue;
+    }
+
+    const matchedIndex = toolEntryIndexMap.get(toolKey);
+    if (matchedIndex === undefined) {
+      mergedEntries.push(entry);
+      continue;
+    }
+
+    const matchedEntry = mergedEntries[matchedIndex];
+    mergedEntries[matchedIndex] = {
+      ...matchedEntry,
+      status: entry.status || matchedEntry.status,
+      updatedAt: entry.updatedAt || entry.createdAt || matchedEntry.updatedAt,
+      result: entry.result || matchedEntry.result,
+      meta: matchedEntry.meta.length > 0 ? matchedEntry.meta : entry.meta,
+    };
+  }
+
+  return mergedEntries;
+}
+
+function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
+  if (message.displayParts.length > 0) {
+    const orderedEntries = sortDisplayParts(message.displayParts).map((part) =>
+      buildTimelineEntryFromDisplayPart(part, message.status),
+    );
+    return mergeToolTimelineEntries(orderedEntries);
+  }
+
+  const orderedItems = [...message.processItems].sort((left, right) => {
     const leftTime = left.createdAt || "";
     const rightTime = right.createdAt || "";
     return leftTime.localeCompare(rightTime);
   });
 
   const entries: ProgressEntry[] = [];
-  const toolEntryByCallId = new Map<string, ProgressEntry>();
 
   for (const item of orderedItems) {
     const summary = summarizeProcessItem(item);
-    const toolCallKey = item.toolCallId || item.parentToolCallId;
-
-    if ((item.kind === "tool_call" || item.kind === "tool_result") && toolCallKey) {
-      const existing = toolEntryByCallId.get(toolCallKey);
-      if (existing) {
-        Object.assign(existing, mergeProgressEntry(existing, item));
-        continue;
-      }
-
-      const entry: ProgressEntry = {
-        id: `progress_entry_${toolCallKey}`,
-        kind: item.kind,
-        title: summary.title,
-        agent: item.agent,
-        agentKind: item.agentKind,
-        status: item.status || "running",
-        createdAt: item.createdAt,
-        updatedAt: item.createdAt,
-        request: summary.request,
-        result: summary.result,
-        meta: buildProgressMeta(item),
-      };
-      entries.push(entry);
-      toolEntryByCallId.set(toolCallKey, entry);
-      continue;
-    }
-
     entries.push({
       id: `progress_entry_${item.id}`,
       kind: item.kind,
@@ -937,121 +1125,71 @@ function buildProgressEntries(processItems: ProcessItem[]): ProgressEntry[] {
     });
   }
 
+  const finalContent = message.text || (message.status === "running" ? "正在生成响应..." : "");
+  if (finalContent) {
+    entries.push({
+      id: `${message.id}_final`,
+      kind: "done",
+      title: "助手回复",
+      agent: message.agent,
+      agentKind: "primary",
+      status: message.status,
+      createdAt: message.turnCompletedAt || message.createdAt,
+      updatedAt: message.turnCompletedAt || message.createdAt,
+      result: finalContent,
+      meta: [message.agent, message.provider, message.model].filter(Boolean),
+      isFinal: true,
+    });
+  }
+
   return entries;
-}
-
-function buildProgressCards(processItems: ProcessItem[]): ProgressCard[] {
-  const orderedItems = [...processItems].sort((left, right) => {
-    const leftTime = left.createdAt || "";
-    const rightTime = right.createdAt || "";
-    return leftTime.localeCompare(rightTime);
-  });
-
-  const cards: ProgressCard[] = [];
-  let currentCard: ProgressCard | null = null;
-  let currentItems: ProcessItem[] = [];
-
-  for (const item of orderedItems) {
-    const needsNewCard =
-      !currentCard ||
-      currentCard.agent !== item.agent ||
-      currentCard.agentKind !== item.agentKind ||
-      currentItems.length >= 6 ||
-      item.kind === "error";
-
-    if (needsNewCard) {
-      if (currentCard) {
-        currentCard.entries = buildProgressEntries(currentItems);
-      }
-      currentCard = {
-        id: `progress_${item.id}`,
-        status: item.status || (item.kind === "error" ? "failed" : "running"),
-        agent: item.agent,
-        agentKind: item.agentKind,
-        createdAt: item.createdAt,
-        updatedAt: item.createdAt,
-        entries: [],
-      };
-      currentItems = [];
-      cards.push(currentCard);
-    }
-
-    if (!currentCard) {
-      continue;
-    }
-    currentItems.push(item);
-    currentCard.updatedAt = item.createdAt || currentCard.updatedAt;
-    if (item.status) {
-      currentCard.status = item.status;
-    }
-  }
-
-  if (currentCard) {
-    currentCard.entries = buildProgressEntries(currentItems);
-  }
-
-  return cards;
 }
 
 
 function renderAssistantTimeline(message: UiMessage) {
-  const cards = buildProgressCards(message.processItems);
-  const hasTimeline = cards.some((card) => card.entries.length > 0);
+  const entries = buildAssistantTimelineEntries(message);
+  const hasTimeline = entries.length > 0;
 
-  if (!hasTimeline && !message.text) {
+  if (!hasTimeline) {
     return null;
   }
 
   return (
     <div className="assistant-timeline">
-      {cards.map((card) => (
-        <section key={card.id} className={`assistant-timeline-group ${card.agentKind}`}>
-          <div className="assistant-timeline-group-head">
-            <span className="assistant-timeline-group-agent">
-              {card.agentKind === "subagent" ? "子代理" : "主代理"} · {card.agent}
-            </span>
-            <span className={`status-badge status-${card.status || "running"}`}>{getStatusLabel(card.status || "running")}</span>
-            <time>{formatTime(card.updatedAt || card.createdAt)}</time>
+      {entries.map((entry) => (
+        <section
+          key={entry.id}
+          className={`assistant-timeline-entry kind-${entry.kind} ${entry.agentKind} ${entry.isFinal ? "is-final" : ""} ${
+            entry.request && entry.result && !entry.isFinal ? "has-result" : ""
+          }`}
+        >
+          <div className="assistant-timeline-entry-head">
+            <strong>{entry.title}</strong>
+            <time>{formatTime(entry.updatedAt || entry.createdAt)}</time>
           </div>
-          <div className="assistant-timeline-list">
-            {card.entries.map((entry) => (
-              <section key={entry.id} className={`assistant-timeline-entry kind-${entry.kind}`}>
-                <div className="assistant-timeline-entry-head">
-                  <strong>{entry.title}</strong>
-                  <time>{formatTime(entry.updatedAt || entry.createdAt)}</time>
-                </div>
-                <div className="assistant-timeline-entry-meta">
-                  {entry.meta.map((metaItem, index) => (
-                    <span key={`${entry.id}_meta_${index}`}>{metaItem}</span>
-                  ))}
-                </div>
-                {entry.request ? (
-                  <div className="assistant-timeline-entry-block">
-                    <span className="assistant-timeline-entry-label">调用</span>
-                    <div className="assistant-timeline-entry-text">{entry.request}</div>
-                  </div>
-                ) : null}
-                {entry.result ? (
-                  <div className="assistant-timeline-entry-block">
-                    <span className="assistant-timeline-entry-label">结果</span>
-                    <div className="assistant-timeline-entry-text">{entry.result}</div>
-                  </div>
-                ) : null}
-              </section>
-            ))}
-          </div>
+          {entry.meta.length > 0 ? (
+            <div className="assistant-timeline-entry-meta">
+              {entry.meta.map((metaItem, index) => (
+                <span key={`${entry.id}_meta_${index}`}>{metaItem}</span>
+              ))}
+            </div>
+          ) : null}
+          {entry.request ? (
+            <div className="assistant-timeline-entry-block">
+              <span className="assistant-timeline-entry-label">调用</span>
+              <div className="assistant-timeline-entry-text">{entry.request}</div>
+            </div>
+          ) : null}
+          {entry.isFinal ? (
+            <div className="assistant-timeline-entry-block final-body">{renderMarkdownContent(entry.result || "")}</div>
+          ) : entry.result ? (
+            <div className="assistant-timeline-entry-block is-result">
+              <span className="assistant-timeline-entry-label">结果</span>
+              <div className="assistant-timeline-entry-text">{entry.result}</div>
+            </div>
+          ) : null}
         </section>
       ))}
-
-      {message.text ? (
-        <section className="assistant-timeline-final">
-          <div className="assistant-timeline-final-head">
-            <strong>最终回复</strong>
-            {message.turnCompletedAt ? <time>{formatTime(message.turnCompletedAt)}</time> : null}
-          </div>
-          {renderMessageBody(message)}
-        </section>
-      ) : null}
     </div>
   );
 }
@@ -1096,8 +1234,6 @@ export function App() {
   const [sessionId] = useState(() => buildSessionId());
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<UiMessage[]>([]);
-  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
-  const [showDebugTimeline, setShowDebugTimeline] = useState(false);
   const [error, setError] = useState("");
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeOptionsResp | null>(null);
   const [isLoadingOptions, setIsLoadingOptions] = useState(false);
@@ -1111,7 +1247,6 @@ export function App() {
   const [activeModel, setActiveModel] = useState("");
 
   const messageListRef = useRef<HTMLDivElement>(null);
-  const timelineListRef = useRef<HTMLDivElement>(null);
 
   const canSubmit = useMemo(() => input.trim().length > 0 && !isStreaming && !isApplyingModeSwitch, [input, isStreaming, isApplyingModeSwitch]);
   const latestMessage = messages[messages.length - 1] || null;
@@ -1119,7 +1254,6 @@ export function App() {
     () => [...messages].reverse().find((message) => message.role === "assistant") || null,
     [messages],
   );
-  const visibleTimeline = useMemo(() => filterVisibleTimelineItems(timeline), [timeline]);
 
   const modeDefaults = useMemo(() => {
     const map = new Map<AgentName, { defaultProvider: string; defaultModel: string }>();
@@ -1152,8 +1286,6 @@ export function App() {
     "--";
   const currentRuntimeSummary = `${mode} / ${displayProvider} / ${displayModel}`;
   const followText = shouldFollow ? "自动跟随开启" : "自动跟随关闭";
-  const latestProcessTime = latestAssistantMessage?.processItems[latestAssistantMessage.processItems.length - 1]?.createdAt || "";
-  const latestTimelineItem = visibleTimeline[visibleTimeline.length - 1] || null;
 
   useEffect(() => {
     if (!copyHint) {
@@ -1172,13 +1304,6 @@ export function App() {
       listEl.scrollTop = listEl.scrollHeight;
     }
   }, [messages, shouldFollow]);
-
-  useEffect(() => {
-    const listEl = timelineListRef.current;
-    if (listEl) {
-      listEl.scrollTop = listEl.scrollHeight;
-    }
-  }, [timeline]);
 
   useEffect(() => {
     if (!runtimeOptions) {
@@ -1251,6 +1376,8 @@ export function App() {
       turnCompletedAt: now,
       responseMeta: emptyResponseMeta(),
       processItems: [],
+      displayParts: [],
+      displayTextMergeOpen: false,
       confirmation: null,
     };
     const assistantId = buildId("assistant");
@@ -1268,6 +1395,8 @@ export function App() {
       turnCompletedAt: "",
       responseMeta: emptyResponseMeta(),
       processItems: [],
+      displayParts: [],
+      displayTextMergeOpen: false,
       confirmation: null,
     };
 
@@ -1285,28 +1414,17 @@ export function App() {
         userInput: trimmed,
         mode,
         provider,
-        onDelta: (delta) => {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantId
-                ? {
-                    ...msg,
-                    text: msg.text + delta,
-                    status: "running",
-                  }
-                : msg,
-            ),
-          );
-        },
+        onDelta: () => {},
         onEvent: (eventName, payload) => {
-          const item = buildTimelineItem(eventName, payload);
-          if (item && !shouldHideFrontendEvent(item.kind)) {
-            setTimeline((prev) => {
-              if (prev.some((current) => current.id === item.id)) {
-                return prev;
-              }
-              return [...prev, item];
-            });
+          if (eventName === "text_delta") {
+            const delta = readString(payload, "delta");
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantId
+                  ? appendDisplayTextDelta(msg, delta, payload)
+                  : msg,
+              ),
+            );
           }
           const processItem = buildLiveProcessItem(eventName, payload);
           if (processItem) {
@@ -1316,6 +1434,22 @@ export function App() {
                   ? {
                       ...msg,
                       processItems: appendProcessItem(msg.processItems, processItem),
+                      displayParts: (() => {
+                        const displayPart = buildLiveDisplayPart(eventName, payload);
+                        return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
+                      })(),
+                      displayTextMergeOpen: false,
+                    }
+                  : msg,
+              ),
+            );
+          } else if (eventName !== "text_delta") {
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantId
+                  ? {
+                      ...msg,
+                      displayTextMergeOpen: false,
                     }
                   : msg,
               ),
@@ -1353,6 +1487,7 @@ export function App() {
                 ...msg,
                 status: "failed",
                 text: msg.text || "请求失败，请稍后重试。",
+                displayTextMergeOpen: false,
               }
             : msg,
         ),
@@ -1409,6 +1544,8 @@ export function App() {
           turnCompletedAt: "",
           responseMeta: emptyResponseMeta(),
           processItems: [],
+          displayParts: [],
+          displayTextMergeOpen: false,
           confirmation: null,
         };
 
@@ -1422,28 +1559,17 @@ export function App() {
         await streamModeSwitchAction({
           sessionId,
           action,
-          onDelta: (delta) => {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId
-                  ? {
-                      ...msg,
-                      text: msg.text + delta,
-                      status: "running",
-                    }
-                  : msg,
-              ),
-            );
-          },
+          onDelta: () => {},
           onEvent: (eventName, payload) => {
-            const item = buildTimelineItem(eventName, payload);
-            if (item && !shouldHideFrontendEvent(item.kind)) {
-              setTimeline((prev) => {
-                if (prev.some((current) => current.id === item.id)) {
-                  return prev;
-                }
-                return [...prev, item];
-              });
+            if (eventName === "text_delta") {
+              const delta = readString(payload, "delta");
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId
+                    ? appendDisplayTextDelta(msg, delta, payload)
+                    : msg,
+                ),
+              );
             }
             const processItem = buildLiveProcessItem(eventName, payload);
             if (processItem) {
@@ -1453,6 +1579,22 @@ export function App() {
                     ? {
                         ...msg,
                         processItems: appendProcessItem(msg.processItems, processItem),
+                        displayParts: (() => {
+                          const displayPart = buildLiveDisplayPart(eventName, payload);
+                          return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
+                        })(),
+                        displayTextMergeOpen: false,
+                      }
+                    : msg,
+                ),
+              );
+            } else if (eventName !== "text_delta") {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId
+                    ? {
+                        ...msg,
+                        displayTextMergeOpen: false,
                       }
                     : msg,
                 ),
@@ -1662,67 +1804,6 @@ export function App() {
           </section>
         </section>
 
-        <aside className="workspace-side" aria-label="执行轨迹区">
-          <section className="timeline-card">
-            <div className="side-summary">
-              <div className="side-summary-card">
-                <span className="side-summary-label">当前运行时</span>
-                <strong>{currentRuntimeSummary}</strong>
-                <span>{isStreaming || isApplyingModeSwitch ? "正在持续写入新的执行进展" : "当前没有新的流式输出"}</span>
-              </div>
-              <div className="side-summary-card">
-                <span className="side-summary-label">本轮概览</span>
-                <strong>{latestAssistantMessage ? buildProcessSummary(latestAssistantMessage.responseMeta) : "等待新的执行"}</strong>
-                <span>
-                  最近进展: {latestProcessTime ? formatTime(latestProcessTime) : latestTimelineItem ? formatTime(latestTimelineItem.createdAt) : "--"}
-                </span>
-              </div>
-              <div className="side-summary-card">
-                <span className="side-summary-label">最近事件</span>
-                <strong>{latestTimelineItem ? latestTimelineItem.title : "等待新的执行事件"}</strong>
-                <span>
-                  {latestTimelineItem
-                    ? latestTimelineItem.detail || describeAgent({ agent: latestTimelineItem.agent, agent_kind: latestTimelineItem.agentKind })
-                    : "发送消息后会在这里显示全局概览"}
-                </span>
-              </div>
-              <button type="button" className="secondary-btn compact-btn timeline-toggle" onClick={() => setShowDebugTimeline((prev) => !prev)}>
-                {showDebugTimeline ? "隐藏技术事件流" : "显示技术事件流"}
-              </button>
-            </div>
-
-            {showDebugTimeline ? (
-              <div className="timeline-list" ref={timelineListRef}>
-                {visibleTimeline.length === 0 ? (
-                  <div className="empty-panel compact">
-                    <strong>等待新的执行事件</strong>
-                    <span>发送消息后，这里会按时间顺序展示轮次推进、工具调用与最终完成状态。</span>
-                  </div>
-                ) : null}
-
-                {visibleTimeline.map((item) => (
-                  <article
-                    key={item.id}
-                    className={`timeline-entry ${item.kind} ${item.agentKind}`}
-                    style={{ marginLeft: `${Math.max(0, item.depth) * 18}px` }}
-                  >
-                    <div className="timeline-entry-head">
-                      <span className={`timeline-kind kind-${item.kind}`}>{getTimelineBadgeLabel(item.kind)}</span>
-                      <time>{formatTime(item.createdAt)}</time>
-                    </div>
-                    <div className="timeline-entry-meta">
-                      <span className={`agent-pill ${item.agentKind}`}>{describeAgent({ agent: item.agent, agent_kind: item.agentKind })}</span>
-                      {item.round > 0 ? <span className="timeline-meta-text">第 {item.round} 轮</span> : null}
-                      {item.delegationId ? <span className="timeline-meta-text">委派: {item.delegationId}</span> : null}
-                    </div>
-                    <div className="timeline-entry-title">{item.title}</div>
-                    <div className="timeline-entry-detail">{item.detail}</div>
-                  </article>
-                ))}
-              </div>
-            ) : null}
-          </section>
-        </aside>
       </main>
     </div>
   );

@@ -6,11 +6,13 @@ import agent.adapters.llm.client as client_module
 from agent.adapters.llm.client import (
     LLMHook,
     LoggingHook,
+    _build_openai_client,
     clear_global_hooks,
     create_chat_completion,
     create_chat_completion_stream,
     register_global_hook,
 )
+from agent.config.settings import ResolvedLLMConfig
 from agent.core.message import append_text_part, append_tool_part, create_message
 
 
@@ -179,6 +181,50 @@ def test_on_error_hook_called_when_provider_fails(monkeypatch):
     result = create_chat_completion(_build_user_message(), tools=[])
 
     assert result["info"]["status"] == "failed"
+    assert recorder == ["timeout"]
+
+
+def test_build_openai_client_should_pass_timeout_seconds(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(client_module, "OpenAI", fake_openai)
+
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3-max",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=12.5,
+    )
+
+    _build_openai_client(config)
+
+    assert captured["timeout"] == 12.5
+    assert captured["base_url"] == "https://example.com/v1"
+
+
+def test_create_chat_completion_stream_should_return_timeout_error_message(monkeypatch):
+    recorder: list[str] = []
+    clear_global_hooks()
+    register_global_hook(ErrorCaptureHook(recorder))
+
+    def _raise_timeout(**kwargs):
+        raise TimeoutError("stream request timeout")
+
+    _patch_openai_client(monkeypatch, _raise_timeout)
+
+    stream = create_chat_completion_stream(_build_user_message(), tools=[])
+    with pytest.raises(StopIteration) as stop:
+        next(stream)
+
+    final_message = stop.value.value
+    assert final_message["info"]["status"] == "failed"
     assert recorder == ["timeout"]
 
 

@@ -31,6 +31,24 @@ class ProcessItemVO(BaseModel):
     tool_call_id: str = ""
 
 
+class DisplayPartVO(BaseModel):
+    id: str = ""
+    kind: str = ""
+    title: str = ""
+    detail: str = ""
+    text: str = ""
+    created_at: str = ""
+    agent: str = ""
+    agent_kind: str = ""
+    depth: int = 0
+    round: int = 0
+    status: str = ""
+    delegation_id: str = ""
+    parent_tool_call_id: str = ""
+    tool_name: str = ""
+    tool_call_id: str = ""
+
+
 class ConfirmationVO(BaseModel):
     tool: str = ""
     question: str = ""
@@ -61,6 +79,7 @@ class MessageVO(BaseModel):
     turn_completed_at: str = ""
     response_meta: ResponseMetaVO = Field(default_factory=ResponseMetaVO)
     process_items: list[ProcessItemVO] = Field(default_factory=list)
+    display_parts: list[DisplayPartVO] = Field(default_factory=list)
     confirmation: ConfirmationVO | None = None
 
 

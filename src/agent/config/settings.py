@@ -29,6 +29,7 @@ class ProviderSettings:
     base_url: str
     model: str
     api_key_env: str
+    timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class ResolvedLLMConfig:
     model: str
     base_url: str
     api_key: str
+    timeout_seconds: float
 
 
 def _load_runtime_payload() -> dict[str, Any]:
@@ -83,8 +85,15 @@ def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
         vendor = str(raw_value.get("vendor", "")).strip().lower()
         model = str(raw_value.get("model", "")).strip()
         api_key_env = str(raw_value.get("api_key_env", "")).strip()
+        timeout_seconds_raw = raw_value.get("timeout_seconds", 60)
         if not base_url or not vendor or not model or not api_key_env:
             raise ValueError(f"provider '{name}' 必须配置 vendor、base_url、model、api_key_env。")
+        try:
+            timeout_seconds = float(timeout_seconds_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"provider '{name}'.timeout_seconds 必须是数字。") from exc
+        if timeout_seconds <= 0:
+            raise ValueError(f"provider '{name}'.timeout_seconds 必须大于 0。")
 
         providers[name] = ProviderSettings(
             name=name,
@@ -92,6 +101,7 @@ def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
             base_url=base_url,
             model=model,
             api_key_env=api_key_env,
+            timeout_seconds=timeout_seconds,
         )
     return providers
 
@@ -145,6 +155,7 @@ def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None) -
         model=model,
         base_url=provider.base_url,
         api_key=api_key,
+        timeout_seconds=provider.timeout_seconds,
     )
 
 

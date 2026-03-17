@@ -14,6 +14,7 @@ from ..core.message import Message, get_message_text
 from ..runtime import session as session_runtime
 from .schemas import (
     ChatStreamReq,
+    DisplayPartVO,
     MessageVO,
     ModeSwitchActionReq,
     ModeSwitchActionVO,
@@ -27,6 +28,7 @@ def _to_message_vo(message: Message) -> MessageVO:
     info = message.get("info", {})
     response_meta = info.get("response_meta") if isinstance(info.get("response_meta"), dict) else {}
     process_items = info.get("process_items") if isinstance(info.get("process_items"), list) else []
+    display_parts = info.get("display_parts") if isinstance(info.get("display_parts"), list) else []
     confirmation = info.get("confirmation") if isinstance(info.get("confirmation"), dict) else None
     return MessageVO(
         message_id=str(info.get("message_id", "")),
@@ -66,6 +68,27 @@ def _to_message_vo(message: Message) -> MessageVO:
                 "tool_call_id": str(item.get("tool_call_id", "")),
             }
             for item in process_items
+            if isinstance(item, dict)
+        ],
+        display_parts=[
+            DisplayPartVO(
+                id=str(item.get("id", "")),
+                kind=str(item.get("kind", "")),
+                title=str(item.get("title", "")),
+                detail=str(item.get("detail", "")),
+                text=str(item.get("text", "")),
+                created_at=str(item.get("created_at", "")),
+                agent=str(item.get("agent", "")),
+                agent_kind=str(item.get("agent_kind", "")),
+                depth=int(item.get("depth", 0) or 0),
+                round=int(item.get("round", 0) or 0),
+                status=str(item.get("status", "")),
+                delegation_id=str(item.get("delegation_id", "")),
+                parent_tool_call_id=str(item.get("parent_tool_call_id", "")),
+                tool_name=str(item.get("tool_name", "")),
+                tool_call_id=str(item.get("tool_call_id", "")),
+            )
+            for item in display_parts
             if isinstance(item, dict)
         ],
         confirmation=(

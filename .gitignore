@@ -30,6 +30,7 @@ frontend/*.tsbuildinfo
 .runtime/
 
 # 运行期会话与工具输出
+logs/
 src/storage/tool-output/
 src/storage/todo/s_*.json
 

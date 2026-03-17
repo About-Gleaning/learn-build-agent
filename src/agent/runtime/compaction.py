@@ -1,8 +1,11 @@
 import json
+import logging
 from pathlib import Path
 from typing import Any, TypedDict
 
 from ..adapters.llm.client import create_chat_completion
+from ..config.logging_setup import build_log_extra
+from ..config.settings import ResolvedLLMConfig
 from ..core.message import (
     Message,
     append_compaction_part,
@@ -18,6 +21,8 @@ THRESHOLD = 50000
 KEEP_RECENT = 3
 TOOL_OUTPUT_MAX_LINES = 2000
 TOOL_OUTPUT_MAX_BYTES = 50 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 class ToolOutputTruncationResult(TypedDict):
@@ -226,13 +231,31 @@ def _estimate_tokens(messages: list[Message]) -> int:
     return total
 
 
-def compaction_summary(messages: list[Message]) -> list[Message]:
+def compaction_summary(
+    messages: list[Message],
+    *,
+    llm_config: ResolvedLLMConfig | None = None,
+    agent: str = "build",
+) -> list[Message]:
     """当上下文超过阈值时，生成 compaction checkpoint 并折叠更早历史。"""
     if not messages:
         return messages
 
     token_size = _estimate_tokens(messages)
+    model_name = llm_config.model if llm_config else ""
+    logger.info(
+        "compaction.check token_size=%s threshold=%s message_count=%s",
+        token_size,
+        THRESHOLD,
+        len(messages),
+        extra=build_log_extra(agent=agent, model=model_name),
+    )
     if token_size <= THRESHOLD:
+        logger.info(
+            "compaction.skip reason=below_threshold token_size=%s",
+            token_size,
+            extra=build_log_extra(agent=agent, model=model_name),
+        )
         return trim_messages_by_compaction_checkpoint(messages)
 
     system_messages = [m for m in messages if get_role(m) == "system"]
@@ -271,13 +294,35 @@ def compaction_summary(messages: list[Message]) -> list[Message]:
     append_text_part(user_message, summary_prompt)
     summary_messages.append(user_message)
 
-    response_message = create_chat_completion(messages=summary_messages, tools=[], max_tokens=2000)
+    logger.info(
+        "compaction.summary_request token_size=%s summary_message_count=%s",
+        token_size,
+        len(summary_messages),
+        extra=build_log_extra(agent=agent, model=model_name),
+    )
+    response_message = create_chat_completion(messages=summary_messages, tools=[], max_tokens=2000, llm_config=llm_config, agent=agent)
     if response_message["info"].get("status") != "completed":
+        logger.warning(
+            "compaction.summary_failed status=%s finish_reason=%s",
+            response_message["info"].get("status", ""),
+            response_message["info"].get("finish_reason", ""),
+            extra=build_log_extra(agent=agent, model=model_name),
+        )
         return messages
 
     summary_text = get_message_text(response_message).strip()
     if not summary_text:
+        logger.warning(
+            "compaction.summary_empty",
+            extra=build_log_extra(agent=agent, model=model_name),
+        )
         return messages
+
+    logger.info(
+        "compaction.summary_done summary_chars=%s",
+        len(summary_text),
+        extra=build_log_extra(agent=agent, model=model_name),
+    )
 
     compaction_message = create_message("user", session_id=session_id, status="completed")
     append_compaction_part(compaction_message, "以下历史消息已完成压缩总结，请结合下一条摘要继续当前任务。")
@@ -291,7 +336,12 @@ def compaction_summary(messages: list[Message]) -> list[Message]:
     return system_messages + trim_messages_by_compaction_checkpoint([*summarize_messages, compaction_message, response_message])
 
 
-def compact(messages: list[Message]) -> list[Message]:
+def compact(
+    messages: list[Message],
+    *,
+    llm_config: ResolvedLLMConfig | None = None,
+    agent: str = "build",
+) -> list[Message]:
     """压缩接口，先微压缩，再按阈值做摘要压缩。"""
     pruned = prune(messages)
-    return compaction_summary(pruned)
+    return compaction_summary(pruned, llm_config=llm_config, agent=agent)

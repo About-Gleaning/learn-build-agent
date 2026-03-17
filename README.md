@@ -108,6 +108,12 @@ pnpm dev
 - 厂商归属必须在 `src/agent/config/llm_runtime.json` 的 provider 配置中显式声明 `vendor`，禁止在代码中硬编码映射或通过 `base_url` 推断。
 - 若对应厂商文件不存在，则回退到 `build.default.txt`。
 
+### 额外约定：LLM 超时配置
+
+- 所有 provider 必须在 `src/agent/config/llm_runtime.json` 中显式配置 `timeout_seconds`，禁止依赖 SDK 默认超时无限等待。
+- 未单独调整时建议默认 `60` 秒，优先保证父/子 Agent 二轮推理能稳定失败收口，而不是静默卡住。
+- 当 `task` 委派完成后，若主 Agent 二轮 LLM 调用超时，系统必须记录错误日志并返回可解释失败结果。
+
 ### 3) 新增 Tool Hook
 
 1. 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`。
@@ -132,6 +138,7 @@ pnpm dev
 - 日志统一通过 `src/agent/config/logging_setup.py` 初始化，禁止在业务模块内直接调用 `logging.basicConfig()`。
 - 日志文件写入 `logs/app-YYYY-MM-dd.log`，使用追加模式，重启不会覆盖历史内容。
 - 正常链路仅保留关键节点日志：LLM 调用前后、工具调用前后。
+- `task` 委派场景额外记录两条关键日志：子代理结果已回收、主代理即将基于该结果继续二轮推理。
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
 - `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。

@@ -112,6 +112,25 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
                     "tool_call_id": "",
                 }
             ],
+            "display_parts": [
+                {
+                    "id": "disp_1",
+                    "kind": "assistant_text",
+                    "title": "build 回复",
+                    "detail": "",
+                    "text": "回答: 你好",
+                    "created_at": "t2",
+                    "agent": "build",
+                    "agent_kind": "primary",
+                    "depth": 0,
+                    "round": 1,
+                    "status": "completed",
+                    "delegation_id": "",
+                    "parent_tool_call_id": "",
+                    "tool_name": "",
+                    "tool_call_id": "",
+                }
+            ],
         }
 
     monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
@@ -133,6 +152,7 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     done_payload = next(payload for evt, payload in events if evt == "done")
     assert done_payload["response_meta"]["duration_ms"] == 1200
     assert done_payload["process_items"][0]["kind"] == "start"
+    assert done_payload["display_parts"][0]["kind"] == "assistant_text"
 
 
 def test_runtime_options_should_return_backend_config():
@@ -186,6 +206,25 @@ def test_get_session_messages_and_clear():
             "tool_call_id": "call_1",
         }
     ]
+    assistant_msg["info"]["display_parts"] = [
+        {
+            "id": "disp_1",
+            "kind": "assistant_text",
+            "title": "build 回复",
+            "detail": "",
+            "text": "第一轮回答",
+            "created_at": "2026-03-14T00:00:00+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "",
+            "tool_call_id": "",
+        }
+    ]
     assistant_msg["info"]["confirmation"] = {
         "tool": "plan_enter",
         "question": "是否切换到 plan 模式？",
@@ -208,6 +247,7 @@ def test_get_session_messages_and_clear():
     assert assistant_payload["finish_reason"] == "stop"
     assert assistant_payload["response_meta"]["tool_call_count"] == 1
     assert assistant_payload["process_items"][0]["tool_name"] == "todo_read"
+    assert assistant_payload["display_parts"][0]["text"] == "第一轮回答"
     assert assistant_payload["confirmation"]["target_agent"] == "plan"
 
     clear_resp = client.delete("/api/sessions/s_hist")
