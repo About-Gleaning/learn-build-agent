@@ -974,6 +974,88 @@ def test_run_session_stream_done_should_keep_text_and_tool_order(monkeypatch):
     assert done_event["display_parts"][-1]["text"] == "再总结"
 
 
+def test_merge_display_parts_with_message_should_not_append_fallback_when_stream_parts_exist():
+    assistant = create_message("assistant", "s_display_merge", status="completed")
+    text_part = append_text_part(assistant, "再总结")
+    text_part["created_at"] = "2026-03-14T00:00:00+00:00"
+    assistant["info"]["agent"] = "build"
+
+    display_parts = [
+        {
+            "id": "disp_1",
+            "kind": "assistant_text",
+            "title": "build 回复",
+            "detail": "",
+            "text": "先说明",
+            "created_at": "2026-03-14T00:00:01+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "",
+            "tool_call_id": "",
+        },
+        {
+            "id": "disp_2",
+            "kind": "tool_call",
+            "title": "build 调用工具: todo_read",
+            "detail": "{}",
+            "text": "",
+            "created_at": "2026-03-14T00:00:02+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "todo_read",
+            "tool_call_id": "call_1",
+        },
+        {
+            "id": "disp_3",
+            "kind": "tool_result",
+            "title": "build 工具结果: todo_read",
+            "detail": "completed ok",
+            "text": "",
+            "created_at": "2026-03-14T00:00:03+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "todo_read",
+            "tool_call_id": "call_1",
+        },
+        {
+            "id": "disp_4",
+            "kind": "assistant_text",
+            "title": "build 回复",
+            "detail": "",
+            "text": "再总结",
+            "created_at": "2026-03-14T00:00:04+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 2,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "",
+            "tool_call_id": "",
+        },
+    ]
+
+    merged = session_module._merge_display_parts_with_message(display_parts, assistant)
+
+    assert merged == display_parts
+
+
 def test_run_session_should_remember_explicit_provider(monkeypatch):
     configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
     clear_session_memory("s_provider_memory")

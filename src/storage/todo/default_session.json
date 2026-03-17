@@ -1,36 +1,36 @@
 {
   "session_id": "default_session",
-  "updated_at": "2026-03-17T06:47:36.047410+00:00",
+  "updated_at": "2026-03-17T08:46:41.853144+00:00",
   "todo_list": [
     {
       "id": "1",
-      "text": "在 settings.py 中添加压缩功能的配置项",
-      "status": "in_progress",
+      "text": "分析当前 onComposerKeyDown 函数的实现",
+      "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "text": "修改 compaction.py 中的 prune 函数，使其支持配置开关和保留条数",
-      "status": "pending",
+      "text": "设计输入法兼容的 Enter 键处理逻辑",
+      "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
-      "text": "更新 session.py 中 compact 调用处，传递压缩配置参数",
+      "text": "修改 frontend/src/App.tsx 中的 onComposerKeyDown 函数",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "4",
+      "text": "测试修复效果（中文输入法场景）",
       "status": "pending",
       "priority": "medium"
     },
     {
-      "id": "4",
-      "text": "更新相关文档说明新的配置项",
-      "status": "pending",
-      "priority": "low"
-    },
-    {
       "id": "5",
-      "text": "添加单元测试覆盖新功能",
+      "text": "验证其他功能不受影响（Shift+Enter 换行、Shift+Tab 切换等）",
       "status": "pending",
-      "priority": "low"
+      "priority": "medium"
     }
   ]
 }

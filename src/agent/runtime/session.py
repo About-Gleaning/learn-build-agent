@@ -771,23 +771,33 @@ def _build_display_parts_from_message(message: Message) -> list[DisplayPart]:
 
 def _merge_display_parts_with_message(display_parts: list[DisplayPart], message: Message) -> list[DisplayPart]:
     merged = [dict(item) for item in display_parts]
+    if not merged:
+        return _build_display_parts_from_message(message)
     fallback_parts = _build_display_parts_from_message(message)
     if not fallback_parts:
         return merged
-    if not merged:
-        return fallback_parts
 
+    existing_text_keys = {
+        (
+            str(item.get("kind", "")),
+            str(item.get("text", "")),
+            str(item.get("detail", "")),
+            str(item.get("agent", "")),
+        )
+        for item in merged
+        if str(item.get("kind", "")) in {"assistant_text", "error"}
+    }
     for fallback_part in fallback_parts:
-        last_part = merged[-1] if merged else None
-        if (
-            last_part
-            and str(last_part.get("kind", "")) == str(fallback_part.get("kind", ""))
-            and str(last_part.get("text", "")) == str(fallback_part.get("text", ""))
-            and str(last_part.get("detail", "")) == str(fallback_part.get("detail", ""))
-            and str(last_part.get("agent", "")) == str(fallback_part.get("agent", ""))
-        ):
+        fallback_key = (
+            str(fallback_part.get("kind", "")),
+            str(fallback_part.get("text", "")),
+            str(fallback_part.get("detail", "")),
+            str(fallback_part.get("agent", "")),
+        )
+        if fallback_key in existing_text_keys:
             continue
         merged.append(fallback_part)
+        existing_text_keys.add(fallback_key)
     return merged
 
 
