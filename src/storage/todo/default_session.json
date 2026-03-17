@@ -1,24 +1,36 @@
 {
   "session_id": "default_session",
-  "updated_at": "2026-03-16T09:51:48.822922+00:00",
+  "updated_at": "2026-03-17T06:47:36.047410+00:00",
   "todo_list": [
     {
       "id": "1",
-      "text": "分析agent loop中todo提醒机制的问题",
-      "status": "completed",
+      "text": "在 settings.py 中添加压缩功能的配置项",
+      "status": "in_progress",
       "priority": "high"
     },
     {
       "id": "2",
-      "text": "确认todo提醒是否正常工作",
-      "status": "completed",
+      "text": "修改 compaction.py 中的 prune 函数，使其支持配置开关和保留条数",
+      "status": "pending",
       "priority": "high"
     },
     {
       "id": "3",
-      "text": "删除todo提醒功能",
-      "status": "completed",
+      "text": "更新 session.py 中 compact 调用处，传递压缩配置参数",
+      "status": "pending",
       "priority": "medium"
+    },
+    {
+      "id": "4",
+      "text": "更新相关文档说明新的配置项",
+      "status": "pending",
+      "priority": "low"
+    },
+    {
+      "id": "5",
+      "text": "添加单元测试覆盖新功能",
+      "status": "pending",
+      "priority": "low"
     }
   ]
 }

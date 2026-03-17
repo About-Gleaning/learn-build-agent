@@ -283,6 +283,19 @@ function getStatusLabel(status: string): string {
   return status || "待处理";
 }
 
+function getTimelineEntryTitle(entry: ProgressEntry): string {
+  if (entry.kind === "tool_call" || entry.kind === "tool_result") {
+    const title = entry.title.replace(/^调用工具\s*·\s*/, "").trim();
+    if (entry.status === "failed") {
+      return title ? `调用工具失败 · ${title}` : "调用工具失败";
+    }
+    if (entry.status === "completed") {
+      return title ? `调用工具完成 · ${title}` : "调用工具完成";
+    }
+  }
+  return entry.title;
+}
+
 function getAvatarLabel(role: Role): string {
   if (role === "user") {
     return "你";
@@ -1085,7 +1098,7 @@ function mergeToolTimelineEntries(entries: ProgressEntry[]): ProgressEntry[] {
       status: entry.status || matchedEntry.status,
       updatedAt: entry.updatedAt || entry.createdAt || matchedEntry.updatedAt,
       result: entry.result || matchedEntry.result,
-      meta: matchedEntry.meta.length > 0 ? matchedEntry.meta : entry.meta,
+      meta: entry.meta.length > 0 ? entry.meta : matchedEntry.meta,
     };
   }
 
@@ -1159,12 +1172,13 @@ function renderAssistantTimeline(message: UiMessage) {
       {entries.map((entry) => (
         <section
           key={entry.id}
-          className={`assistant-timeline-entry kind-${entry.kind} ${entry.agentKind} ${entry.isFinal ? "is-final" : ""} ${
-            entry.request && entry.result && !entry.isFinal ? "has-result" : ""
-          }`}
+          className={`assistant-timeline-entry kind-${entry.kind} status-${entry.status || "pending"} ${entry.agentKind} ${
+            entry.isFinal ? "is-final" : ""
+          } ${entry.request && entry.result && !entry.isFinal ? "has-result" : ""}`}
         >
           <div className="assistant-timeline-entry-head">
-            <strong>{entry.title}</strong>
+            <strong>{getTimelineEntryTitle(entry)}</strong>
+            {entry.status ? <span className={`timeline-kind status-${entry.status}`}>{getStatusLabel(entry.status)}</span> : null}
             <time>{formatTime(entry.updatedAt || entry.createdAt)}</time>
           </div>
           {entry.meta.length > 0 ? (
@@ -1175,7 +1189,7 @@ function renderAssistantTimeline(message: UiMessage) {
             </div>
           ) : null}
           {entry.request ? (
-            <div className="assistant-timeline-entry-block">
+            <div className={`assistant-timeline-entry-block ${entry.status === "failed" ? "is-failed-request" : ""}`}>
               <span className="assistant-timeline-entry-label">调用</span>
               <div className="assistant-timeline-entry-text">{entry.request}</div>
             </div>
@@ -1183,7 +1197,9 @@ function renderAssistantTimeline(message: UiMessage) {
           {entry.isFinal ? (
             <div className="assistant-timeline-entry-block final-body">{renderMarkdownContent(entry.result || "")}</div>
           ) : entry.result ? (
-            <div className="assistant-timeline-entry-block is-result">
+            <div
+              className={`assistant-timeline-entry-block is-result ${entry.status === "failed" ? "is-failed-result" : ""}`}
+            >
               <span className="assistant-timeline-entry-label">结果</span>
               <div className="assistant-timeline-entry-text">{entry.result}</div>
             </div>

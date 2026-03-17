@@ -619,12 +619,23 @@ button:disabled {
   border-color: rgba(120, 164, 243, 0.22);
 }
 
-.assistant-timeline-entry.kind-tool_call.has-result,
-.assistant-timeline-entry.kind-tool_result {
+.assistant-timeline-entry.kind-tool_call.has-result.status-completed,
+.assistant-timeline-entry.kind-tool_result.status-completed {
   border-color: rgba(104, 189, 133, 0.24);
   background: linear-gradient(180deg, rgba(18, 34, 43, 0.86), rgba(11, 24, 30, 0.96));
 }
 
+.assistant-timeline-entry.status-failed {
+  border-color: rgba(255, 149, 135, 0.4);
+  background: linear-gradient(180deg, rgba(55, 22, 25, 0.92), rgba(28, 11, 15, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 188, 178, 0.06);
+}
+
+.assistant-timeline-entry.status-failed::before {
+  background: rgba(255, 149, 135, 0.34);
+}
+
+.assistant-timeline-entry.status-failed::after,
 .assistant-timeline-entry.kind-error::after {
   background: #ff9587;
   box-shadow: 0 0 0 3px rgba(255, 149, 135, 0.08);
@@ -633,6 +644,13 @@ button:disabled {
 .assistant-timeline-entry-head {
   flex-wrap: wrap;
   align-items: flex-start;
+}
+
+.assistant-timeline-entry-head .timeline-kind {
+  min-height: 24px;
+  padding: 0 10px;
+  margin-left: auto;
+  font-size: 11px;
 }
 
 .assistant-timeline-entry-head strong {
@@ -680,6 +698,22 @@ button:disabled {
   color: #8bd3a9;
 }
 
+.assistant-timeline-entry.status-failed .assistant-timeline-entry-label,
+.assistant-timeline-entry-block.is-failed-request .assistant-timeline-entry-label,
+.assistant-timeline-entry-block.is-failed-result .assistant-timeline-entry-label {
+  color: #ffb2a6;
+}
+
+.assistant-timeline-entry-block.is-failed-request,
+.assistant-timeline-entry-block.is-failed-result {
+  border-color: rgba(255, 149, 135, 0.26);
+  background: linear-gradient(180deg, rgba(68, 25, 28, 0.68), rgba(45, 17, 20, 0.88));
+}
+
+.assistant-timeline-entry-block.is-failed-result {
+  box-shadow: inset 0 0 0 1px rgba(255, 149, 135, 0.08);
+}
+
 .assistant-timeline-entry-text {
   color: #c7d6ea;
   font-size: 12px;
@@ -688,12 +722,40 @@ button:disabled {
   word-break: break-word;
 }
 
+.assistant-timeline-entry.status-failed .assistant-timeline-entry-text {
+  color: #ffd6d0;
+}
+
 .assistant-timeline-entry.is-final .message-text {
   color: #edf4ff;
 }
 
 .assistant-timeline-entry-block.final-body {
   display: block;
+}
+
+.timeline-kind.status-running {
+  color: var(--brand-strong);
+  background: rgba(47, 76, 128, 0.3);
+  border: 1px solid rgba(120, 164, 243, 0.26);
+}
+
+.timeline-kind.status-completed {
+  color: var(--success);
+  background: rgba(43, 102, 72, 0.22);
+  border: 1px solid rgba(114, 208, 160, 0.22);
+}
+
+.timeline-kind.status-failed {
+  color: #ffd1ca;
+  background: rgba(117, 45, 42, 0.4);
+  border: 1px solid rgba(255, 149, 135, 0.34);
+}
+
+.timeline-kind.status-interrupted {
+  color: #f9d691;
+  background: rgba(113, 83, 28, 0.32);
+  border: 1px solid rgba(242, 196, 107, 0.26);
 }
 
 .mode-switch-actions {
