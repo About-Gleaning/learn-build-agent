@@ -47,6 +47,7 @@ class ToolResult(TypedDict, total=False):
 class ToolExecutionOptions(TypedDict, total=False):
     task_available: bool
     workdir: str
+    vendor: str
 
 
 ToolOutputProcessor = Callable[[ToolResult, ToolHookContext, ToolExecutionOptions], ToolResult]
@@ -193,6 +194,7 @@ def default_tool_output_processor(
         tool_call_id=ctx.get("tool_call_id", "call"),
         workdir=Path(options.get("workdir", Path.cwd())),
         task_available=bool(options.get("task_available", False)),
+        vendor=str(options.get("vendor", "")).strip() or None,
         metadata=metadata,
     )
     processed: ToolResult = {
@@ -251,6 +253,7 @@ class ToolExecutor:
         hooks: list[ToolHook],
         agent: str = "",
         model: str = "",
+        vendor: str = "",
         task_available: bool = False,
         workdir: str | None = None,
     ) -> ToolResult:
@@ -320,6 +323,7 @@ class ToolExecutor:
         options: ToolExecutionOptions = {
             "task_available": task_available,
             "workdir": workdir or str(Path.cwd()),
+            "vendor": vendor,
         }
         result = processor(result, ctx, options)
         ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)

@@ -17,6 +17,7 @@
 - `src/agent/runtime/compaction.py`：上下文压缩逻辑。
 - `src/agent/adapters/llm/client.py`：LLM 适配与 LLM Hook。
 - `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
+- `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
 - `src/agent/tools/`：工具实现（`handlers.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
 - `src/agent/tools/task.txt`：`task` 工具描述模板，使用 `{agents}` 占位注入 subagent 列表。
@@ -42,6 +43,10 @@
 - 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
 - 日志文件统一写入 `logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容。
 - `build` 主模式的提示词文件必须按厂商 `vendor` 选择，命名统一为 `build.<vendor>.txt`；厂商归属在 `src/agent/config/llm_runtime.json` 中显式声明，缺省时回退 `build.default.txt`。
+- 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
+- `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
+- `compaction.tool_result_keep_recent` 的计数口径统一按 `role=tool` 消息数量计算，默认保留最近 `3` 条不压缩。
+- 当前可配置的压缩关键参数包括：`tool_result_prune_enabled`、`tool_result_keep_recent`、`tool_result_prune_min_chars`、`summary_trigger_threshold`、`summary_max_tokens`、`tool_output_max_lines`、`tool_output_max_bytes`。
 
 ## 开发与验证命令
 

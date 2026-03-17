@@ -1,4 +1,5 @@
 import agent.runtime.compaction as compaction_module
+from agent.config.settings import CompactionSettings, clear_runtime_settings_cache
 from agent.core.message import (
     append_compaction_part,
     append_text_part,
@@ -9,6 +10,16 @@ from agent.core.message import (
     trim_messages_by_compaction_checkpoint,
 )
 from agent.runtime.session_memory import InMemorySessionMemoryStore
+
+
+def _tool_result_content(message):
+    for part in message["parts"]:
+        if part.get("type") != "tool":
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        output = state.get("output") if isinstance(state.get("output"), dict) else {}
+        return str(output.get("output", ""))
+    return ""
 
 
 def test_trim_messages_by_compaction_checkpoint_should_keep_latest_completed_suffix():
@@ -63,11 +74,24 @@ def test_trim_messages_by_compaction_checkpoint_should_ignore_incomplete_summary
 
     assert trim_messages_by_compaction_checkpoint(original) == original
 
+def test_compaction_summary_should_build_checkpoint_pair(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            "default": {
+              "summary_trigger_threshold": 1
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
 
-def test_compaction_summary_should_build_checkpoint_pair(monkeypatch):
-    monkeypatch.setattr(compaction_module, "THRESHOLD", 1)
-
-    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
         session_id = messages[-1]["info"]["session_id"]
         assistant = create_message("assistant", session_id, status="completed", finish_reason="stop")
         append_text_part(assistant, "压缩后的摘要")
@@ -80,13 +104,68 @@ def test_compaction_summary_should_build_checkpoint_pair(monkeypatch):
     user_message = create_message("user", "s_compaction", status="completed")
     append_text_part(user_message, "原始上下文")
 
-    compacted = compaction_module.compaction_summary([system_message, user_message])
+    try:
+        compacted = compaction_module.compaction_summary([system_message, user_message])
+    finally:
+        clear_runtime_settings_cache()
 
     assert len(compacted) == 3
     assert get_message_text(compacted[1]) == "以下历史消息已完成压缩总结，请结合下一条摘要继续当前任务。\n以下是历史对话摘要请求，请参考下一条 summary assistant。"
     assert compacted[2]["info"]["summary"] is True
     assert compacted[2]["info"]["parent_id"] == compacted[1]["info"]["message_id"]
     assert get_message_text(compacted[2]) == "压缩后的摘要"
+
+
+def test_prune_should_skip_when_tool_result_prune_disabled():
+    session_id = "s_prune_disabled"
+    tool_1 = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_1, tool_call_id="call_1", name="read_file", content="a" * 120)
+    tool_2 = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_2, tool_call_id="call_2", name="read_file", content="b" * 120)
+
+    messages = [tool_1, tool_2]
+    pruned = compaction_module.prune(
+        messages,
+        settings=CompactionSettings(tool_result_prune_enabled=False, tool_result_keep_recent=0),
+    )
+
+    assert _tool_result_content(pruned[0]) == "a" * 120
+    assert _tool_result_content(pruned[1]) == "b" * 120
+
+
+def test_prune_should_keep_latest_tool_messages_by_config():
+    session_id = "s_prune_keep_recent"
+    tool_1 = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_1, tool_call_id="call_1", name="read_file", content="a" * 120)
+    tool_2 = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_2, tool_call_id="call_2", name="read_file", content="b" * 120)
+    tool_3 = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_3, tool_call_id="call_3", name="read_file", content="c" * 120)
+
+    pruned = compaction_module.prune(
+        [tool_1, tool_2, tool_3],
+        settings=CompactionSettings(tool_result_prune_enabled=True, tool_result_keep_recent=1),
+    )
+
+    assert _tool_result_content(pruned[0]) == "[Old tool result content cleared]"
+    assert _tool_result_content(pruned[1]) == "[Old tool result content cleared]"
+    assert _tool_result_content(pruned[2]) == "c" * 120
+
+
+def test_prune_should_support_keep_recent_zero():
+    session_id = "s_prune_zero"
+    tool_1 = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_1, tool_call_id="call_1", name="read_file", content="a" * 120)
+    tool_2 = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_2, tool_call_id="call_2", name="read_file", content="b" * 120)
+
+    pruned = compaction_module.prune(
+        [tool_1, tool_2],
+        settings=CompactionSettings(tool_result_prune_enabled=True, tool_result_keep_recent=0),
+    )
+
+    assert _tool_result_content(pruned[0]) == "[Old tool result content cleared]"
+    assert _tool_result_content(pruned[1]) == "[Old tool result content cleared]"
 
 
 def test_inmemory_session_memory_store_should_not_split_tool_chain():

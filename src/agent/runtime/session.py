@@ -1373,6 +1373,7 @@ def _run_session_stream(
                     hooks=effective_tool_hooks,
                     agent=active_agent,
                     model=current_runtime.model,
+                    vendor=current_runtime.vendor,
                     task_available=task_available,
                     workdir=str(_get_workdir()),
                 )
@@ -1854,6 +1855,7 @@ def run_session(
                     hooks=effective_tool_hooks,
                     agent=active_agent,
                     model=current_runtime.model,
+                    vendor=current_runtime.vendor,
                     task_available=task_available,
                     workdir=str(_get_workdir()),
                 )

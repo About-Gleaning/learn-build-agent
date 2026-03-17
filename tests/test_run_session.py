@@ -1,6 +1,6 @@
 import agent.runtime.session as session_module
 import agent.runtime.compaction as compaction_module
-from agent.config.settings import clear_runtime_settings_cache, resolve_llm_config
+from agent.config.settings import clear_runtime_settings_cache, get_project_runtime_settings, resolve_compaction_settings, resolve_llm_config
 from agent.tools.handlers import run_read
 from agent.tools.specs import build_base_tools, build_task_tool
 from agent.runtime.session import (
@@ -1176,6 +1176,202 @@ def test_get_runtime_settings_should_require_vendor(tmp_path, monkeypatch):
         clear_runtime_settings_cache()
 
 
+def test_get_project_runtime_settings_should_use_default_values_when_file_missing(tmp_path, monkeypatch):
+    missing_path = tmp_path / "missing_project_runtime.json"
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", missing_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.compaction_default.tool_result_prune_enabled is True
+        assert settings.compaction_default.tool_result_keep_recent == 3
+        assert settings.compaction_default.tool_result_prune_min_chars == 100
+        assert settings.compaction_default.summary_trigger_threshold == 50000
+        assert settings.compaction_default.summary_max_tokens == 2000
+        assert settings.compaction_default.tool_output_max_lines == 2000
+        assert settings.compaction_default.tool_output_max_bytes == 50 * 1024
+        assert settings.compaction_vendors == {}
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_read_compaction_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            "default": {
+              "tool_result_prune_enabled": false,
+              "tool_result_keep_recent": 5,
+              "tool_result_prune_min_chars": 60,
+              "summary_trigger_threshold": 1234,
+              "summary_max_tokens": 321,
+              "tool_output_max_lines": 88,
+              "tool_output_max_bytes": 4096
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.compaction_default.tool_result_prune_enabled is False
+        assert settings.compaction_default.tool_result_keep_recent == 5
+        assert settings.compaction_default.tool_result_prune_min_chars == 60
+        assert settings.compaction_default.summary_trigger_threshold == 1234
+        assert settings.compaction_default.summary_max_tokens == 321
+        assert settings.compaction_default.tool_output_max_lines == 88
+        assert settings.compaction_default.tool_output_max_bytes == 4096
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_support_json_comments(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            // 默认配置
+            "default": {
+              "tool_result_keep_recent": 6,
+              /* 摘要 token 上限 */
+              "summary_max_tokens": 789
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.compaction_default.tool_result_keep_recent == 6
+        assert settings.compaction_default.summary_max_tokens == 789
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_negative_keep_recent(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            "default": {
+              "tool_result_keep_recent": -1
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 keep_recent 配置抛出异常")
+    except ValueError as exc:
+        assert "tool_result_keep_recent" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_resolve_compaction_settings_should_merge_vendor_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            "default": {
+              "tool_result_prune_enabled": true,
+              "tool_result_keep_recent": 3,
+              "tool_result_prune_min_chars": 100,
+              "summary_trigger_threshold": 50000,
+              "summary_max_tokens": 2000,
+              "tool_output_max_lines": 2000,
+              "tool_output_max_bytes": 51200
+            },
+            "vendors": {
+              "qwen": {
+                "tool_result_keep_recent": 9,
+                "summary_max_tokens": 777
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        resolved = resolve_compaction_settings("qwen")
+        fallback = resolve_compaction_settings("openai")
+        assert resolved.tool_result_keep_recent == 9
+        assert resolved.summary_max_tokens == 777
+        assert resolved.tool_result_prune_min_chars == 100
+        assert fallback.tool_result_keep_recent == 3
+        assert fallback.summary_max_tokens == 2000
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_clear_runtime_settings_cache_should_clear_project_runtime_cache(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            "default": {
+              "tool_result_prune_enabled": true,
+              "tool_result_keep_recent": 1
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        first = get_project_runtime_settings()
+        assert first.compaction_default.tool_result_keep_recent == 1
+
+        config_path.write_text(
+            """
+            {
+              "compaction": {
+                "default": {
+                  "tool_result_prune_enabled": true,
+                  "tool_result_keep_recent": 4
+                }
+              }
+            }
+            """.strip(),
+            encoding="utf-8",
+        )
+
+        cached = get_project_runtime_settings()
+        assert cached.compaction_default.tool_result_keep_recent == 1
+
+        clear_runtime_settings_cache()
+        refreshed = get_project_runtime_settings()
+        assert refreshed.compaction_default.tool_result_keep_recent == 4
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_compaction_summary_should_log_summary_stages(monkeypatch, caplog):
     system_message = create_message("system", "s_compact_log")
     append_text_part(system_message, "system")
@@ -1196,3 +1392,47 @@ def test_compaction_summary_should_log_summary_stages(monkeypatch, caplog):
     assert "compaction.check" in caplog.text
     assert "compaction.summary_request" in caplog.text
     assert "compaction.summary_done" in caplog.text
+
+
+def test_compaction_summary_should_use_vendor_specific_max_tokens(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            "default": {
+              "summary_trigger_threshold": 1,
+              "summary_max_tokens": 111
+            },
+            "vendors": {
+              "qwen": {
+                "summary_max_tokens": 456
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+    seen = {}
+
+    def fake_summary_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del messages, tools, hooks, llm_config, agent
+        seen["max_tokens"] = max_tokens
+        assistant = create_message("assistant", "s_vendor_compact", status="completed")
+        append_text_part(assistant, "压缩摘要")
+        return assistant
+
+    monkeypatch.setattr(compaction_module, "create_chat_completion", fake_summary_chat)
+    monkeypatch.setenv("QWEN_API_KEY", "test-qwen-key")
+    qwen_config = resolve_llm_config("build")
+    user_message = create_message("user", "s_vendor_compact")
+    append_text_part(user_message, "x" * 40)
+
+    try:
+        compaction_module.compaction_summary([user_message], llm_config=qwen_config, agent="build")
+        assert seen["max_tokens"] == 456
+    finally:
+        clear_runtime_settings_cache()

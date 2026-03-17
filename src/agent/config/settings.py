@@ -20,6 +20,20 @@ LLM_CONFIG_PATH = Path(
         str(Path(__file__).resolve().with_name("llm_runtime.json")),
     )
 ).resolve()
+PROJECT_RUNTIME_CONFIG_PATH = Path(
+    os.getenv(
+        "PROJECT_RUNTIME_CONFIG_PATH",
+        str(Path(__file__).resolve().with_name("project_runtime.json")),
+    )
+).resolve()
+
+DEFAULT_TOOL_RESULT_PRUNE_ENABLED = True
+DEFAULT_TOOL_RESULT_KEEP_RECENT = 3
+DEFAULT_TOOL_RESULT_PRUNE_MIN_CHARS = 100
+DEFAULT_SUMMARY_TRIGGER_THRESHOLD = 50000
+DEFAULT_SUMMARY_MAX_TOKENS = 2000
+DEFAULT_TOOL_OUTPUT_MAX_LINES = 2000
+DEFAULT_TOOL_OUTPUT_MAX_BYTES = 50 * 1024
 
 
 @dataclass(frozen=True)
@@ -45,6 +59,23 @@ class RuntimeSettings:
 
 
 @dataclass(frozen=True)
+class CompactionSettings:
+    tool_result_prune_enabled: bool = DEFAULT_TOOL_RESULT_PRUNE_ENABLED
+    tool_result_keep_recent: int = DEFAULT_TOOL_RESULT_KEEP_RECENT
+    tool_result_prune_min_chars: int = DEFAULT_TOOL_RESULT_PRUNE_MIN_CHARS
+    summary_trigger_threshold: int = DEFAULT_SUMMARY_TRIGGER_THRESHOLD
+    summary_max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS
+    tool_output_max_lines: int = DEFAULT_TOOL_OUTPUT_MAX_LINES
+    tool_output_max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
+
+
+@dataclass(frozen=True)
+class ProjectRuntimeSettings:
+    compaction_default: CompactionSettings
+    compaction_vendors: dict[str, CompactionSettings]
+
+
+@dataclass(frozen=True)
 class ResolvedLLMConfig:
     agent: MainAgentMode
     provider: str
@@ -67,6 +98,185 @@ def _load_runtime_payload() -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("LLM 配置文件顶层必须是 JSON 对象。")
     return payload
+
+
+def _parse_bool(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} 必须是布尔值。")
+
+
+def _parse_non_negative_int(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} 必须是大于等于 0 的整数。")
+    if value < 0:
+        raise ValueError(f"{field_name} 必须是大于等于 0 的整数。")
+    return value
+
+
+def _load_project_runtime_payload() -> dict[str, Any]:
+    if not PROJECT_RUNTIME_CONFIG_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(_strip_json_comments(PROJECT_RUNTIME_CONFIG_PATH.read_text(encoding="utf-8")))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"项目运行时配置文件 JSON 格式非法: {PROJECT_RUNTIME_CONFIG_PATH}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("项目运行时配置文件顶层必须是 JSON 对象。")
+    return payload
+
+
+def _strip_json_comments(text: str) -> str:
+    result: list[str] = []
+    in_string = False
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+                result.append(char)
+            index += 1
+            continue
+
+        if in_block_comment:
+            if char == "*" and next_char == "/":
+                in_block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == "\"":
+                in_string = False
+            index += 1
+            continue
+
+        if char == "/" and next_char == "/":
+            in_line_comment = True
+            index += 2
+            continue
+
+        if char == "/" and next_char == "*":
+            in_block_comment = True
+            index += 2
+            continue
+
+        result.append(char)
+        if char == "\"":
+            in_string = True
+        index += 1
+
+    return "".join(result)
+
+
+def _load_compaction_settings(raw_compaction: Any) -> CompactionSettings:
+    if raw_compaction is None:
+        return CompactionSettings()
+    if not isinstance(raw_compaction, dict):
+        raise ValueError("project_runtime.compaction 必须是对象。")
+    return _parse_compaction_settings(raw_compaction)
+
+
+def _parse_optional_bool(value: Any, *, field_name: str) -> bool | None:
+    if value is None:
+        return None
+    return _parse_bool(value, field_name=field_name)
+
+
+def _parse_optional_non_negative_int(value: Any, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    return _parse_non_negative_int(value, field_name=field_name)
+
+
+def _parse_compaction_patch(raw_value: Any, *, field_prefix: str) -> dict[str, bool | int]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{field_prefix} 必须是对象。")
+    patch: dict[str, bool | int] = {}
+
+    tool_result_prune_enabled = _parse_optional_bool(
+        raw_value.get("tool_result_prune_enabled"),
+        field_name=f"{field_prefix}.tool_result_prune_enabled",
+    )
+    if tool_result_prune_enabled is not None:
+        patch["tool_result_prune_enabled"] = tool_result_prune_enabled
+
+    for field_name in (
+        "tool_result_keep_recent",
+        "tool_result_prune_min_chars",
+        "summary_trigger_threshold",
+        "summary_max_tokens",
+        "tool_output_max_lines",
+        "tool_output_max_bytes",
+    ):
+        parsed = _parse_optional_non_negative_int(raw_value.get(field_name), field_name=f"{field_prefix}.{field_name}")
+        if parsed is not None:
+            patch[field_name] = parsed
+    return patch
+
+
+def _merge_compaction_settings(base: CompactionSettings, patch: dict[str, bool | int]) -> CompactionSettings:
+    return CompactionSettings(
+        tool_result_prune_enabled=bool(patch.get("tool_result_prune_enabled", base.tool_result_prune_enabled)),
+        tool_result_keep_recent=int(patch.get("tool_result_keep_recent", base.tool_result_keep_recent)),
+        tool_result_prune_min_chars=int(patch.get("tool_result_prune_min_chars", base.tool_result_prune_min_chars)),
+        summary_trigger_threshold=int(patch.get("summary_trigger_threshold", base.summary_trigger_threshold)),
+        summary_max_tokens=int(patch.get("summary_max_tokens", base.summary_max_tokens)),
+        tool_output_max_lines=int(patch.get("tool_output_max_lines", base.tool_output_max_lines)),
+        tool_output_max_bytes=int(patch.get("tool_output_max_bytes", base.tool_output_max_bytes)),
+    )
+
+
+def _parse_compaction_settings(raw_value: dict[str, Any]) -> CompactionSettings:
+    return _merge_compaction_settings(CompactionSettings(), _parse_compaction_patch(raw_value, field_prefix="compaction"))
+
+
+def _load_project_compaction_settings(raw_compaction: Any) -> tuple[CompactionSettings, dict[str, CompactionSettings]]:
+    if raw_compaction is None:
+        return CompactionSettings(), {}
+    if not isinstance(raw_compaction, dict):
+        raise ValueError("project_runtime.compaction 必须是对象。")
+
+    # 兼容旧结构：直接把 compaction 视作 default 配置。
+    has_nested_structure = "default" in raw_compaction or "vendors" in raw_compaction
+    if not has_nested_structure:
+        default_settings = _parse_compaction_settings(raw_compaction)
+        return default_settings, {}
+
+    default_raw = raw_compaction.get("default")
+    vendors_raw = raw_compaction.get("vendors", {})
+    default_patch = _parse_compaction_patch(default_raw, field_prefix="compaction.default")
+    default_settings = _merge_compaction_settings(CompactionSettings(), default_patch)
+
+    if not isinstance(vendors_raw, dict):
+        raise ValueError("compaction.vendors 必须是对象。")
+
+    vendor_settings: dict[str, CompactionSettings] = {}
+    for raw_vendor, raw_value in vendors_raw.items():
+        vendor = str(raw_vendor).strip().lower()
+        if not vendor:
+            raise ValueError("compaction.vendors 中的厂商名称不能为空。")
+        vendor_patch = _parse_compaction_patch(raw_value, field_prefix=f"compaction.vendors.{vendor}")
+        vendor_settings[vendor] = _merge_compaction_settings(default_settings, vendor_patch)
+
+    return default_settings, vendor_settings
 
 
 def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
@@ -131,8 +341,24 @@ def get_runtime_settings() -> RuntimeSettings:
     return RuntimeSettings(providers=providers, agent_defaults=agent_defaults)
 
 
+@lru_cache(maxsize=1)
+def get_project_runtime_settings() -> ProjectRuntimeSettings:
+    payload = _load_project_runtime_payload()
+    compaction_default, compaction_vendors = _load_project_compaction_settings(payload.get("compaction"))
+    return ProjectRuntimeSettings(compaction_default=compaction_default, compaction_vendors=compaction_vendors)
+
+
+def resolve_compaction_settings(vendor: str | None = None) -> CompactionSettings:
+    settings = get_project_runtime_settings()
+    normalized_vendor = (vendor or "").strip().lower()
+    if normalized_vendor and normalized_vendor in settings.compaction_vendors:
+        return settings.compaction_vendors[normalized_vendor]
+    return settings.compaction_default
+
+
 def clear_runtime_settings_cache() -> None:
     get_runtime_settings.cache_clear()
+    get_project_runtime_settings.cache_clear()
 
 
 def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None) -> ResolvedLLMConfig:

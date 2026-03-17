@@ -1,5 +1,6 @@
 import pytest
 
+from agent.config.settings import clear_runtime_settings_cache
 from agent.runtime.compaction import TOOL_OUTPUT_MAX_BYTES
 from agent.runtime.session import run_session
 from agent.core.message import append_text_part, append_tool_call_part, create_message, get_message_text
@@ -168,6 +169,49 @@ def test_tool_executor_should_truncate_long_output_and_write_full_file(tmp_path)
     full_output_path = tmp_path / "src" / "storage" / "tool-output" / "s_truncate" / "demo_tool-call_demo.log"
     assert full_output_path.exists()
     assert full_output_path.read_text(encoding="utf-8") == "x" * (TOOL_OUTPUT_MAX_BYTES + 32)
+
+
+def test_tool_executor_should_use_vendor_specific_output_limit(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "compaction": {
+            "default": {
+              "tool_output_max_bytes": 51200
+            },
+            "vendors": {
+              "qwen": {
+                "tool_output_max_bytes": 32
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+    executor = ToolExecutor({"demo_tool": lambda: "x" * 128})
+
+    try:
+        result = executor.execute(
+            "demo_tool",
+            "{}",
+            session_id="s_truncate_vendor",
+            tool_call_id="call_vendor",
+            round_no=1,
+            hooks=[],
+            vendor="qwen",
+            task_available=False,
+            workdir=str(tmp_path),
+        )
+    finally:
+        clear_runtime_settings_cache()
+
+    metadata = result["metadata"]
+    assert metadata["truncated"] is True
+    assert metadata["preview_bytes"] <= 32
 
 
 def test_tool_executor_should_allow_custom_output_processor_override(tmp_path):

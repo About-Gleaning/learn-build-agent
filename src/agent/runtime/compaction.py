@@ -5,7 +5,14 @@ from typing import Any, TypedDict
 
 from ..adapters.llm.client import create_chat_completion
 from ..config.logging_setup import build_log_extra
-from ..config.settings import ResolvedLLMConfig
+from ..config.settings import (
+    CompactionSettings,
+    DEFAULT_SUMMARY_TRIGGER_THRESHOLD,
+    DEFAULT_TOOL_OUTPUT_MAX_BYTES,
+    DEFAULT_TOOL_OUTPUT_MAX_LINES,
+    ResolvedLLMConfig,
+    resolve_compaction_settings,
+)
 from ..core.message import (
     Message,
     append_compaction_part,
@@ -17,10 +24,9 @@ from ..core.message import (
     trim_messages_by_compaction_checkpoint,
 )
 
-THRESHOLD = 50000
-KEEP_RECENT = 3
-TOOL_OUTPUT_MAX_LINES = 2000
-TOOL_OUTPUT_MAX_BYTES = 50 * 1024
+THRESHOLD = DEFAULT_SUMMARY_TRIGGER_THRESHOLD
+TOOL_OUTPUT_MAX_LINES = DEFAULT_TOOL_OUTPUT_MAX_LINES
+TOOL_OUTPUT_MAX_BYTES = DEFAULT_TOOL_OUTPUT_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -106,23 +112,27 @@ def apply_tool_output_truncation(
     tool_call_id: str,
     workdir: Path,
     task_available: bool,
+    vendor: str | None = None,
     metadata: dict[str, Any] | None = None,
-    max_lines: int = TOOL_OUTPUT_MAX_LINES,
-    max_bytes: int = TOOL_OUTPUT_MAX_BYTES,
+    max_lines: int | None = None,
+    max_bytes: int | None = None,
 ) -> ToolOutputTruncationResult:
+    compaction_settings = resolve_compaction_settings(vendor)
+    effective_max_lines = compaction_settings.tool_output_max_lines if max_lines is None else max_lines
+    effective_max_bytes = compaction_settings.tool_output_max_bytes if max_bytes is None else max_bytes
     base_metadata = dict(metadata or {})
     original_lines = _line_count(text)
     original_bytes = _utf8_size(text)
     tool_succeeded = str(base_metadata.get("status", "completed")).strip().lower() == "completed"
 
-    if original_lines <= max_lines and original_bytes <= max_bytes:
+    if original_lines <= effective_max_lines and original_bytes <= effective_max_bytes:
         base_metadata.setdefault("truncated", False)
         return {
             "output": text,
             "metadata": base_metadata,
         }
 
-    preview = _build_preview_text(text, max_lines=max_lines, max_bytes=max_bytes)
+    preview = _build_preview_text(text, max_lines=effective_max_lines, max_bytes=effective_max_bytes)
     preview_lines = _line_count(preview)
     preview_bytes = _utf8_size(preview)
     output_path = _build_tool_output_path(workdir, session_id, tool_name, tool_call_id)
@@ -192,19 +202,25 @@ def _part_content(part: dict[str, Any]) -> str:
         return str(content)
 
 
-def prune(messages: list[Message]) -> list[Message]:
-    """压缩较早的工具输出，只保留最近 KEEP_RECENT 条完整 tool。"""
-    tool_messages: list[Message] = [msg for msg in messages if get_role(msg) == "tool"]
-
-    if len(tool_messages) <= KEEP_RECENT:
+def prune(messages: list[Message], *, settings: CompactionSettings | None = None) -> list[Message]:
+    """按配置压缩较早的工具输出，只保留最近若干条完整 tool result。"""
+    compaction_settings = settings or resolve_compaction_settings()
+    if not compaction_settings.tool_result_prune_enabled:
         return messages
 
-    for msg in tool_messages[:-KEEP_RECENT]:
+    keep_recent = compaction_settings.tool_result_keep_recent
+    tool_messages: list[Message] = [msg for msg in messages if get_role(msg) == "tool"]
+
+    if len(tool_messages) <= keep_recent:
+        return messages
+
+    prune_upto = len(tool_messages) - keep_recent
+    for msg in tool_messages[:prune_upto]:
         for part in msg["parts"]:
             if part.get("type") != "tool":
                 continue
             content = _part_content(part)
-            if len(content) > 100:
+            if len(content) > compaction_settings.tool_result_prune_min_chars:
                 state = part.get("state") if isinstance(part.get("state"), dict) else {}
                 output = state.get("output") if isinstance(state.get("output"), dict) else {}
                 if output:
@@ -236,21 +252,23 @@ def compaction_summary(
     *,
     llm_config: ResolvedLLMConfig | None = None,
     agent: str = "build",
+    settings: CompactionSettings | None = None,
 ) -> list[Message]:
     """当上下文超过阈值时，生成 compaction checkpoint 并折叠更早历史。"""
     if not messages:
         return messages
 
+    compaction_settings = settings or resolve_compaction_settings(llm_config.vendor if llm_config else None)
     token_size = _estimate_tokens(messages)
     model_name = llm_config.model if llm_config else ""
     logger.info(
         "compaction.check token_size=%s threshold=%s message_count=%s",
         token_size,
-        THRESHOLD,
+        compaction_settings.summary_trigger_threshold,
         len(messages),
         extra=build_log_extra(agent=agent, model=model_name),
     )
-    if token_size <= THRESHOLD:
+    if token_size <= compaction_settings.summary_trigger_threshold:
         logger.info(
             "compaction.skip reason=below_threshold token_size=%s",
             token_size,
@@ -300,7 +318,13 @@ def compaction_summary(
         len(summary_messages),
         extra=build_log_extra(agent=agent, model=model_name),
     )
-    response_message = create_chat_completion(messages=summary_messages, tools=[], max_tokens=2000, llm_config=llm_config, agent=agent)
+    response_message = create_chat_completion(
+        messages=summary_messages,
+        tools=[],
+        max_tokens=compaction_settings.summary_max_tokens,
+        llm_config=llm_config,
+        agent=agent,
+    )
     if response_message["info"].get("status") != "completed":
         logger.warning(
             "compaction.summary_failed status=%s finish_reason=%s",
@@ -343,5 +367,6 @@ def compact(
     agent: str = "build",
 ) -> list[Message]:
     """压缩接口，先微压缩，再按阈值做摘要压缩。"""
-    pruned = prune(messages)
-    return compaction_summary(pruned, llm_config=llm_config, agent=agent)
+    compaction_settings = resolve_compaction_settings(llm_config.vendor if llm_config else None)
+    pruned = prune(messages, settings=compaction_settings)
+    return compaction_summary(pruned, llm_config=llm_config, agent=agent, settings=compaction_settings)

@@ -17,6 +17,7 @@ src/
   agent/
     config/
       settings.py                 # 环境与配置读取
+      project_runtime.json        # 项目级运行时配置
       logging_setup.py            # 统一日志初始化、格式与脱敏
     core/
       context.py                  # 会话上下文（ContextVar）
@@ -115,6 +116,21 @@ pnpm dev
 - 未单独调整时建议默认 `60` 秒，优先保证父/子 Agent 二轮推理能稳定失败收口，而不是静默卡住。
 - 当 `task` 委派完成后，若主 Agent 二轮 LLM 调用超时，系统必须记录错误日志并返回可解释失败结果。
 
+### 额外约定：项目级运行时配置
+
+- 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止在业务代码里继续扩散硬编码常量。
+- 当前 `compaction` 采用 `default + vendors` 结构：优先读取当前模型厂商 `vendor` 的局部覆盖配置，未命中时回退 `default`。
+- 当前支持的压缩参数包括：
+  - `tool_result_prune_enabled`
+  - `tool_result_keep_recent`
+  - `tool_result_prune_min_chars`
+  - `summary_trigger_threshold`
+  - `summary_max_tokens`
+  - `tool_output_max_lines`
+  - `tool_output_max_bytes`
+- `tool_result_keep_recent` 的计数口径固定为 `role=tool` 消息数量。
+- 缺省值必须保持兼容当前行为，厂商配置只覆盖显式填写的字段，未填写字段继续继承 `default`。
+
 ### 3) 新增 Tool Hook
 
 1. 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`。
@@ -152,3 +168,4 @@ pnpm dev
 - 2026-03-16：新增统一日志初始化模块，日志改为按天追加落盘，并收敛为 LLM/工具关键节点日志。
 - 2026-03-16：`build` 模式提示词改为按 `vendor` 选择 `build.<vendor>.txt`，`qwen` 与 `qwen-coder` 共用同一份 Qwen prompt。
 - 2026-03-17：将 bash 工具执行与 Plan 模式只读校验拆分到独立模块，并允许有限的只读管道查询。
+- 2026-03-17：新增 `project_runtime.json`，将上下文压缩关键参数统一改为可配置，并支持按模型厂商 `vendor` 做局部覆盖。
