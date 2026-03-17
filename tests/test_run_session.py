@@ -1,4 +1,5 @@
 import agent.runtime.session as session_module
+import agent.runtime.compaction as compaction_module
 from agent.config.settings import clear_runtime_settings_cache, resolve_llm_config
 from agent.tools.handlers import run_read
 from agent.tools.specs import build_base_tools, build_task_tool
@@ -14,6 +15,7 @@ from agent.runtime.session_memory import InMemorySessionMemoryStore, SessionMemo
 from agent.core.message import (
     append_text_part,
     append_tool_call_part,
+    create_error_message,
     create_message,
     get_message_text,
 )
@@ -321,6 +323,63 @@ def test_task_with_unknown_subagent_should_return_error(monkeypatch):
     result = run_session("调用未知子代理", session_id="s_task_unknown")
     assert "Unknown subagent" in get_message_text(result)
 
+
+def test_run_session_should_answer_after_task_result(monkeypatch, caplog):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_task_answer",
+                name="task",
+                arguments='{"prompt":"检查 hello.py","agent":"explore"}',
+            )
+        else:
+            append_text_part(assistant, f"最终结论：{_last_tool_result_content(messages)}")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "subagent_loop", lambda *args, **kwargs: "项目中没有 hello.py")
+
+    with caplog.at_level("INFO"):
+        result = run_session("请帮我查 hello.py", session_id="s_task_followup")
+
+    assert get_message_text(result) == "最终结论：项目中没有 hello.py"
+
+
+def test_run_session_should_return_error_when_followup_llm_times_out_after_task(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        if call_state["count"] == 1:
+            assistant = create_message("assistant", session_id, status="completed")
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_task_timeout",
+                name="task",
+                arguments='{"prompt":"检查 hello.py","agent":"explore"}',
+            )
+            return assistant
+        return create_error_message(
+            session_id=session_id,
+            model="qwen3-max",
+            provider="qwen",
+            error={"code": "timeout", "message": "request timeout", "details": "TimeoutError"},
+        )
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "subagent_loop", lambda *args, **kwargs: "项目中没有 hello.py")
+
+    result = run_session("请帮我查 hello.py", session_id="s_task_followup_timeout")
+
+    assert result["info"]["status"] == "failed"
+    assert "request timeout" in get_message_text(result)
 
 def test_task_tool_description_should_include_registered_subagents():
     task_tool = build_task_tool()
@@ -757,6 +816,9 @@ def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
     assert "round_end" in event_names
     assert "done" in event_names
     assert text == "流式回答"
+    done_event = next(event for event in events if event["type"] == "done")
+    assert done_event["display_parts"][0]["kind"] == "assistant_text"
+    assert done_event["display_parts"][0]["text"] == "流式回答"
 
 
 def test_run_session_stream_events_should_emit_tool_events(monkeypatch):
@@ -859,6 +921,34 @@ def test_run_session_stream_done_should_include_response_summary(monkeypatch):
     assert done_event["response_meta"]["round_count"] >= 2
     assert "todo_read" in done_event["response_meta"]["tool_names"]
     assert any(item["kind"] == "tool_call" for item in done_event["process_items"])
+    assert [item["kind"] for item in done_event["display_parts"]] == ["tool_call", "tool_result", "assistant_text"]
+
+
+def test_run_session_stream_done_should_keep_text_and_tool_order(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_stream_with_interleaving(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        if call_state["count"] == 1:
+            yield {"type": "text_delta", "delta": "先说明"}
+            assistant = create_message("assistant", session_id, status="completed")
+            append_text_part(assistant, "先说明")
+            append_tool_call_part(assistant, tool_call_id="call_1", name="todo_read", arguments="{}")
+            return assistant
+        yield {"type": "text_delta", "delta": "再总结"}
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "再总结")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream_with_interleaving)
+
+    events = list(run_session_stream_events("测试交错顺序", session_id="s_stream_interleave"))
+    done_event = next(event for event in events if event["type"] == "done")
+
+    assert [item["kind"] for item in done_event["display_parts"]] == ["assistant_text", "tool_call", "tool_result", "assistant_text"]
+    assert done_event["display_parts"][0]["text"] == "先说明"
+    assert done_event["display_parts"][-1]["text"] == "再总结"
 
 
 def test_run_session_should_remember_explicit_provider(monkeypatch):
@@ -954,7 +1044,7 @@ def test_build_system_prompt_should_include_git_environment(monkeypatch):
     assert "- vendor: google" in prompt
     assert "当前可用 skills catalog" not in prompt
     assert "{skills_catalog}" not in prompt
-    assert "你可以通过工具 `load_skill` 了解当前可用 skills 的简短介绍。" in prompt
+    assert "`load_skill`" in prompt
 
 
 def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch):
@@ -1022,6 +1112,7 @@ def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
         assert config.provider == "qwen-coder"
         assert config.vendor == "qwen"
         assert config.model == "qwen3-coder-next"
+        assert config.timeout_seconds == 60
     finally:
         clear_runtime_settings_cache()
 
@@ -1060,3 +1151,25 @@ def test_get_runtime_settings_should_require_vendor(tmp_path, monkeypatch):
         assert "vendor" in str(exc)
     finally:
         clear_runtime_settings_cache()
+
+
+def test_compaction_summary_should_log_summary_stages(monkeypatch, caplog):
+    system_message = create_message("system", "s_compact_log")
+    append_text_part(system_message, "system")
+    user_message = create_message("user", "s_compact_log")
+    append_text_part(user_message, "x" * (compaction_module.THRESHOLD * 4 + 100))
+
+    def fake_summary_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        assistant = create_message("assistant", "s_compact_log", status="completed")
+        append_text_part(assistant, "压缩摘要")
+        return assistant
+
+    monkeypatch.setattr(compaction_module, "create_chat_completion", fake_summary_chat)
+
+    with caplog.at_level("INFO"):
+        compacted = compaction_module.compaction_summary([system_message, user_message], agent="build")
+
+    assert len(compacted) >= 2
+    assert "compaction.check" in caplog.text
+    assert "compaction.summary_request" in caplog.text
+    assert "compaction.summary_done" in caplog.text

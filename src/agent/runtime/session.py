@@ -10,9 +10,11 @@ from collections.abc import Generator
 from typing import Any, Callable, Literal, TypedDict
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
+from ..config.logging_setup import build_log_extra, sanitize_log_text
 from ..config.settings import ResolvedLLMConfig, resolve_llm_config
 from ..core.context import set_session_id
 from ..core.message import (
+    DisplayPart,
     Message,
     ProcessItem,
     ResponseMeta,
@@ -641,6 +643,155 @@ def _build_process_item(event: dict[str, Any]) -> ProcessItem | None:
     }
 
 
+def _should_hide_display_event(event_type: str) -> bool:
+    return event_type in {"start", "round_start", "round_end", "done"}
+
+
+def _build_display_part_from_event(event: dict[str, Any]) -> DisplayPart | None:
+    process_item = _build_process_item(event)
+    if process_item is None:
+        return None
+
+    if _should_hide_display_event(str(process_item.get("kind", "")).strip()):
+        return None
+
+    return {
+        "id": str(process_item.get("id", "")),
+        "kind": str(process_item.get("kind", "")),
+        "title": str(process_item.get("title", "")),
+        "detail": str(process_item.get("detail", "")),
+        "text": "",
+        "created_at": str(process_item.get("created_at", "")),
+        "agent": str(process_item.get("agent", "")),
+        "agent_kind": str(process_item.get("agent_kind", "")),
+        "depth": int(process_item.get("depth", 0) or 0),
+        "round": int(process_item.get("round", 0) or 0),
+        "status": str(process_item.get("status", "")),
+        "delegation_id": str(process_item.get("delegation_id", "")),
+        "parent_tool_call_id": str(process_item.get("parent_tool_call_id", "")),
+        "tool_name": str(process_item.get("tool_name", "")),
+        "tool_call_id": str(process_item.get("tool_call_id", "")),
+    }
+
+
+def _append_display_text_part(
+    display_parts: list[DisplayPart],
+    *,
+    delta: str,
+    created_at: str,
+    agent: str,
+    agent_kind: str,
+    depth: int,
+    round_no: int,
+    delegation_id: str | None,
+    parent_tool_call_id: str | None,
+    merge_allowed: bool,
+) -> None:
+    if not delta:
+        return
+
+    if merge_allowed and display_parts:
+        last_part = display_parts[-1]
+        if (
+            str(last_part.get("kind", "")) == "assistant_text"
+            and str(last_part.get("agent", "")) == agent
+            and str(last_part.get("agent_kind", "")) == agent_kind
+            and int(last_part.get("depth", 0) or 0) == depth
+            and int(last_part.get("round", 0) or 0) == round_no
+            and str(last_part.get("delegation_id", "")) == str(delegation_id or "")
+            and str(last_part.get("parent_tool_call_id", "")) == str(parent_tool_call_id or "")
+        ):
+            last_part["text"] = f"{str(last_part.get('text', ''))}{delta}"
+            return
+
+    display_parts.append(
+        {
+            "id": _new_stream_event_id(),
+            "kind": "assistant_text",
+            "title": f"{agent} 回复",
+            "detail": "",
+            "text": delta,
+            "created_at": created_at,
+            "agent": agent,
+            "agent_kind": agent_kind,
+            "depth": depth,
+            "round": round_no,
+            "status": "completed",
+            "delegation_id": str(delegation_id or ""),
+            "parent_tool_call_id": str(parent_tool_call_id or ""),
+            "tool_name": "",
+            "tool_call_id": "",
+        }
+    )
+
+
+def _append_display_event_part(
+    display_parts: list[DisplayPart],
+    *,
+    event: dict[str, Any],
+) -> None:
+    display_part = _build_display_part_from_event(event)
+    if display_part is None:
+        return
+    display_parts.append(display_part)
+
+
+def _build_display_parts_from_message(message: Message) -> list[DisplayPart]:
+    info = message.get("info", {})
+    agent = str(info.get("agent", "")).strip()
+    created_at = str(info.get("created_at", "")).strip() or utc_now_iso()
+    parts: list[DisplayPart] = []
+    for part in message.get("parts", []):
+        part_type = str(part.get("type", "")).strip()
+        if part_type not in {"text", "compaction", "compact_summary", "reasoning", "error"}:
+            continue
+        content = str(part.get("content", ""))
+        if not content:
+            continue
+        parts.append(
+            {
+                "id": str(part.get("part_id", "")) or _new_stream_event_id(),
+                "kind": "assistant_text" if part_type != "error" else "error",
+                "title": f"{agent or 'assistant'} 回复" if part_type != "error" else f"{agent or 'assistant'} 会话异常",
+                "detail": "" if part_type != "error" else content,
+                "text": content if part_type != "error" else "",
+                "created_at": str(part.get("created_at", "")) or created_at,
+                "agent": agent,
+                "agent_kind": "primary",
+                "depth": 0,
+                "round": 0,
+                "status": str(info.get("status", "")),
+                "delegation_id": "",
+                "parent_tool_call_id": "",
+                "tool_name": "",
+                "tool_call_id": "",
+            }
+        )
+    return parts
+
+
+def _merge_display_parts_with_message(display_parts: list[DisplayPart], message: Message) -> list[DisplayPart]:
+    merged = [dict(item) for item in display_parts]
+    fallback_parts = _build_display_parts_from_message(message)
+    if not fallback_parts:
+        return merged
+    if not merged:
+        return fallback_parts
+
+    for fallback_part in fallback_parts:
+        last_part = merged[-1] if merged else None
+        if (
+            last_part
+            and str(last_part.get("kind", "")) == str(fallback_part.get("kind", ""))
+            and str(last_part.get("text", "")) == str(fallback_part.get("text", ""))
+            and str(last_part.get("detail", "")) == str(fallback_part.get("detail", ""))
+            and str(last_part.get("agent", "")) == str(fallback_part.get("agent", ""))
+        ):
+            continue
+        merged.append(fallback_part)
+    return merged
+
+
 def _compute_duration_ms(started_at: str, completed_at: str) -> int:
     if not started_at or not completed_at:
         return 0
@@ -691,11 +842,13 @@ def _attach_response_summary(
     message: Message,
     *,
     process_items: list[ProcessItem],
+    display_parts: list[DisplayPart],
     turn_started_at: str,
     turn_completed_at: str,
 ) -> ResponseMeta:
     response_meta = _build_response_meta(process_items, turn_started_at=turn_started_at, turn_completed_at=turn_completed_at)
     message["info"]["process_items"] = [dict(item) for item in process_items]
+    message["info"]["display_parts"] = _merge_display_parts_with_message(display_parts, message)
     message["info"]["response_meta"] = dict(response_meta)
     return response_meta
 
@@ -763,6 +916,7 @@ def apply_mode_switch_action(session_id: str, action: ModeSwitchAction) -> Messa
     _attach_response_summary(
         assistant_message,
         process_items=[],
+        display_parts=_build_display_parts_from_message(assistant_message),
         turn_started_at=turn_started_at,
         turn_completed_at=str(assistant_message["info"].get("turn_completed_at", "")),
     )
@@ -802,6 +956,7 @@ def run_mode_switch_stream_events(
             "turn_completed_at": str(message["info"].get("turn_completed_at", "")),
             "response_meta": message["info"].get("response_meta", {}),
             "process_items": message["info"].get("process_items", []),
+            "display_parts": message["info"].get("display_parts", []),
             "confirmation": message["info"].get("confirmation"),
             "provider": str(message["info"].get("provider", "")),
             "model": str(message["info"].get("model", "")),
@@ -866,6 +1021,7 @@ def _run_session_stream(
     delegation_id: str | None = None,
     parent_tool_call_id: str | None = None,
     process_items: list[ProcessItem] | None = None,
+    display_parts: list[DisplayPart] | None = None,
 ) -> Generator[dict[str, Any], None, Message]:
     """内部流式会话入口：支持递归转发 subagent 事件，并返回最终助手消息。"""
     active_session_id = set_session_id(session_id)
@@ -917,9 +1073,8 @@ def _run_session_stream(
     todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
     active_process_items = process_items if process_items is not None else []
-
-    todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
-    non_todo_round_streak = 0
+    active_display_parts = display_parts if display_parts is not None else []
+    display_text_merge_open = False
 
     user_meta: dict[str, Any] | None = None
     if mode_enabled:
@@ -951,6 +1106,7 @@ def _run_session_stream(
     agent_kind = _resolve_agent_kind(initial_agent)
 
     def _emit_event(event_type: str, **payload: Any) -> dict[str, Any]:
+        nonlocal display_text_merge_open
         event = _build_stream_event(
             event_type,
             session_id=active_session_id,
@@ -964,6 +1120,8 @@ def _run_session_stream(
         process_item = _build_process_item(event)
         if process_item is not None:
             active_process_items.append(process_item)
+        _append_display_event_part(active_display_parts, event=event)
+        display_text_merge_open = False
         return event
 
     tool_executor = ToolExecutor(
@@ -992,7 +1150,8 @@ def _run_session_stream(
     round_no = 0
     while True:
         round_no += 1
-        messages = compact(messages)
+        pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
+        messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
 
         selected_tools = initial_tools
         if mode_enabled:
@@ -1046,7 +1205,7 @@ def _run_session_stream(
             if stream_event.get("type") == "text_delta":
                 delta = str(stream_event.get("delta", ""))
                 if delta:
-                    yield _build_stream_event(
+                    delta_event = _build_stream_event(
                         "text_delta",
                         session_id=active_session_id,
                         agent=active_agent,
@@ -1057,6 +1216,20 @@ def _run_session_stream(
                         round=round_no,
                         delta=delta,
                     )
+                    _append_display_text_part(
+                        active_display_parts,
+                        delta=delta,
+                        created_at=str(delta_event.get("timestamp", "")) or utc_now_iso(),
+                        agent=active_agent,
+                        agent_kind=agent_kind,
+                        depth=depth,
+                        round_no=round_no,
+                        delegation_id=delegation_id,
+                        parent_tool_call_id=parent_tool_call_id,
+                        merge_allowed=display_text_merge_open,
+                    )
+                    display_text_merge_open = True
+                    yield delta_event
 
         _set_message_runtime_info(
             assistant_message,
@@ -1072,10 +1245,6 @@ def _run_session_stream(
 
         if has_tool_calls:
             has_todo_call = any(tc["name"] in todo_names for tc in tool_calls)
-            if has_todo_call:
-                non_todo_round_streak = 0
-            else:
-                non_todo_round_streak += 1
 
             for tool_call in tool_calls:
                 yield _emit_event(
@@ -1111,6 +1280,7 @@ def _run_session_stream(
             response_meta = _attach_response_summary(
                 assistant_message,
                 process_items=active_process_items,
+                display_parts=active_display_parts,
                 turn_started_at=turn_started_at,
                 turn_completed_at=completed_at,
             )
@@ -1133,6 +1303,7 @@ def _run_session_stream(
                 turn_completed_at=completed_at,
                 response_meta=response_meta,
                 process_items=[dict(item) for item in active_process_items],
+                display_parts=assistant_message["info"].get("display_parts", []),
                 confirmation=assistant_message["info"].get("confirmation"),
             )
             return assistant_message
@@ -1189,6 +1360,7 @@ def _run_session_stream(
                         delegation_id=delegation_instance_id,
                         parent_tool_call_id=tool_call["id"],
                         process_items=active_process_items,
+                        display_parts=active_display_parts,
                     )
                     task_result["output"] = get_message_text(delegated_message)
                 result = task_result
@@ -1280,6 +1452,7 @@ def _run_session_stream(
                 response_meta = _attach_response_summary(
                     interrupted_message,
                     process_items=active_process_items,
+                    display_parts=active_display_parts,
                     turn_started_at=turn_started_at,
                     turn_completed_at=completed_at,
                 )
@@ -1302,6 +1475,7 @@ def _run_session_stream(
                     turn_completed_at=completed_at,
                     response_meta=response_meta,
                     process_items=[dict(item) for item in active_process_items],
+                    display_parts=interrupted_message["info"].get("display_parts", []),
                     confirmation=interrupted_message["info"].get("confirmation"),
                 )
                 return interrupted_message
@@ -1367,6 +1541,7 @@ def _run_session_stream(
             response_meta = _attach_response_summary(
                 message,
                 process_items=active_process_items,
+                display_parts=active_display_parts,
                 turn_started_at=turn_started_at,
                 turn_completed_at=completed_at,
             )
@@ -1389,6 +1564,7 @@ def _run_session_stream(
                 turn_completed_at=completed_at,
                 response_meta=response_meta,
                 process_items=[dict(item) for item in active_process_items],
+                display_parts=message["info"].get("display_parts", []),
                 confirmation=message["info"].get("confirmation"),
             )
             return message
@@ -1407,9 +1583,6 @@ def _run_session_stream(
             model=current_runtime.model,
             completed_at=utc_now_iso(),
         )
-
-        if non_todo_round_streak >= 3:
-            messages.append(_build_text_message("user", todo_reminder_text, active_session_id))
 
 
 def _build_tool_handlers(
@@ -1540,9 +1713,6 @@ def run_session(
     todo_names = todo_tool_names if todo_tool_names is not None else {"todo_write", "todo_read"}
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
 
-    todo_reminder_text = "提醒：你已经连续多轮未更新 todo，请尽快使用 todo 同步当前计划与进度。"
-    non_todo_round_streak = 0
-
     user_meta: dict[str, Any] | None = None
     if mode_enabled:
         user_meta = {
@@ -1583,7 +1753,8 @@ def run_session(
     round_no = 0
     while True:
         round_no += 1
-        messages = compact(messages)
+        pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
+        messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
 
         selected_tools = initial_tools
         if mode_enabled:
@@ -1627,10 +1798,6 @@ def run_session(
 
         if has_tool_calls:
             has_todo_call = any(tc["name"] in todo_names for tc in tool_calls)
-            if has_todo_call:
-                non_todo_round_streak = 0
-            else:
-                non_todo_round_streak += 1
 
         if not has_tool_calls:
             assistant_message["info"]["turn_completed_at"] = utc_now_iso()
@@ -1641,18 +1808,56 @@ def run_session(
         should_interrupt = False
         task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
         for tool_call in tool_calls:
-            result = tool_executor.execute(
-                tool_call["name"],
-                tool_call["arguments"],
-                session_id=active_session_id,
-                tool_call_id=tool_call["id"],
-                round_no=round_no,
-                hooks=effective_tool_hooks,
-                agent=active_agent,
-                model=current_runtime.model,
-                task_available=task_available,
-                workdir=str(_get_workdir()),
-            )
+            if tool_call["name"] == "task":
+                task_result: ToolResult = {
+                    "output": "",
+                    "metadata": {
+                        "status": "completed",
+                    },
+                }
+                delegated_agent = "explore"
+                try:
+                    parsed_args = json.loads(tool_call["arguments"])
+                    if not isinstance(parsed_args, dict):
+                        raise ValueError("Task arguments must be a JSON object")
+                    delegated_prompt = str(parsed_args.get("prompt", ""))
+                    delegated_agent = str(parsed_args.get("agent", "explore"))
+                    delegated_agent_definition = get_agent(delegated_agent.strip().lower())
+                    if delegated_agent_definition is None:
+                        task_result["output"] = f"Error: Unknown subagent '{delegated_agent.strip().lower()}'. 当前仅支持 explore。"
+                        task_result["metadata"]["status"] = "failed"
+                    elif delegated_agent_definition.model != "subagent":
+                        task_result["output"] = (
+                            f"Error: Agent '{delegated_agent_definition.name}' 不是 subagent，不能通过 task 调用。"
+                        )
+                        task_result["metadata"]["status"] = "failed"
+                    else:
+                        delegated_agent = delegated_agent_definition.name
+                except Exception as exc:
+                    task_result["output"] = f"Error: Invalid tool arguments: {type(exc).__name__}: {exc}"
+                    task_result["metadata"]["status"] = "failed"
+
+                if str(task_result["metadata"].get("status", "completed")).strip().lower() == "completed":
+                    task_result["output"] = subagent_loop(
+                        delegated_prompt,
+                        agent=delegated_agent,
+                        session_id=active_session_id,
+                        llm_config=current_runtime,
+                    )
+                result = task_result
+            else:
+                result = tool_executor.execute(
+                    tool_call["name"],
+                    tool_call["arguments"],
+                    session_id=active_session_id,
+                    tool_call_id=tool_call["id"],
+                    round_no=round_no,
+                    hooks=effective_tool_hooks,
+                    agent=active_agent,
+                    model=current_runtime.model,
+                    task_available=task_available,
+                    workdir=str(_get_workdir()),
+                )
             messages.append(
                 _build_tool_message(
                     active_session_id,
@@ -1746,9 +1951,6 @@ def run_session(
             if mode_enabled:
                 SESSION_MEMORY_STORE.save(active_session_id, messages)
             return message
-
-        if non_todo_round_streak >= 3:
-            messages.append(_build_text_message("user", todo_reminder_text, active_session_id))
 
 
 def run_session_stream_events(

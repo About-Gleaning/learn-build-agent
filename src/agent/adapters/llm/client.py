@@ -194,7 +194,11 @@ def _resolve_effective_config(llm_config: ResolvedLLMConfig | None) -> ResolvedL
 
 
 def _build_openai_client(llm_config: ResolvedLLMConfig) -> OpenAI:
-    return OpenAI(api_key=llm_config.api_key, base_url=llm_config.base_url)
+    return OpenAI(
+        api_key=llm_config.api_key,
+        base_url=llm_config.base_url,
+        timeout=llm_config.timeout_seconds,
+    )
 
 
 def create_chat_completion(
