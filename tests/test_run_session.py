@@ -298,7 +298,30 @@ def test_plan_mode_bash_should_block_redirection(monkeypatch):
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     result = run_session("在 plan 模式执行 bash", session_id="s_plan_bash", mode="plan")
-    assert "仅允许单条只读命令" in get_message_text(result)
+    assert "禁止重定向" in get_message_text(result)
+
+
+def test_plan_mode_bash_should_allow_readonly_pipe(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_bash_pipe",
+                name="bash",
+                arguments='{"command":"grep -n \\"build.default.txt\\" README.md | head -5"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    result = run_session("在 plan 模式执行只读管道 bash", session_id="s_plan_bash_pipe", mode="plan")
+    assert "build.default.txt" in get_message_text(result)
 
 
 def test_task_with_unknown_subagent_should_return_error(monkeypatch):

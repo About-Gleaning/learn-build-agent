@@ -1,7 +1,4 @@
 import logging
-import os
-import shlex
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -9,74 +6,12 @@ WORKDIR = Path.cwd()
 PLAN_WRITE_ROOT = (WORKDIR / "src" / "plan").resolve()
 logger = logging.getLogger(__name__)
 
-DANGEROUS_PATTERNS = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-READ_ONLY_BASH_COMMANDS = {
-    "ls",
-    "cat",
-    "rg",
-    "find",
-    "head",
-    "tail",
-    "wc",
-    "pwd",
-    "sed",
-    "sort",
-    "uniq",
-    "cut",
-    "echo",
-    "tree",
-}
-FORBIDDEN_BASH_FRAGMENTS = [";", "&&", "||", "|", ">", "<", "$(", "`"]
-DANGEROUS_BASH_ARGS = {"-i", "--in-place", "-exec", "--output"}
-
 
 def safe_path(path_str: str) -> Path:
     path = (WORKDIR / path_str).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {path_str}")
     return path
-
-
-def run_bash(command: str) -> str:
-    if any(pattern in command for pattern in DANGEROUS_PATTERNS):
-        return "Error: Dangerous command blocked"
-
-    try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=os.getcwd(),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
-
-    output = (completed.stdout + completed.stderr).strip()
-    return output[:50000] if output else "(no output)"
-
-
-def validate_readonly_bash(command: str) -> str | None:
-    if any(fragment in command for fragment in FORBIDDEN_BASH_FRAGMENTS):
-        return "Error: plan 模式下 bash 仅允许单条只读命令，禁止重定向、管道和链式执行。"
-
-    try:
-        parts = shlex.split(command)
-    except Exception as exc:
-        return f"Error: bash 命令解析失败: {type(exc).__name__}: {exc}"
-
-    if not parts:
-        return "Error: 空命令。"
-
-    base = Path(parts[0]).name
-    if base not in READ_ONLY_BASH_COMMANDS:
-        return f"Error: plan 模式下不允许执行命令 `{base}`。"
-
-    if any(arg in DANGEROUS_BASH_ARGS for arg in parts[1:]):
-        return "Error: plan 模式下检测到潜在写入参数，已拒绝执行。"
-
-    return None
 
 
 def run_read(path: str, limit: int | None = None, offset: int = 0) -> str:

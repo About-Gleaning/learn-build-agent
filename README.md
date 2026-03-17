@@ -35,7 +35,8 @@ src/
       app.py                      # Web API（SSE 聊天、历史查询、模式切换确认、清空会话）
       schemas.py                  # Web 层请求/响应模型
     tools/
-      handlers.py                 # 各工具业务实现
+      bash_tool.py                # bash 工具执行与 plan 模式只读校验
+      handlers.py                 # 通用工具业务实现（文件读写、模式切换等）
       specs.py                    # 工具协议定义
       todo_manager.py             # todo 状态管理与持久化
       task.txt                    # task 工具描述模板（含 {agents} 占位）
@@ -90,7 +91,7 @@ pnpm dev
 
 ### 1) 新增工具
 
-1. 在 `src/agent/tools/handlers.py` 增加实现。
+1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
 2. 在 `src/agent/tools/specs.py` 增加或调整 JSON Schema；若工具描述较长，优先拆到独立 `.txt` 模板文件。
 3. 在 `src/agent/runtime/session.py` 的工具映射中注册（仅路由）。
 4. 在 `tests/` 补齐测试：成功路径、参数异常、安全边界。
@@ -150,3 +151,4 @@ pnpm dev
 - 2026-03-13：将 skills 暴露方式从 `explore` prompt 占位符迁移为 `load_skill` 工具描述动态注入。
 - 2026-03-16：新增统一日志初始化模块，日志改为按天追加落盘，并收敛为 LLM/工具关键节点日志。
 - 2026-03-16：`build` 模式提示词改为按 `vendor` 选择 `build.<vendor>.txt`，`qwen` 与 `qwen-coder` 共用同一份 Qwen prompt。
+- 2026-03-17：将 bash 工具执行与 Plan 模式只读校验拆分到独立模块，并允许有限的只读管道查询。

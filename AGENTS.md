@@ -18,6 +18,7 @@
 - `src/agent/adapters/llm/client.py`：LLM 适配与 LLM Hook。
 - `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
 - `src/agent/tools/`：工具实现（`handlers.py`）与协议定义（`specs.py`）。
+- `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
 - `src/agent/tools/task.txt`：`task` 工具描述模板，使用 `{agents}` 占位注入 subagent 列表。
 - `src/agent/core/`：消息模型、上下文与通用 HookDispatcher。
 - `src/agent/web/`：Web API 与请求/响应模型。
@@ -27,7 +28,7 @@
 
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
-- 工具实现统一在 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
 - Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。

@@ -1,9 +1,9 @@
+from agent.tools.bash_tool import validate_readonly_bash
 from agent.tools.handlers import (
     build_plan_placeholder_path,
     is_allowed_plan_write_path,
     run_plan_enter,
     run_plan_exit,
-    validate_readonly_bash,
 )
 
 
@@ -80,12 +80,23 @@ def test_run_plan_exit_should_return_completed_when_not_in_plan():
 def test_validate_readonly_bash_should_block_redirection():
     result = validate_readonly_bash("echo hello > /tmp/a.txt")
     assert result is not None
-    assert "仅允许单条只读命令" in result
+    assert "禁止重定向" in result
 
 
 def test_validate_readonly_bash_should_allow_ls():
     result = validate_readonly_bash("ls -la")
     assert result is None
+
+
+def test_validate_readonly_bash_should_allow_readonly_pipe():
+    result = validate_readonly_bash('grep -n "start_backend" dev.sh | head -20')
+    assert result is None
+
+
+def test_validate_readonly_bash_should_block_non_whitelisted_pipe_command():
+    result = validate_readonly_bash("cat README.md | xargs echo")
+    assert result is not None
+    assert "不允许执行命令 `xargs`" in result
 
 
 def test_is_allowed_plan_write_path():

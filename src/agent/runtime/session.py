@@ -27,17 +27,16 @@ from ..core.message import (
     utc_now_iso,
 )
 from ..runtime.agents import get_agent
+from ..tools.bash_tool import run_bash, validate_readonly_bash
 from ..skills.runtime import SkillRegistry
 from ..tools.handlers import (
     build_plan_placeholder_path,
     is_allowed_plan_write_path,
-    run_bash,
     run_edit,
     run_plan_enter,
     run_plan_exit,
     run_read,
     run_write,
-    validate_readonly_bash,
 )
 from ..tools.specs import build_agent_tools, build_base_tools
 from ..tools.todo_manager import TodoManager
