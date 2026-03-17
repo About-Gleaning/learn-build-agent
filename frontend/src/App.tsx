@@ -267,22 +267,6 @@ function getRoleLabel(role: Role): string {
   return "系统";
 }
 
-function getStatusLabel(status: string): string {
-  if (status === "running") {
-    return "运行中";
-  }
-  if (status === "completed") {
-    return "已完成";
-  }
-  if (status === "failed") {
-    return "失败";
-  }
-  if (status === "interrupted") {
-    return "已中断";
-  }
-  return status || "待处理";
-}
-
 function getTimelineEntryTitle(entry: ProgressEntry): string {
   if (entry.kind === "tool_call" || entry.kind === "tool_result") {
     const title = entry.title.replace(/^调用工具\s*·\s*/, "").trim();
@@ -296,17 +280,15 @@ function getTimelineEntryTitle(entry: ProgressEntry): string {
   return entry.title;
 }
 
-function getAvatarLabel(role: Role): string {
-  if (role === "user") {
-    return "你";
+function getCompactTimelineEntryTitle(entry: ProgressEntry): string {
+  if (entry.kind === "tool_call" || entry.kind === "tool_result") {
+    return entry.title.replace(/^调用工具\s*·\s*/, "").trim() || "工具调用";
   }
-  if (role === "assistant") {
-    return "AI";
-  }
-  if (role === "tool") {
-    return "工具";
-  }
-  return "系统";
+  return getTimelineEntryTitle(entry);
+}
+
+function getEntryAgentName(entry: ProgressEntry): string {
+  return (entry.agent || "").trim();
 }
 
 function getAgentKindLabel(agentKind: string): string {
@@ -999,18 +981,7 @@ function buildProgressMeta(item: ProcessItem): string[] {
   if (item.round > 0) {
     meta.push(`第 ${item.round} 轮`);
   }
-  if (item.status) {
-    meta.push(getStatusLabel(item.status));
-  }
   return meta;
-}
-
-function sortDisplayParts(parts: DisplayPart[]): DisplayPart[] {
-  return [...parts].sort((left, right) => {
-    const leftTime = left.createdAt || "";
-    const rightTime = right.createdAt || "";
-    return leftTime.localeCompare(rightTime);
-  });
 }
 
 function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: string): ProgressEntry {
@@ -1107,7 +1078,7 @@ function mergeToolTimelineEntries(entries: ProgressEntry[]): ProgressEntry[] {
 
 function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
   if (message.displayParts.length > 0) {
-    const orderedEntries = sortDisplayParts(message.displayParts).map((part) =>
+    const orderedEntries = message.displayParts.map((part) =>
       buildTimelineEntryFromDisplayPart(part, message.status),
     );
     return mergeToolTimelineEntries(orderedEntries);
@@ -1158,6 +1129,9 @@ function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
   return entries;
 }
 
+function shouldRenderEntryHeadline(entry: ProgressEntry): boolean {
+  return !entry.isFinal && entry.kind !== "assistant_text";
+}
 
 function renderAssistantTimeline(message: UiMessage) {
   const entries = buildAssistantTimelineEntries(message);
@@ -1169,43 +1143,45 @@ function renderAssistantTimeline(message: UiMessage) {
 
   return (
     <div className="assistant-timeline">
-      {entries.map((entry) => (
-        <section
-          key={entry.id}
-          className={`assistant-timeline-entry kind-${entry.kind} status-${entry.status || "pending"} ${entry.agentKind} ${
-            entry.isFinal ? "is-final" : ""
-          } ${entry.request && entry.result && !entry.isFinal ? "has-result" : ""}`}
-        >
-          <div className="assistant-timeline-entry-head">
-            <strong>{getTimelineEntryTitle(entry)}</strong>
-            {entry.status ? <span className={`timeline-kind status-${entry.status}`}>{getStatusLabel(entry.status)}</span> : null}
-            <time>{formatTime(entry.updatedAt || entry.createdAt)}</time>
-          </div>
-          {entry.meta.length > 0 ? (
-            <div className="assistant-timeline-entry-meta">
-              {entry.meta.map((metaItem, index) => (
-                <span key={`${entry.id}_meta_${index}`}>{metaItem}</span>
-              ))}
-            </div>
-          ) : null}
-          {entry.request ? (
-            <div className={`assistant-timeline-entry-block ${entry.status === "failed" ? "is-failed-request" : ""}`}>
-              <span className="assistant-timeline-entry-label">调用</span>
-              <div className="assistant-timeline-entry-text">{entry.request}</div>
-            </div>
-          ) : null}
-          {entry.isFinal ? (
-            <div className="assistant-timeline-entry-block final-body">{renderMarkdownContent(entry.result || "")}</div>
-          ) : entry.result ? (
-            <div
-              className={`assistant-timeline-entry-block is-result ${entry.status === "failed" ? "is-failed-result" : ""}`}
-            >
-              <span className="assistant-timeline-entry-label">结果</span>
-              <div className="assistant-timeline-entry-text">{entry.result}</div>
-            </div>
-          ) : null}
-        </section>
-      ))}
+      {entries.map((entry) => {
+        const showHeadline = shouldRenderEntryHeadline(entry);
+
+        return (
+          <section
+            key={entry.id}
+            className={`assistant-timeline-entry kind-${entry.kind} status-${entry.status || "pending"} ${entry.agentKind} ${
+              entry.isFinal ? "is-final" : ""
+            } ${entry.request && entry.result && !entry.isFinal ? "has-result" : ""}`}
+          >
+            {showHeadline ? (
+              <div className="assistant-timeline-entry-head">
+                <strong>{getCompactTimelineEntryTitle(entry)}</strong>
+                {getEntryAgentName(entry) ? <span className="assistant-timeline-entry-agent">{getEntryAgentName(entry)}</span> : null}
+              </div>
+            ) : null}
+            {entry.request ? (
+              <div
+                className={`assistant-timeline-entry-block assistant-timeline-entry-block-request ${
+                  entry.status === "failed" ? "is-failed-request" : ""
+                }`}
+              >
+                <div className="assistant-timeline-entry-text">{entry.request}</div>
+              </div>
+            ) : null}
+            {entry.isFinal ? (
+              <div className="assistant-timeline-entry-block final-body">
+                <div className="assistant-timeline-entry-markdown">{renderMarkdownContent(entry.result || "")}</div>
+              </div>
+            ) : entry.result ? (
+              <div
+                className={`assistant-timeline-entry-block is-result ${entry.status === "failed" ? "is-failed-result" : ""}`}
+              >
+                <div className="assistant-timeline-entry-text">{entry.result}</div>
+              </div>
+            ) : null}
+          </section>
+        );
+      })}
     </div>
   );
 }
@@ -1255,7 +1231,6 @@ export function App() {
   const [isLoadingOptions, setIsLoadingOptions] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isApplyingModeSwitch, setIsApplyingModeSwitch] = useState(false);
-  const [copyHint, setCopyHint] = useState("");
   const [shouldFollow, setShouldFollow] = useState(true);
   const [mode, setMode] = useState<AgentName>("build");
   const [provider, setProvider] = useState("");
@@ -1302,14 +1277,7 @@ export function App() {
     "--";
   const currentRuntimeSummary = `${mode} / ${displayProvider} / ${displayModel}`;
   const followText = shouldFollow ? "自动跟随开启" : "自动跟随关闭";
-
-  useEffect(() => {
-    if (!copyHint) {
-      return;
-    }
-    const timer = window.setTimeout(() => setCopyHint(""), 1500);
-    return () => window.clearTimeout(timer);
-  }, [copyHint]);
+  const latestMessageTime = latestMessage ? formatTime(latestMessage.createdAt) : "--";
 
   useEffect(() => {
     if (!shouldFollow) {
@@ -1522,18 +1490,6 @@ export function App() {
     setShouldFollow(distanceToBottom <= AUTO_SCROLL_THRESHOLD);
   };
 
-  const handleCopyText = async (text: string) => {
-    if (!text) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopyHint("消息已复制到剪贴板");
-    } catch {
-      setCopyHint("复制失败，请检查浏览器权限");
-    }
-  };
-
   const handleModeSwitchAction = async (action: "confirm" | "cancel") => {
     if (isStreaming || isApplyingModeSwitch) {
       return;
@@ -1672,6 +1628,10 @@ export function App() {
       return;
     }
     if (event.key === "Enter" && !event.shiftKey) {
+      // 如果正在输入法组合过程中，不触发发送
+      if (event.nativeEvent.isComposing) {
+        return;
+      }
       event.preventDefault();
       if (canSubmit) {
         void handleSubmit(event);
@@ -1681,145 +1641,149 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <div className="ambient-grid" aria-hidden="true" />
       <main className="workspace" aria-label="Agent 对话工作台">
-        <section className={`workspace-main ${error ? "has-alert" : "no-alert"}`} aria-label="会话交互区">
+        <section className="terminal-shell" aria-label="会话交互区">
+          <header className="terminal-topbar">
+            <div className="terminal-title-group">
+              <strong className="terminal-title">agent-cli</strong>
+              <span className="terminal-session">session {sessionId}</span>
+            </div>
+            <div className="terminal-topbar-actions">
+              <span className="terminal-topbar-item">{currentRuntimeSummary}</span>
+              <span className={`terminal-topbar-item ${isStreaming ? "is-live" : ""}`}>
+                {isStreaming ? "streaming" : isApplyingModeSwitch ? "switching" : "idle"}
+              </span>
+            </div>
+          </header>
+
           {error ? (
-            <div className="alert-banner" role="alert">
-              <strong>请求异常</strong>
+            <div className="terminal-alert" role="alert">
+              <strong>[error]</strong>
               <span>{error}</span>
             </div>
           ) : null}
 
-          <section className="dialogue-panel" aria-label="消息工作台">
-            <section className="conversation-card" aria-label="消息区">
-              <div className="message-list" ref={messageListRef} onScroll={handleMessageScroll}>
-                {messages.length === 0 ? (
-                  <div className="empty-panel">
-                    <strong>暂无会话内容</strong>
-                    <span>输入一个问题，工作台会在这里展示完整对话过程。</span>
-                  </div>
-                ) : null}
+          <section className="terminal-body" aria-label="消息工作台">
+            <div className="message-list terminal-log" ref={messageListRef} onScroll={handleMessageScroll}>
+              {messages.length === 0 ? (
+                <div className="empty-panel">
+                  <strong>暂无输出</strong>
+                  <span>输入一条命令或需求，终端会按真实执行顺序输出过程。</span>
+                </div>
+              ) : null}
 
-                {messages.map((msg) => {
-                  return (
-                    <article key={msg.id} className={`message-bubble ${msg.role}`}>
-                      <div className="message-shell">
-                        <div className={`message-avatar ${msg.role}`}>{getAvatarLabel(msg.role)}</div>
-                        <div className="message-content">
-                          <div className="message-toolbar">
-                            <div className="message-title">
-                              <span className="message-role">{getRoleLabel(msg.role)}</span>
-                              <span className="message-time">{formatTime(msg.createdAt)}</span>
-                            </div>
-                            <div className="message-actions">
-                              <span className={`status-badge status-${msg.status}`}>{getStatusLabel(msg.status)}</span>
-                              {msg.text ? (
-                                <button type="button" className="plain-btn" onClick={() => void handleCopyText(msg.text)}>
-                                  复制
-                                </button>
-                              ) : null}
-                            </div>
-                          </div>
-                          {msg.role === "assistant" ? (
-                            <div className="assistant-runtime-line">
-                              <span className="assistant-runtime-main">{buildAssistantMetaLine(msg)}</span>
-                              <span className="assistant-runtime-sub">{buildProcessSummary(msg.responseMeta)}</span>
-                              {msg.turnCompletedAt ? <span className="assistant-runtime-sub">完成于 {formatTime(msg.turnCompletedAt)}</span> : null}
-                            </div>
-                          ) : null}
-                          {msg.role === "assistant" ? renderAssistantTimeline(msg) : renderMessageBody(msg)}
-                          {renderModeSwitchActions({
-                            message: msg,
-                            isLatest: latestAssistantMessage?.id === msg.id,
-                            disabled: isStreaming || isApplyingModeSwitch,
-                            onAction: (action) => {
-                              void handleModeSwitchAction(action);
-                            },
-                          })}
-                        </div>
+              {messages.map((msg) => {
+                return (
+                  <article key={msg.id} className={`terminal-record ${msg.role}`}>
+                    <div className="terminal-record-head">
+                      <div className="terminal-record-title">
+                        <span className="terminal-prompt">{msg.role === "user" ? "you>" : msg.role === "assistant" ? "ai>" : "sys>"}</span>
+                        <span className="message-role">{getRoleLabel(msg.role)}</span>
+                        <span className="message-time">{formatTime(msg.createdAt)}</span>
+                        {msg.role === "assistant" ? (
+                          <span className="assistant-runtime-main">{buildAssistantMetaLine(msg)}</span>
+                        ) : null}
+                        {msg.role === "assistant" ? (
+                          <span className="assistant-runtime-sub">{buildProcessSummary(msg.responseMeta)}</span>
+                        ) : null}
+                        {msg.role === "assistant" && msg.turnCompletedAt ? (
+                          <span className="assistant-runtime-sub">完成于 {formatTime(msg.turnCompletedAt)}</span>
+                        ) : null}
                       </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
-
-            <form className="composer-card compact" onSubmit={handleSubmit}>
-              <div className="composer-panel">
-                <div className="composer-config" aria-label="运行配置快捷选择">
-                  <div className="config-intro">
-                    <span className="config-intro-label">当前工作模式</span>
-                    <strong>{currentRuntimeSummary}</strong>
-                  </div>
-                  <div className="compact-field">
-                    <label htmlFor="agent-mode">Agent</label>
-                    <select
-                      id="agent-mode"
-                      value={mode}
-                      onChange={(e) => setMode(e.target.value as AgentName)}
-                      disabled={isStreaming || isApplyingModeSwitch}
-                    >
-                      {agentOptions.map((item) => (
-                        <option key={item} value={item}>
-                          {item}
-                        </option>
-                      ))}
-                      {agentOptions.length === 0 ? <option value={mode}>{mode}</option> : null}
-                    </select>
-                  </div>
-                  <div className="compact-field">
-                    <label htmlFor="provider-name">厂商</label>
-                    <select
-                      id="provider-name"
-                      value={provider}
-                      onChange={(e) => setProvider(e.target.value)}
-                      disabled={isStreaming || isApplyingModeSwitch}
-                    >
-                      {providerOptions.map((item) => (
-                        <option key={item.name} value={item.name}>
-                          {item.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void refreshRuntimeOptions()}
-                    disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch}
-                    className="secondary-btn compact-btn"
-                  >
-                    {isLoadingOptions ? "刷新中..." : "刷新配置"}
-                  </button>
-                </div>
-
-                <div className="composer-input-area">
-                  <div className="composer-textarea-shell">
-                    <textarea
-                      value={input}
-                      onChange={(e) => setInput(e.target.value)}
-                      placeholder="把你的目标、上下文或想修的细节写清楚，我会沿着同一条执行轨迹持续推进。"
-                      rows={3}
-                      onKeyDown={onComposerKeyDown}
-                      aria-label="消息输入框"
-                      disabled={isApplyingModeSwitch}
-                    />
-                  </div>
-                  <div className="composer-footer">
-                    <div className="composer-tips">
-                      <span>{followText}</span>
-                      <span>最近消息: {latestMessage ? formatTime(latestMessage.createdAt) : "--"}</span>
                     </div>
-                    <button type="submit" disabled={!canSubmit} className="primary-btn">
-                      {isStreaming ? "生成中..." : isApplyingModeSwitch ? "切换中..." : "发送"}
-                    </button>
-                  </div>
+                    <div className="terminal-record-body">
+                      {msg.role === "assistant" ? renderAssistantTimeline(msg) : renderMessageBody(msg)}
+                      {renderModeSwitchActions({
+                        message: msg,
+                        isLatest: latestAssistantMessage?.id === msg.id,
+                        disabled: isStreaming || isApplyingModeSwitch,
+                        onAction: (action) => {
+                          void handleModeSwitchAction(action);
+                        },
+                      })}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
+            <div className="terminal-statusline" aria-label="运行状态">
+              <div className="terminal-statusline-group">
+                <span className="terminal-label">agent</span>
+                <select
+                  id="agent-mode"
+                  value={mode}
+                  onChange={(e) => setMode(e.target.value as AgentName)}
+                  disabled={isStreaming || isApplyingModeSwitch}
+                  className="terminal-select"
+                >
+                  {agentOptions.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                  {agentOptions.length === 0 ? <option value={mode}>{mode}</option> : null}
+                </select>
+              </div>
+              <div className="terminal-statusline-group">
+                <span className="terminal-label">provider</span>
+                <select
+                  id="provider-name"
+                  value={provider}
+                  onChange={(e) => setProvider(e.target.value)}
+                  disabled={isStreaming || isApplyingModeSwitch}
+                  className="terminal-select"
+                >
+                  {providerOptions.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="terminal-statusline-meta">
+                <span>model {displayModel}</span>
+                <span>{followText}</span>
+                <span>最近消息 {latestMessageTime}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshRuntimeOptions()}
+                disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch}
+                className="plain-btn terminal-inline-btn"
+              >
+                {isLoadingOptions ? "刷新中..." : "刷新配置"}
+              </button>
+            </div>
+
+            <form className="terminal-composer" onSubmit={handleSubmit}>
+              <div className="terminal-composer-head">
+                <span className="terminal-prompt">cmd&gt;</span>
+                <span className="terminal-composer-summary">{currentRuntimeSummary}</span>
+              </div>
+              <div className="terminal-input-wrap">
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="输入目标、上下文或想修的细节；Enter 发送，Shift+Enter 换行，Shift+Tab 切换 Agent。"
+                  rows={3}
+                  onKeyDown={onComposerKeyDown}
+                  aria-label="消息输入框"
+                  disabled={isApplyingModeSwitch}
+                />
+              </div>
+              <div className="composer-footer">
+                <div className="composer-tips">
+                  <span>{followText}</span>
+                  <span>最近消息: {latestMessageTime}</span>
                 </div>
+                <button type="submit" disabled={!canSubmit} className="primary-btn">
+                  {isStreaming ? "生成中..." : isApplyingModeSwitch ? "切换中..." : "发送"}
+                </button>
               </div>
             </form>
           </section>
         </section>
-
       </main>
     </div>
   );
