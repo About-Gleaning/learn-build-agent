@@ -90,15 +90,15 @@ class WebSearchTool:
             "query": query,
             "type": search_type,
             "num_results": num_results,
-            # Python SDK 现在默认也会返回内容，这里显式限制文本长度，避免返回过长内容。
-            "contents": {"text": {"max_characters": context_max_characters}},
+            # 新版 Exa SDK 通过 search_and_contents + text 参数返回正文内容。
+            "text": {"max_characters": context_max_characters},
         }
 
         # livecrawl 在 Exa 的搜索与内容检索能力中是有效概念；仅在调用方传入时透传。
         if livecrawl:
             call["livecrawl"] = livecrawl
 
-        response = client.search(**call)
+        response = client.search_and_contents(**call)
         items = _extract_items(response)
 
         if not items:

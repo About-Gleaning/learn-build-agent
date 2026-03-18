@@ -20,7 +20,7 @@ class FakeClient:
         self.response = response
         self.calls: list[dict] = []
 
-    def search(self, **kwargs):
+    def search_and_contents(self, **kwargs):
         self.calls.append(kwargs)
         return self.response
 
@@ -182,4 +182,4 @@ def test_websearch_should_pass_livecrawl_and_content_limits(monkeypatch):
 
     assert client.calls[0]["livecrawl"] == "fallback"
     assert client.calls[0]["type"] == "deep"
-    assert client.calls[0]["contents"] == {"text": {"max_characters": 1234}}
+    assert client.calls[0]["text"] == {"max_characters": 1234}
