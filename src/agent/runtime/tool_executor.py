@@ -91,6 +91,25 @@ class ToolLoggingHook(ToolHook):
             sanitize_log_text(result.get("output", "")),
             extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
         )
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        if metadata.get("truncated") is True:
+            logger.info(
+                (
+                    "tool.output_truncated tool=%s session_id=%s tool_call_id=%s "
+                    "full_output_path=%s write_error=%s original_lines=%s "
+                    "original_bytes=%s preview_lines=%s preview_bytes=%s"
+                ),
+                ctx.get("tool_name", ""),
+                ctx.get("session_id", ""),
+                ctx.get("tool_call_id", ""),
+                sanitize_log_text(metadata.get("full_output_path", "")),
+                sanitize_log_text(metadata.get("full_output_write_error", "")),
+                metadata.get("original_lines", ""),
+                metadata.get("original_bytes", ""),
+                metadata.get("preview_lines", ""),
+                metadata.get("preview_bytes", ""),
+                extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
+            )
 
     def on_error(self, ctx: ToolHookContext, error: Exception, normalized_error: ToolNormalizedError) -> None:
         logger.exception(

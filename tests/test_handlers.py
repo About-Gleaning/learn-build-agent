@@ -10,6 +10,7 @@ from agent.tools.handlers import (
     run_read,
     run_write,
 )
+from agent.tools.todo_manager import TodoManager
 
 
 def test_build_plan_placeholder_path_should_be_absolute():
@@ -105,7 +106,7 @@ def test_validate_readonly_bash_should_block_non_whitelisted_pipe_command():
 
 
 def test_is_allowed_plan_write_path():
-    assert is_allowed_plan_write_path("src/plan/a.md")
+    assert is_allowed_plan_write_path("src/storage/plan/a.md")
     assert not is_allowed_plan_write_path("src/main.py")
 
 
@@ -157,3 +158,27 @@ def test_run_edit_should_return_text_not_found_failure(monkeypatch, tmp_path):
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "text_not_found"
     assert "Text not found" in result["output"]
+
+
+def test_build_plan_placeholder_path_should_anchor_to_project_root(monkeypatch, tmp_path):
+    project_root = tmp_path / "project-root"
+    project_root.mkdir()
+    monkeypatch.setattr("agent.tools.handlers.WORKDIR", project_root)
+    monkeypatch.setattr("agent.tools.handlers.PLAN_WRITE_ROOT", (project_root / "src" / "storage" / "plan").resolve())
+
+    path = build_plan_placeholder_path("session:plan")
+
+    assert path == (project_root / "src" / "storage" / "plan" / "session_plan.md").resolve()
+
+
+def test_todo_manager_should_anchor_relative_storage_dir_to_project_root(monkeypatch, tmp_path):
+    project_root = tmp_path / "project-root"
+    outside_dir = tmp_path / "outside"
+    project_root.mkdir()
+    outside_dir.mkdir()
+    monkeypatch.setattr("agent.tools.todo_manager.PROJECT_ROOT", project_root)
+
+    manager = TodoManager()
+
+    assert manager.storage_dir == (project_root / "src" / "storage" / "todo").resolve()
+    assert manager.storage_dir != (outside_dir / "src" / "storage" / "todo").resolve()

@@ -6,6 +6,8 @@ from typing import Any
 
 from ..core.context import get_session_id
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
 
 class TodoManager:
     VALID_STATUSES = ["pending", "in_progress", "completed", "cancelled"]
@@ -13,7 +15,10 @@ class TodoManager:
 
     def __init__(self, storage_dir: str = "src/storage/todo"):
         self.todos = []
-        self.storage_dir = Path(storage_dir)
+        storage_path = Path(storage_dir)
+        if not storage_path.is_absolute():
+            storage_path = PROJECT_ROOT / storage_path
+        self.storage_dir = storage_path.resolve()
 
     def _safe_session_id(self, session_id: str) -> str:
         """将会话 ID 规整为安全文件名，防止路径穿越。"""

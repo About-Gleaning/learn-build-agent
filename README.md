@@ -169,6 +169,7 @@ pnpm dev
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
 - `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。
+- plan 模式占位文件与允许写入目录统一固定在 `src/storage/plan`，禁止继续写入 `src/plan`。
 
 ## 变更记录
 
@@ -183,3 +184,4 @@ pnpm dev
 - 2026-03-18：新增 `runtime/stream_display.py`，统一流式事件、`process_items`、`display_parts` 与响应摘要组装。
 - 2026-03-18：统一文件工具与 plan 模式拦截的结构化返回，工具层默认返回 `output + metadata.status/error_code`。
 - 2026-03-18：新增 `web/serializers.py`，将 `Message -> VO` 与 SSE 事件序列化从 `web/app.py` 中抽离。
+- 2026-03-18：将 plan 模式占位文件目录统一固定为仓库内 `src/storage/plan`，并同步更新 plan 模式写入约束。

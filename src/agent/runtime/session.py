@@ -1461,12 +1461,18 @@ def _build_tool_handlers(
 
     def _run_mode_aware_write(path: str, content: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
-            return build_tool_failure("Error: plan 模式下仅允许写入 src/plan 目录。", error_code="plan_write_forbidden")
+            return build_tool_failure(
+                "Error: plan 模式下仅允许写入 src/storage/plan 目录。",
+                error_code="plan_write_forbidden",
+            )
         return run_write(path, content)
 
     def _run_mode_aware_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
-            return build_tool_failure("Error: plan 模式下仅允许编辑 src/plan 目录。", error_code="plan_edit_forbidden")
+            return build_tool_failure(
+                "Error: plan 模式下仅允许编辑 src/storage/plan 目录。",
+                error_code="plan_edit_forbidden",
+            )
         return run_edit(path, old_text, new_text)
 
     def _run_plan_enter_tool(**kw: Any) -> dict[str, Any]:

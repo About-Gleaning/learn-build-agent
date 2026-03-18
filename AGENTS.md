@@ -22,6 +22,7 @@
 - `src/agent/tools/`：工具实现（`handlers.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
 - `src/agent/tools/task.txt`：`task` 工具描述模板，使用 `{agents}` 占位注入 subagent 列表。
+- `src/storage/plan/`：Plan 模式占位文件固定存储目录。
 - `src/agent/core/`：消息模型、上下文与通用 HookDispatcher。
 - `src/agent/web/`：Web API 与请求/响应模型。
 - `src/agent/web/serializers.py`：`Message -> MessageVO` 与 SSE payload 序列化。
@@ -33,6 +34,7 @@
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
 - 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
+- plan 模式占位文件与允许写入目录统一固定在 `src/storage/plan`，禁止继续写入 `src/plan`。
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
 - Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
@@ -99,3 +101,4 @@
 - 2026-03-18：完成第三阶段工具层重构，统一文件工具与 plan 模式拦截的结构化返回，补充 `handlers` 成功/失败结果与错误码回归测试，并保持 tool 输出文本兼容原行为。
 - 2026-03-18：完成第四阶段 Web 重构，将 `Message -> VO` 与 SSE 事件序列化抽离到 `web/serializers.py`，降低 `app.py` 中的手工字段映射与重复流式封装逻辑。
 - 2026-03-18：完成第五阶段收口整理，清理 `session.py` 中的未使用局部变量与 `handlers.py` 的无用日志对象，并为工具结果构造与 Web 序列化补充关键注释。
+- 2026-03-18：将 plan 模式占位文件目录统一固定为仓库内 `src/storage/plan`，并同步更新 plan 模式写入约束。

@@ -275,7 +275,7 @@ def test_plan_mode_write_should_be_limited_to_src_plan(monkeypatch):
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     result = run_session("在 plan 模式写文件", session_id="s_plan_write", mode="plan")
-    assert "仅允许写入 src/plan" in get_message_text(result)
+    assert "仅允许写入 src/storage/plan" in get_message_text(result)
 
 
 def test_plan_mode_bash_should_block_redirection(monkeypatch):
@@ -648,6 +648,7 @@ def test_run_session_should_execute_websearch_tool(monkeypatch):
 
 
 def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.runtime.compaction.PROJECT_ROOT", tmp_path)
     monkeypatch.chdir(tmp_path)
     call_state = {"count": 0}
     long_output = "\n".join(f"line {i}" for i in range(2505))
@@ -687,6 +688,7 @@ def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch,
 
 
 def test_subagent_loop_should_truncate_tool_output_without_task_guidance(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.runtime.compaction.PROJECT_ROOT", tmp_path)
     monkeypatch.chdir(tmp_path)
     call_state = {"count": 0}
     long_output = "\n".join(f"line {i}" for i in range(2505))
@@ -725,6 +727,7 @@ def test_subagent_loop_should_truncate_tool_output_without_task_guidance(monkeyp
 
 
 def test_run_session_should_store_truncation_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.runtime.compaction.PROJECT_ROOT", tmp_path)
     monkeypatch.chdir(tmp_path)
     call_state = {"count": 0}
     long_output = "\n".join(f"line {i}" for i in range(2505))

@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import Any
 
-WORKDIR = Path.cwd()
-PLAN_WRITE_ROOT = (WORKDIR / "src" / "plan").resolve()
+WORKDIR = Path(__file__).resolve().parents[3]
+PLAN_WRITE_ROOT = (WORKDIR / "src" / "storage" / "plan").resolve()
 
 
 def build_tool_success(output: str, **metadata: Any) -> dict[str, Any]:

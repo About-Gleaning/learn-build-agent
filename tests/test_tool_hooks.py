@@ -149,26 +149,32 @@ def test_tool_error_hook_unknown_tool(monkeypatch):
 
 
 def test_tool_executor_should_truncate_long_output_and_write_full_file(tmp_path):
+    from agent.runtime import compaction as compaction_module
+
+    original_project_root = compaction_module.PROJECT_ROOT
+    compaction_module.PROJECT_ROOT = tmp_path
     executor = ToolExecutor({"demo_tool": lambda: "x" * (TOOL_OUTPUT_MAX_BYTES + 32)})
+    try:
+        result = executor.execute(
+            "demo_tool",
+            "{}",
+            session_id="s_truncate",
+            tool_call_id="call_demo",
+            round_no=1,
+            hooks=[],
+            task_available=False,
+            workdir=str(tmp_path),
+        )
 
-    result = executor.execute(
-        "demo_tool",
-        "{}",
-        session_id="s_truncate",
-        tool_call_id="call_demo",
-        round_no=1,
-        hooks=[],
-        task_available=False,
-        workdir=str(tmp_path),
-    )
-
-    metadata = result["metadata"]
-    assert metadata["truncated"] is True
-    assert "full_output_path" in metadata
-    assert "bash + rg" in result["output"]
-    full_output_path = tmp_path / "src" / "storage" / "tool-output" / "s_truncate" / "demo_tool-call_demo.log"
-    assert full_output_path.exists()
-    assert full_output_path.read_text(encoding="utf-8") == "x" * (TOOL_OUTPUT_MAX_BYTES + 32)
+        metadata = result["metadata"]
+        assert metadata["truncated"] is True
+        assert "full_output_path" in metadata
+        assert "bash + rg" in result["output"]
+        full_output_path = tmp_path / "src" / "storage" / "tool-output" / "s_truncate" / "demo_tool-call_demo.log"
+        assert full_output_path.exists()
+        assert full_output_path.read_text(encoding="utf-8") == "x" * (TOOL_OUTPUT_MAX_BYTES + 32)
+    finally:
+        compaction_module.PROJECT_ROOT = original_project_root
 
 
 def test_tool_executor_should_use_vendor_specific_output_limit(tmp_path, monkeypatch):
@@ -263,3 +269,116 @@ def test_tool_logging_hook_should_log_agent_model_args_and_result(caplog):
     assert "tool.request tool=demo_tool args={\"value\":\"ok\"}" in caplog.text
     assert "tool.response tool=demo_tool result=result:ok" in caplog.text
     assert any(record.agent == "build" and record.model == "demo-model" for record in caplog.records)
+
+
+def test_tool_logging_hook_should_log_truncation_file_path(caplog, tmp_path):
+    from agent.runtime import compaction as compaction_module
+
+    original_project_root = compaction_module.PROJECT_ROOT
+    compaction_module.PROJECT_ROOT = tmp_path
+    executor = ToolExecutor({"demo_tool": lambda: "x" * (TOOL_OUTPUT_MAX_BYTES + 32)})
+    try:
+        with caplog.at_level("INFO"):
+            executor.execute(
+                "demo_tool",
+                "{}",
+                session_id="s_truncated_log",
+                tool_call_id="call_truncated_log",
+                round_no=1,
+                hooks=[ToolLoggingHook()],
+                agent="build",
+                model="demo-model",
+                task_available=False,
+                workdir=str(tmp_path),
+            )
+
+        expected_path = tmp_path / "src" / "storage" / "tool-output" / "s_truncated_log" / "demo_tool-call_truncated_log.log"
+        assert f"tool.output_truncated tool=demo_tool session_id=s_truncated_log tool_call_id=call_truncated_log" in caplog.text
+        assert f"full_output_path={expected_path}" in caplog.text
+        assert "write_error=" in caplog.text
+    finally:
+        compaction_module.PROJECT_ROOT = original_project_root
+
+
+def test_tool_logging_hook_should_not_log_truncation_when_output_not_truncated(caplog):
+    executor = ToolExecutor({"demo_tool": lambda: "short output"})
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "demo_tool",
+            "{}",
+            session_id="s_not_truncated_log",
+            tool_call_id="call_not_truncated_log",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert "tool.output_truncated" not in caplog.text
+
+
+def test_tool_logging_hook_should_log_truncation_write_error(caplog, monkeypatch, tmp_path):
+    from agent.runtime import compaction as compaction_module
+
+    original_project_root = compaction_module.PROJECT_ROOT
+    compaction_module.PROJECT_ROOT = tmp_path
+    executor = ToolExecutor({"demo_tool": lambda: "x" * (TOOL_OUTPUT_MAX_BYTES + 32)})
+
+    def _raise_write_error(self, data, encoding=None, errors=None, newline=None):
+        del data, encoding, errors, newline
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pathlib.Path.write_text", _raise_write_error)
+
+    try:
+        with caplog.at_level("INFO"):
+            executor.execute(
+                "demo_tool",
+                "{}",
+                session_id="s_truncated_error_log",
+                tool_call_id="call_truncated_error_log",
+                round_no=1,
+                hooks=[ToolLoggingHook()],
+                agent="build",
+                model="demo-model",
+                task_available=False,
+                workdir=str(tmp_path),
+            )
+
+        assert "tool.output_truncated tool=demo_tool session_id=s_truncated_error_log tool_call_id=call_truncated_error_log" in caplog.text
+        assert "write_error=OSError: disk full" in caplog.text
+    finally:
+        compaction_module.PROJECT_ROOT = original_project_root
+
+
+def test_tool_executor_should_write_full_file_to_project_root_when_cwd_differs(tmp_path):
+    from agent.runtime import compaction as compaction_module
+
+    project_root = tmp_path / "project-root"
+    external_workdir = tmp_path / "outside"
+    project_root.mkdir()
+    external_workdir.mkdir()
+    original_project_root = compaction_module.PROJECT_ROOT
+    compaction_module.PROJECT_ROOT = project_root
+    executor = ToolExecutor({"demo_tool": lambda: "x" * (TOOL_OUTPUT_MAX_BYTES + 32)})
+
+    try:
+        result = executor.execute(
+            "demo_tool",
+            "{}",
+            session_id="s_fixed_root",
+            tool_call_id="call_fixed_root",
+            round_no=1,
+            hooks=[],
+            task_available=False,
+            workdir=str(external_workdir),
+        )
+
+        output_path = project_root / "src" / "storage" / "tool-output" / "s_fixed_root" / "demo_tool-call_fixed_root.log"
+        assert result["metadata"]["full_output_path"] == str(output_path.resolve())
+        assert output_path.exists()
+        assert not (external_workdir / "src" / "storage" / "tool-output").exists()
+    finally:
+        compaction_module.PROJECT_ROOT = original_project_root
