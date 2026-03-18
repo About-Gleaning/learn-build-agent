@@ -54,10 +54,13 @@ def _line_count(text: str) -> int:
 
 def _build_tool_output_path(workdir: Path, session_id: str, tool_name: str, tool_call_id: str) -> Path:
     del workdir
+    workspace_segment = _safe_name(get_workspace().workspace_id, "workspace")
     session_segment = _safe_name(session_id, "default_session")
     tool_segment = _safe_name(tool_name, "tool")
     call_segment = _safe_name(tool_call_id, "call")
-    return (get_workspace().tool_output_dir / session_segment / f"{tool_segment}-{call_segment}.log").resolve()
+    return (
+        get_workspace().tool_output_root / workspace_segment / session_segment / f"{tool_segment}-{call_segment}.log"
+    ).resolve()
 
 
 def _build_preview_text(text: str, *, max_lines: int, max_bytes: int) -> str:

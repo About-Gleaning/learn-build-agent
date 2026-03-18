@@ -17,7 +17,7 @@ from agent.runtime.workspace import configure_workspace, get_workspace
 def test_build_plan_placeholder_path_should_be_absolute():
     path = build_plan_placeholder_path("s:1/test")
     assert path.is_absolute()
-    assert path.name == "s_1_test.md"
+    assert path == get_workspace().plan_path
 
 
 def test_run_plan_enter_should_return_confirmation_required_when_unconfirmed():
@@ -108,7 +108,8 @@ def test_validate_readonly_bash_should_block_non_whitelisted_pipe_command():
 
 def test_is_allowed_plan_write_path():
     configure_workspace()
-    assert is_allowed_plan_write_path(str(get_workspace().plan_dir / "a.md"))
+    assert is_allowed_plan_write_path(str(get_workspace().plan_path))
+    assert not is_allowed_plan_write_path(str(get_workspace().plan_path.parent / "other.md"))
     assert not is_allowed_plan_write_path("src/main.py")
 
 
@@ -162,14 +163,14 @@ def test_run_edit_should_return_text_not_found_failure(monkeypatch, tmp_path):
     assert "Text not found" in result["output"]
 
 
-def test_build_plan_placeholder_path_should_anchor_to_workspace_plan_dir(tmp_path):
+def test_build_plan_placeholder_path_should_anchor_to_workspace_plan_path(tmp_path):
     project_root = tmp_path / "project-root"
     project_root.mkdir()
     configure_workspace(project_root)
 
     path = build_plan_placeholder_path("session:plan")
 
-    assert path == (get_workspace().plan_dir / "session_plan.md").resolve()
+    assert path == get_workspace().plan_path.resolve()
 
 def test_todo_manager_should_default_to_workspace_runtime_home(tmp_path):
     project_root = tmp_path / "project-root"
@@ -178,4 +179,4 @@ def test_todo_manager_should_default_to_workspace_runtime_home(tmp_path):
 
     manager = TodoManager()
 
-    assert manager.storage_dir == get_workspace().todo_dir
+    assert manager.storage_dir == get_workspace().todo_path

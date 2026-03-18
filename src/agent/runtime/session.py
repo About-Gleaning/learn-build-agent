@@ -209,18 +209,65 @@ def _build_environment_appendix(*, agent: str, model: str, provider: str, vendor
     return "\n".join(lines)
 
 
-def build_system_prompt(*, agent: str, model: str, provider: str, vendor: str) -> str:
+def _apply_prompt_context(base_prompt: str, *, agent: str, session_id: str | None = None) -> str:
+    if agent.strip().lower() != "plan":
+        return base_prompt
+    plan_path = str(build_plan_placeholder_path(session_id or "default"))
+    return base_prompt.replace("{plan_path}", plan_path)
+
+
+def _call_build_system_prompt(
+    *,
+    agent: str,
+    model: str,
+    provider: str,
+    vendor: str,
+    session_id: str | None = None,
+) -> str:
+    prompt_kwargs = {
+        "agent": agent,
+        "model": model,
+        "provider": provider,
+        "vendor": vendor,
+    }
+    if "session_id" in inspect.signature(build_system_prompt).parameters:
+        prompt_kwargs["session_id"] = session_id
+    return build_system_prompt(**prompt_kwargs)
+
+
+def build_system_prompt(
+    *,
+    agent: str,
+    model: str,
+    provider: str,
+    vendor: str,
+    session_id: str | None = None,
+) -> str:
     base_prompt = _read_prompt_file(_resolve_prompt_path(agent, vendor))
+    rendered_prompt = _apply_prompt_context(base_prompt, agent=agent, session_id=session_id)
     parts = [
-        base_prompt,
+        rendered_prompt,
         _read_local_agent_appendix(),
         _build_environment_appendix(agent=agent, model=model, provider=provider, vendor=vendor),
     ]
     return "\n\n".join(part for part in parts if part)
 
 
-def _get_system_prompt_for_mode(mode: MainAgentMode, *, model: str, provider: str, vendor: str) -> str:
-    return build_system_prompt(agent=mode, model=model, provider=provider, vendor=vendor)
+def _get_system_prompt_for_mode(
+    mode: MainAgentMode,
+    *,
+    model: str,
+    provider: str,
+    vendor: str,
+    session_id: str | None = None,
+) -> str:
+    return _call_build_system_prompt(
+        agent=mode,
+        model=model,
+        provider=provider,
+        vendor=vendor,
+        session_id=session_id,
+    )
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
@@ -407,15 +454,17 @@ def _bootstrap_session(
             model=initial_runtime.model,
             provider=initial_runtime.provider,
             vendor=initial_runtime.vendor,
+            session_id=active_session_id,
         )
         if mode_enabled
         else (
             system_prompt
-            or build_system_prompt(
+            or _call_build_system_prompt(
                 agent=runtime_agent or "build",
                 model=(llm_config.model if llm_config else ""),
                 provider=(llm_config.provider if llm_config else ""),
                 vendor=(llm_config.vendor if llm_config else ""),
+                session_id=active_session_id,
             )
         )
     )
@@ -979,11 +1028,12 @@ def subagent_loop(
         user_input=prompt,
         session_id=session_id,
         tools=build_base_tools(registry.list_briefs()),
-        system_prompt=build_system_prompt(
+        system_prompt=_call_build_system_prompt(
             agent=agent_name,
             model=(llm_config.model if llm_config else ""),
             provider=(llm_config.provider if llm_config else ""),
             vendor=(llm_config.vendor if llm_config else ""),
+            session_id=session_id,
         ),
         runtime_agent=agent_name,
         todo_tool_names={"todo_write", "todo_read"},
@@ -1102,6 +1152,7 @@ def _run_session_stream(
                     model=current_runtime.model,
                     provider=current_runtime.provider,
                     vendor=current_runtime.vendor,
+                    session_id=active_session_id,
                 ),
                 active_session_id,
             )
@@ -1253,11 +1304,12 @@ def _run_session_stream(
                         task_request.prompt,
                         session_id=active_session_id,
                         tools=build_base_tools(registry.list_briefs()),
-                        system_prompt=build_system_prompt(
+                        system_prompt=_call_build_system_prompt(
                             agent=task_request.agent,
                             model=current_runtime.model,
                             provider=current_runtime.provider,
                             vendor=current_runtime.vendor,
+                            session_id=active_session_id,
                         ),
                         runtime_agent=task_request.agent,
                         todo_tool_names={"todo_write", "todo_read"},
@@ -1463,7 +1515,7 @@ def _build_tool_handlers(
     def _run_mode_aware_write(path: str, content: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
             return build_tool_failure(
-                f"Error: plan 模式下仅允许写入 {get_workspace().plan_dir} 目录。",
+                f"Error: plan 模式下仅允许写入 {get_workspace().plan_path} 文件。",
                 error_code="plan_write_forbidden",
             )
         return run_write(path, content)
@@ -1471,7 +1523,7 @@ def _build_tool_handlers(
     def _run_mode_aware_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
             return build_tool_failure(
-                f"Error: plan 模式下仅允许编辑 {get_workspace().plan_dir} 目录。",
+                f"Error: plan 模式下仅允许编辑 {get_workspace().plan_path} 文件。",
                 error_code="plan_edit_forbidden",
             )
         return run_edit(path, old_text, new_text)
@@ -1582,6 +1634,7 @@ def run_session(
                     model=current_runtime.model,
                     provider=current_runtime.provider,
                     vendor=current_runtime.vendor,
+                    session_id=active_session_id,
                 ),
                 active_session_id,
             )

@@ -29,10 +29,10 @@ def build_tool_failure(output: str, *, error_code: str, **metadata: Any) -> dict
 
 def safe_path(path_str: str) -> Path:
     workspace_root = get_workspace().root
-    plan_root = get_workspace().plan_dir
+    plan_path = get_workspace().plan_path
     raw_path = Path(path_str).expanduser()
     path = raw_path.resolve() if raw_path.is_absolute() else (workspace_root / path_str).resolve()
-    if not path.is_relative_to(workspace_root) and not path.is_relative_to(plan_root):
+    if not path.is_relative_to(workspace_root) and path != plan_path:
         raise ValueError(f"Path escapes workspace: {path_str}")
     return path
 
@@ -55,7 +55,7 @@ def is_allowed_plan_write_path(path: str) -> bool:
         target = safe_path(path)
     except Exception:
         return False
-    return target.is_relative_to(get_workspace().plan_dir)
+    return target == get_workspace().plan_path
 
 
 def run_write(path: str, content: str) -> dict[str, Any]:
@@ -82,9 +82,8 @@ def run_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
 
 
 def build_plan_placeholder_path(session_id: str) -> Path:
-    safe_id = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in session_id).strip("._")
-    normalized = safe_id or "default_session"
-    return (get_workspace().plan_dir / f"{normalized}.md").resolve()
+    del session_id
+    return get_workspace().plan_path
 
 
 def run_plan_enter(

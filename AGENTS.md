@@ -36,8 +36,8 @@
 - 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
-- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/<workspace_hash>/plan/`，plan 模式下仅允许写入该目录。
-- 会话、todo、tool-output 等运行态数据统一按工作区隔离写入 `~/.my-agent/workspaces/<workspace_hash>/`，禁止继续写回仓库内 `src/storage/*`。
+- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/plan/<workspace_id>.md`，plan 模式下仅允许写入该文件。
+- 会话运行态数据写入 `~/.my-agent/workspaces/<workspace_id>/sessions/`；todo、tool-output 等共享运行态数据按类型聚合写入 `~/.my-agent/workspaces/todo/<workspace_id>.json` 与 `~/.my-agent/workspaces/tool-output/<workspace_id>/`，禁止继续写回仓库内 `src/storage/*`。
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
 - Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
@@ -110,3 +110,4 @@
 - 2026-03-18：新增正式 CLI 入口 `agent.cli` 与 `pyproject.toml`，支持在任意目录通过 `my-agent` / `my-agent web` 启动并将当前目录绑定为工作区。
 - 2026-03-18：新增 `runtime/workspace.py`，统一工作区根目录、运行态目录、`AGENTS.md` 发现逻辑与 Web/CLI 启动模式。
 - 2026-03-18：将会话、todo、plan 占位文件、tool-output 与日志迁移为按工作区隔离的 `~/.my-agent/` 目录结构。
+- 2026-03-18：将 `plan` 与 `todo` 调整为按类型聚合的工作区单文件，并将 `tool-output` 调整为按类型聚合的工作区子目录，统一运行态路径语义。

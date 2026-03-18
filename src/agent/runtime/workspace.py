@@ -14,12 +14,13 @@ class WorkspaceRuntime:
     root: Path
     launch_mode: str
     runtime_home: Path
+    workspaces_root: Path
     workspace_id: str
     workspace_home: Path
     sessions_dir: Path
-    todo_dir: Path
-    plan_dir: Path
-    tool_output_dir: Path
+    todo_path: Path
+    plan_path: Path
+    tool_output_root: Path
     logs_dir: Path
 
     @property
@@ -52,17 +53,19 @@ def _build_workspace_id(root: Path) -> str:
 def _build_workspace_runtime(root: Path, *, launch_mode: str) -> WorkspaceRuntime:
     workspace_id = _build_workspace_id(root)
     runtime_home = DEFAULT_RUNTIME_HOME.resolve()
-    workspace_home = (runtime_home / "workspaces" / workspace_id).resolve()
+    workspaces_root = (runtime_home / "workspaces").resolve()
+    workspace_home = (workspaces_root / workspace_id).resolve()
     return WorkspaceRuntime(
         root=root,
         launch_mode=launch_mode,
         runtime_home=runtime_home,
+        workspaces_root=workspaces_root,
         workspace_id=workspace_id,
         workspace_home=workspace_home,
         sessions_dir=(workspace_home / "sessions").resolve(),
-        todo_dir=(workspace_home / "todo").resolve(),
-        plan_dir=(workspace_home / "plan").resolve(),
-        tool_output_dir=(workspace_home / "tool-output").resolve(),
+        todo_path=(workspaces_root / "todo" / f"{workspace_id}.json").resolve(),
+        plan_path=(workspaces_root / "plan" / f"{workspace_id}.md").resolve(),
+        tool_output_root=(workspaces_root / "tool-output").resolve(),
         logs_dir=(runtime_home / "logs").resolve(),
     )
 

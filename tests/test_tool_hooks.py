@@ -167,7 +167,12 @@ def test_tool_executor_should_truncate_long_output_and_write_full_file(tmp_path)
     assert metadata["truncated"] is True
     assert "full_output_path" in metadata
     assert "bash + rg" in result["output"]
-    full_output_path = get_workspace().tool_output_dir / "s_truncate" / "demo_tool-call_demo.log"
+    full_output_path = (
+        get_workspace().tool_output_root
+        / get_workspace().workspace_id
+        / "s_truncate"
+        / "demo_tool-call_demo.log"
+    )
     assert full_output_path.exists()
     assert full_output_path.read_text(encoding="utf-8") == "x" * (TOOL_OUTPUT_MAX_BYTES + 32)
 
@@ -244,7 +249,7 @@ def test_tool_executor_should_allow_custom_output_processor_override(tmp_path):
 
     assert result["output"] == "custom-output"
     assert result["metadata"]["truncated"] == "custom"
-    assert not get_workspace().tool_output_dir.exists()
+    assert not (get_workspace().tool_output_root / get_workspace().workspace_id).exists()
 
 
 def test_tool_logging_hook_should_log_agent_model_args_and_result(caplog):
@@ -285,7 +290,12 @@ def test_tool_logging_hook_should_log_truncation_file_path(caplog, tmp_path):
             workdir=str(tmp_path),
         )
 
-    expected_path = get_workspace().tool_output_dir / "s_truncated_log" / "demo_tool-call_truncated_log.log"
+    expected_path = (
+        get_workspace().tool_output_root
+        / get_workspace().workspace_id
+        / "s_truncated_log"
+        / "demo_tool-call_truncated_log.log"
+    )
     assert f"tool.output_truncated tool=demo_tool session_id=s_truncated_log tool_call_id=call_truncated_log" in caplog.text
     assert f"full_output_path={expected_path}" in caplog.text
     assert "write_error=" in caplog.text
@@ -356,7 +366,12 @@ def test_tool_executor_should_write_full_file_to_workspace_runtime_when_cwd_diff
         workdir=str(external_workdir),
     )
 
-    output_path = get_workspace().tool_output_dir / "s_fixed_root" / "demo_tool-call_fixed_root.log"
+    output_path = (
+        get_workspace().tool_output_root
+        / get_workspace().workspace_id
+        / "s_fixed_root"
+        / "demo_tool-call_fixed_root.log"
+    )
     assert result["metadata"]["full_output_path"] == str(output_path.resolve())
     assert output_path.exists()
     assert not (external_workdir / "src" / "storage" / "tool-output").exists()

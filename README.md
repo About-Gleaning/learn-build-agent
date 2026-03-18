@@ -81,10 +81,10 @@ pnpm dev
 - 工作区内的 `AGENTS.md` 会自动追加到系统提示词中。
 - 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
 - 运行态数据默认落到 `~/.my-agent/`：
-  - 会话历史：`~/.my-agent/workspaces/<workspace_hash>/sessions/`
-  - todo：`~/.my-agent/workspaces/<workspace_hash>/todo/`
-  - plan 占位文件：`~/.my-agent/workspaces/<workspace_hash>/plan/`
-  - 长输出落盘：`~/.my-agent/workspaces/<workspace_hash>/tool-output/`
+  - 会话历史：`~/.my-agent/workspaces/<workspace_id>/sessions/`
+  - todo：`~/.my-agent/workspaces/todo/<workspace_id>.json`
+  - plan 占位文件：`~/.my-agent/workspaces/plan/<workspace_id>.md`
+  - 长输出落盘：`~/.my-agent/workspaces/tool-output/<workspace_id>/`
   - 日志：`~/.my-agent/logs/`
 - 如需覆盖默认运行态目录，可设置环境变量 `MY_AGENT_HOME`。
 
@@ -187,7 +187,7 @@ pnpm dev
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
 - `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。
-- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/<workspace_hash>/plan/`；plan 模式下仅允许写入该目录。
+- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/plan/<workspace_id>.md`；plan 模式下仅允许写入该文件。
 
 ## 变更记录
 
@@ -205,3 +205,4 @@ pnpm dev
 - 2026-03-18：新增正式 CLI 入口 `agent.cli` 与 `pyproject.toml`，支持在任意目录通过 `my-agent` / `my-agent web` 启动并将当前目录绑定为工作区。
 - 2026-03-18：新增 `runtime/workspace.py`，统一管理工作区根目录、运行态目录与 `AGENTS.md` 发现逻辑。
 - 2026-03-18：将会话、todo、plan 占位文件、tool-output 与日志切换为按工作区隔离的 `~/.my-agent/` 目录结构。
+- 2026-03-18：将 `plan` 与 `todo` 收敛为按类型聚合的工作区单文件，并将 `tool-output` 收敛为按类型聚合的工作区子目录，统一路径形态为 `workspaces/<type>/<workspace_id>...`。

@@ -2,7 +2,7 @@ import agent.runtime.session as session_module
 import agent.runtime.compaction as compaction_module
 from agent.config.settings import clear_runtime_settings_cache, get_project_runtime_settings, resolve_compaction_settings, resolve_llm_config
 from agent.runtime.workspace import configure_workspace, get_workspace
-from agent.tools.handlers import run_read
+from agent.tools.handlers import build_plan_placeholder_path, run_read
 from agent.tools.specs import build_base_tools, build_task_tool
 from agent.runtime.session import (
     build_system_prompt,
@@ -256,7 +256,7 @@ def test_mode_switch_cancel_should_be_program_controlled(monkeypatch):
     assert session_module.get_pending_mode_switch("s_plan_cancel") is None
 
 
-def test_plan_mode_write_should_be_limited_to_src_plan(monkeypatch):
+def test_plan_mode_write_should_be_limited_to_workspace_plan_file(monkeypatch):
     call_state = {"count": 0}
 
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
@@ -276,7 +276,7 @@ def test_plan_mode_write_should_be_limited_to_src_plan(monkeypatch):
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     result = run_session("在 plan 模式写文件", session_id="s_plan_write", mode="plan")
-    assert str(get_workspace().plan_dir) in get_message_text(result)
+    assert str(get_workspace().plan_path) in get_message_text(result)
 
 
 def test_plan_mode_bash_should_block_redirection(monkeypatch):
@@ -685,7 +685,12 @@ def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch,
     text = get_message_text(result)
     assert "Task 工具委托 explore agent" in text
     assert "read_file 配合 offset/limit" in text
-    assert str(get_workspace().tool_output_dir / "s_long_task" / "webfetch-call_webfetch_long.log") in text
+    assert str(
+        get_workspace().tool_output_root
+        / get_workspace().workspace_id
+        / "s_long_task"
+        / "webfetch-call_webfetch_long.log"
+    ) in text
 
 
 def test_subagent_loop_should_truncate_tool_output_without_task_guidance(monkeypatch, tmp_path):
@@ -766,7 +771,10 @@ def test_run_session_should_store_truncation_metadata(monkeypatch, tmp_path):
     assert get_message_text(result) == "ok"
     assert seen_metadata["truncated"] is True
     assert str(seen_metadata["full_output_path"]) == str(
-        get_workspace().tool_output_dir / "s_long_metadata" / "webfetch-call_webfetch_metadata.log"
+        get_workspace().tool_output_root
+        / get_workspace().workspace_id
+        / "s_long_metadata"
+        / "webfetch-call_webfetch_metadata.log"
     )
 
 
@@ -1163,12 +1171,21 @@ def test_build_system_prompt_should_append_agents_md(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
     (tmp_path / "AGENTS.md").write_text("请始终先写测试。", encoding="utf-8")
+    configure_workspace(tmp_path)
 
-    prompt = build_system_prompt(agent="plan", model="qwen3-max", provider="qwen", vendor="qwen")
+    prompt = build_system_prompt(
+        agent="plan",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id="s_plan_prompt",
+    )
 
     assert "请始终先写测试。" in prompt
     assert "以下是当前工作目录下的 AGENTS.md 内容" in prompt
     assert f"- workdir: {tmp_path}" in prompt
+    assert str(get_workspace().plan_path) in prompt
+    assert "{plan_path}" not in prompt
 
 
 def test_build_system_prompt_should_include_git_environment(monkeypatch):
@@ -1182,6 +1199,24 @@ def test_build_system_prompt_should_include_git_environment(monkeypatch):
     assert "当前可用 skills catalog" not in prompt
     assert "{skills_catalog}" not in prompt
     assert "`load_skill`" in prompt
+
+
+def test_build_system_prompt_should_share_plan_path_source_with_plan_enter(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    configure_workspace(tmp_path)
+
+    prompt = build_system_prompt(
+        agent="plan",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id="s_plan_source",
+    )
+    expected_path = str(build_plan_placeholder_path("s_plan_source"))
+
+    assert expected_path == str(get_workspace().plan_path)
+    assert expected_path in prompt
 
 
 def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch):
