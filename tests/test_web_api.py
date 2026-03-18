@@ -168,6 +168,9 @@ def test_runtime_options_should_return_backend_config():
     assert any(item["name"] == "build" for item in payload["agents"])
     assert any(item["name"] == "qwen" for item in payload["providers"])
     assert any(item["vendor"] == "qwen" for item in payload["providers"])
+    assert payload["workspace_root"]
+    assert payload["workspace_name"]
+    assert payload["launch_mode"] == "web"
 
 
 def test_message_to_vo_should_normalize_missing_optional_fields():

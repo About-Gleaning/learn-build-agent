@@ -1,6 +1,7 @@
 import agent.runtime.session as session_module
 import agent.runtime.compaction as compaction_module
 from agent.config.settings import clear_runtime_settings_cache, get_project_runtime_settings, resolve_compaction_settings, resolve_llm_config
+from agent.runtime.workspace import configure_workspace, get_workspace
 from agent.tools.handlers import run_read
 from agent.tools.specs import build_base_tools, build_task_tool
 from agent.runtime.session import (
@@ -275,7 +276,7 @@ def test_plan_mode_write_should_be_limited_to_src_plan(monkeypatch):
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     result = run_session("在 plan 模式写文件", session_id="s_plan_write", mode="plan")
-    assert "仅允许写入 src/storage/plan" in get_message_text(result)
+    assert str(get_workspace().plan_dir) in get_message_text(result)
 
 
 def test_plan_mode_bash_should_block_redirection(monkeypatch):
@@ -648,7 +649,7 @@ def test_run_session_should_execute_websearch_tool(monkeypatch):
 
 
 def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch, tmp_path):
-    monkeypatch.setattr("agent.runtime.compaction.PROJECT_ROOT", tmp_path)
+    configure_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
     call_state = {"count": 0}
     long_output = "\n".join(f"line {i}" for i in range(2505))
@@ -684,11 +685,11 @@ def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch,
     text = get_message_text(result)
     assert "Task 工具委托 explore agent" in text
     assert "read_file 配合 offset/limit" in text
-    assert "src/storage/tool-output" in text
+    assert str(get_workspace().tool_output_dir / "s_long_task" / "webfetch-call_webfetch_long.log") in text
 
 
 def test_subagent_loop_should_truncate_tool_output_without_task_guidance(monkeypatch, tmp_path):
-    monkeypatch.setattr("agent.runtime.compaction.PROJECT_ROOT", tmp_path)
+    configure_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
     call_state = {"count": 0}
     long_output = "\n".join(f"line {i}" for i in range(2505))
@@ -727,7 +728,7 @@ def test_subagent_loop_should_truncate_tool_output_without_task_guidance(monkeyp
 
 
 def test_run_session_should_store_truncation_metadata(monkeypatch, tmp_path):
-    monkeypatch.setattr("agent.runtime.compaction.PROJECT_ROOT", tmp_path)
+    configure_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
     call_state = {"count": 0}
     long_output = "\n".join(f"line {i}" for i in range(2505))
@@ -764,13 +765,15 @@ def test_run_session_should_store_truncation_metadata(monkeypatch, tmp_path):
 
     assert get_message_text(result) == "ok"
     assert seen_metadata["truncated"] is True
-    assert str(seen_metadata["full_output_path"]).endswith("src/storage/tool-output/s_long_metadata/webfetch-call_webfetch_metadata.log")
+    assert str(seen_metadata["full_output_path"]) == str(
+        get_workspace().tool_output_dir / "s_long_metadata" / "webfetch-call_webfetch_metadata.log"
+    )
 
 
 def test_run_read_should_support_offset_and_limit(monkeypatch, tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
-    monkeypatch.setattr("agent.tools.handlers.WORKDIR", tmp_path)
+    configure_workspace(tmp_path)
     result = run_read("sample.txt", limit=2, offset=1)
 
     assert result["metadata"]["status"] == "completed"

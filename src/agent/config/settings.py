@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 
+from ..runtime.workspace import get_workspace
+
 load_dotenv()
 
 MainAgentMode = Literal["build", "plan"]
@@ -387,6 +389,7 @@ def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None) -
 
 def build_runtime_options() -> dict[str, Any]:
     settings = get_runtime_settings()
+    workspace = get_workspace()
     providers = [
         {
             "name": provider.name,
@@ -408,4 +411,8 @@ def build_runtime_options() -> dict[str, Any]:
         "default_agent": "build",
         "agents": agents,
         "providers": providers,
+        "workspace_root": str(workspace.root),
+        "workspace_name": workspace.workspace_name,
+        "has_agents_md": workspace.has_agents_md,
+        "launch_mode": workspace.launch_mode,
     }

@@ -5,19 +5,21 @@ from pathlib import Path
 from typing import Any
 
 from ..core.context import get_session_id
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from ..runtime.workspace import get_workspace
 
 
 class TodoManager:
     VALID_STATUSES = ["pending", "in_progress", "completed", "cancelled"]
     VALID_PRIORITIES = ["high", "medium", "low"]
 
-    def __init__(self, storage_dir: str = "src/storage/todo"):
+    def __init__(self, storage_dir: str | Path | None = None):
         self.todos = []
+        if storage_dir is None:
+            self.storage_dir = get_workspace().todo_dir
+            return
         storage_path = Path(storage_dir)
         if not storage_path.is_absolute():
-            storage_path = PROJECT_ROOT / storage_path
+            storage_path = (get_workspace().workspace_home / storage_path).resolve()
         self.storage_dir = storage_path.resolve()
 
     def _safe_session_id(self, session_id: str) -> str:

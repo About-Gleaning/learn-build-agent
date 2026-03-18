@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-main-agent"
+version = "0.1.0"
+description = "在当前目录启动的编码代理"
+requires-python = ">=3.11"
+dependencies = [
+  "openai==1.108.1",
+  "python-dotenv==1.1.1",
+  "pytest==8.4.2",
+  "fastapi==0.115.14",
+  "uvicorn==0.35.0",
+  "exa-py==1.16.1",
+]
+
+[project.scripts]
+my-agent = "agent.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent*"]
+
+[tool.setuptools.package-data]
+agent = ["runtime/prompts/*.txt", "tools/*.txt", "config/*.json"]

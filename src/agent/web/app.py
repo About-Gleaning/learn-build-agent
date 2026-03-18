@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from ..config.logging_setup import init_logging
 from ..config.settings import build_runtime_options
 from ..runtime import session as session_runtime
+from ..runtime.workspace import configure_workspace, get_workspace
 from .schemas import (
     ChatStreamReq,
     ModeSwitchActionReq,
@@ -71,7 +72,8 @@ def _stream_mode_switch(session_id: str, req: ModeSwitchActionReq) -> Generator[
 
 
 def create_app() -> FastAPI:
-    init_logging()
+    configure_workspace(get_workspace().root, launch_mode="web")
+    init_logging(get_workspace().logs_dir)
     app = FastAPI(title="my-main-agent web api", version="0.1.0")
 
     app.add_middleware(

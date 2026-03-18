@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from ..runtime.workspace import get_workspace
 from .settings import LOG_LEVEL
 
 _LOGGER_INITIALIZED = False
@@ -32,7 +33,7 @@ class RuntimeContextFilter(logging.Filter):
 
 
 def get_daily_log_path(base_dir: Path | None = None) -> Path:
-    root_dir = base_dir or (Path.cwd() / "logs")
+    root_dir = base_dir or get_workspace().logs_dir
     file_name = f"app-{datetime.now().strftime('%Y-%m-%d')}.log"
     return root_dir / file_name
 

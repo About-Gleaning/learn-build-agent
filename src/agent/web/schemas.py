@@ -120,3 +120,7 @@ class RuntimeOptionsVO(BaseModel):
     default_agent: Literal["build", "plan"]
     agents: list[RuntimeAgentVO]
     providers: list[RuntimeProviderVO]
+    workspace_root: str
+    workspace_name: str
+    has_agents_md: bool
+    launch_mode: str

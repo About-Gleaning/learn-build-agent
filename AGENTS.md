@@ -8,21 +8,22 @@
 
 ## 项目结构与模块分工
 
-- `src/main.py`：CLI 示例入口。
-- `src/web_main.py`：FastAPI 启动入口（`uvicorn src.web_main:app`）。
+- `src/main.py`：兼容 CLI 入口，内部转调 `agent.cli`。
+- `src/web_main.py`：FastAPI 启动入口（兼容 `uvicorn src.web_main:app`）。
+- `src/agent/cli.py`：正式 CLI 入口，支持 `my-agent` / `my-agent web`。
 - `src/agent/runtime/agents.py`：Agent 元信息注册与 subagent 管理。
 - `src/agent/runtime/session.py`：会话编排（消息循环、模式切换、工具分发）。
 - `src/agent/runtime/session_memory.py`：会话记忆与状态持久化辅助。
 - `src/agent/runtime/tool_executor.py`：工具执行器与 Tool Hook 分发。
 - `src/agent/runtime/compaction.py`：上下文压缩逻辑。
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要组装。
+- `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与启动模式解析。
 - `src/agent/adapters/llm/client.py`：LLM 适配与 LLM Hook。
 - `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
 - `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
 - `src/agent/tools/`：工具实现（`handlers.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
 - `src/agent/tools/task.txt`：`task` 工具描述模板，使用 `{agents}` 占位注入 subagent 列表。
-- `src/storage/plan/`：Plan 模式占位文件固定存储目录。
 - `src/agent/core/`：消息模型、上下文与通用 HookDispatcher。
 - `src/agent/web/`：Web API 与请求/响应模型。
 - `src/agent/web/serializers.py`：`Message -> MessageVO` 与 SSE payload 序列化。
@@ -34,7 +35,9 @@
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
 - 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
-- plan 模式占位文件与允许写入目录统一固定在 `src/storage/plan`，禁止继续写入 `src/plan`。
+- 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
+- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/<workspace_hash>/plan/`，plan 模式下仅允许写入该目录。
+- 会话、todo、tool-output 等运行态数据统一按工作区隔离写入 `~/.my-agent/workspaces/<workspace_hash>/`，禁止继续写回仓库内 `src/storage/*`。
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
 - Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
@@ -47,7 +50,7 @@
 - Web 序列化逻辑统一收敛在 `web/serializers.py`，禁止在 `web/app.py` 中继续大段手工映射 `MessageVO` 或 SSE payload。
 - 日志必须通过程序显式传递 `agent`、`model` 等上下文字段，禁止依赖 LLM 生成或推断日志元信息。
 - 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
-- 日志文件统一写入 `logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容。
+- 日志文件统一写入 `~/.my-agent/logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容；如配置 `MY_AGENT_HOME`，则写入对应目录。
 - `build` 主模式的提示词文件必须按厂商 `vendor` 选择，命名统一为 `build.<vendor>.txt`；厂商归属在 `src/agent/config/llm_runtime.json` 中显式声明，缺省时回退 `build.default.txt`。
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
 - `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
@@ -56,7 +59,10 @@
 
 ## 开发与验证命令
 
-- `python3 src/main.py`：运行 CLI 示例流程。
+- `pip install -e .`：安装 `my-agent` 命令。
+- `my-agent`：在当前目录启动 CLI。
+- `my-agent web --host 127.0.0.1 --port 8000`：在当前目录启动 Web 后端。
+- `python3 src/main.py`：兼容 CLI 入口。
 - `pytest -q`：执行测试。
 - `PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`：语法检查。
 - `python3 -m venv .venv && source .venv/bin/activate`：创建并激活虚拟环境。
@@ -101,4 +107,6 @@
 - 2026-03-18：完成第三阶段工具层重构，统一文件工具与 plan 模式拦截的结构化返回，补充 `handlers` 成功/失败结果与错误码回归测试，并保持 tool 输出文本兼容原行为。
 - 2026-03-18：完成第四阶段 Web 重构，将 `Message -> VO` 与 SSE 事件序列化抽离到 `web/serializers.py`，降低 `app.py` 中的手工字段映射与重复流式封装逻辑。
 - 2026-03-18：完成第五阶段收口整理，清理 `session.py` 中的未使用局部变量与 `handlers.py` 的无用日志对象，并为工具结果构造与 Web 序列化补充关键注释。
-- 2026-03-18：将 plan 模式占位文件目录统一固定为仓库内 `src/storage/plan`，并同步更新 plan 模式写入约束。
+- 2026-03-18：新增正式 CLI 入口 `agent.cli` 与 `pyproject.toml`，支持在任意目录通过 `my-agent` / `my-agent web` 启动并将当前目录绑定为工作区。
+- 2026-03-18：新增 `runtime/workspace.py`，统一工作区根目录、运行态目录、`AGENTS.md` 发现逻辑与 Web/CLI 启动模式。
+- 2026-03-18：将会话、todo、plan 占位文件、tool-output 与日志迁移为按工作区隔离的 `~/.my-agent/` 目录结构。

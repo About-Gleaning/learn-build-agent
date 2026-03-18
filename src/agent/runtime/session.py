@@ -46,7 +46,7 @@ from ..tools.todo_manager import TodoManager
 from ..tools.webfetch import webfetch
 from ..tools.websearch import websearch
 from .compaction import compact
-from .session_memory import InMemorySessionMemoryStore, SessionMemoryStore
+from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore
 from .stream_display import (
     _append_display_event_part,
     _append_display_text_part,
@@ -59,6 +59,7 @@ from .stream_display import (
     _resolve_agent_kind,
 )
 from .tool_executor import ToolExecutor, ToolHook, ToolResult, get_global_tool_hooks
+from .workspace import get_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ registry.discover()
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 TODO = TodoManager()
-SESSION_MEMORY_STORE: SessionMemoryStore = InMemorySessionMemoryStore(max_messages=24)
+SESSION_MEMORY_STORE: SessionMemoryStore = FileSessionMemoryStore(max_messages=24)
 ModeSwitchAction = Literal["confirm", "cancel"]
 
 
@@ -131,7 +132,7 @@ def _normalize_prompt_key(value: str) -> str:
 
 
 def _get_workdir() -> Path:
-    return Path.cwd()
+    return get_workspace().root
 
 
 def _resolve_build_prompt_path(vendor: str) -> Path:
@@ -1462,7 +1463,7 @@ def _build_tool_handlers(
     def _run_mode_aware_write(path: str, content: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
             return build_tool_failure(
-                "Error: plan 模式下仅允许写入 src/storage/plan 目录。",
+                f"Error: plan 模式下仅允许写入 {get_workspace().plan_dir} 目录。",
                 error_code="plan_write_forbidden",
             )
         return run_write(path, content)
@@ -1470,7 +1471,7 @@ def _build_tool_handlers(
     def _run_mode_aware_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
             return build_tool_failure(
-                "Error: plan 模式下仅允许编辑 src/storage/plan 目录。",
+                f"Error: plan 模式下仅允许编辑 {get_workspace().plan_dir} 目录。",
                 error_code="plan_edit_forbidden",
             )
         return run_edit(path, old_text, new_text)

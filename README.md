@@ -12,9 +12,10 @@
 
 ```text
 src/
-  main.py                         # CLI 轻量入口（示例运行）
-  web_main.py                     # FastAPI 启动入口（uvicorn 使用）
+  main.py                         # 兼容 CLI 入口（转调 agent.cli）
+  web_main.py                     # FastAPI 启动入口（兼容 uvicorn 使用）
   agent/
+    cli.py                        # 正式 CLI 入口（my-agent）
     config/
       settings.py                 # 环境与配置读取
       project_runtime.json        # 项目级运行时配置
@@ -33,6 +34,7 @@ src/
       tool_executor.py            # ToolExecutor 与 Tool Hook 调度
       compaction.py               # 上下文压缩
       stream_display.py           # 流式事件、display_parts 与响应摘要组装
+      workspace.py                # 当前工作区与运行态目录解析
     web/
       app.py                      # Web API（SSE 聊天、历史查询、模式切换确认、清空会话）
       schemas.py                  # Web 层请求/响应模型
@@ -56,9 +58,11 @@ frontend/
 
 1. 准备环境变量：复制 `.env.example` 为 `.env`，并配置所需密钥；如果使用 `websearch`，还要配置 `EXA_API_KEY`。
 2. 安装依赖：`pip install -r requirements.txt`。
-3. 运行 CLI 示例：`python3 src/main.py`。
-4. 启动 Web 后端：`uvicorn src.web_main:app --reload --host 127.0.0.1 --port 8000`。
-5. 启动前端：
+3. 安装当前项目为命令行工具：`pip install -e .`。
+4. 进入任意项目目录后启动 CLI：`my-agent`。
+5. 在当前目录启动 Web 后端：`my-agent web --host 127.0.0.1 --port 8000`。
+6. 兼容入口仍可使用：`python3 src/main.py`。
+7. 启动前端：
 
 ```bash
 cd frontend
@@ -67,8 +71,22 @@ pnpm install
 pnpm dev
 ```
 
-6. 运行测试：`pytest -q`。
-7. 语法检查：`PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`。
+8. 运行测试：`pytest -q`。
+9. 语法检查：`PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`。
+
+## 工作区运行方式
+
+- `my-agent` 与 `my-agent web` 默认都以启动命令时的当前目录作为唯一工作区。
+- 可通过 `--workdir /path/to/project` 显式指定工作区；第一版不会自动上跳到 Git 根目录。
+- 工作区内的 `AGENTS.md` 会自动追加到系统提示词中。
+- 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
+- 运行态数据默认落到 `~/.my-agent/`：
+  - 会话历史：`~/.my-agent/workspaces/<workspace_hash>/sessions/`
+  - todo：`~/.my-agent/workspaces/<workspace_hash>/todo/`
+  - plan 占位文件：`~/.my-agent/workspaces/<workspace_hash>/plan/`
+  - 长输出落盘：`~/.my-agent/workspaces/<workspace_hash>/tool-output/`
+  - 日志：`~/.my-agent/logs/`
+- 如需覆盖默认运行态目录，可设置环境变量 `MY_AGENT_HOME`。
 
 ## 分层职责约束（必须遵守）
 
@@ -169,7 +187,7 @@ pnpm dev
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
 - `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。
-- plan 模式占位文件与允许写入目录统一固定在 `src/storage/plan`，禁止继续写入 `src/plan`。
+- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/<workspace_hash>/plan/`；plan 模式下仅允许写入该目录。
 
 ## 变更记录
 
@@ -184,4 +202,6 @@ pnpm dev
 - 2026-03-18：新增 `runtime/stream_display.py`，统一流式事件、`process_items`、`display_parts` 与响应摘要组装。
 - 2026-03-18：统一文件工具与 plan 模式拦截的结构化返回，工具层默认返回 `output + metadata.status/error_code`。
 - 2026-03-18：新增 `web/serializers.py`，将 `Message -> VO` 与 SSE 事件序列化从 `web/app.py` 中抽离。
-- 2026-03-18：将 plan 模式占位文件目录统一固定为仓库内 `src/storage/plan`，并同步更新 plan 模式写入约束。
+- 2026-03-18：新增正式 CLI 入口 `agent.cli` 与 `pyproject.toml`，支持在任意目录通过 `my-agent` / `my-agent web` 启动并将当前目录绑定为工作区。
+- 2026-03-18：新增 `runtime/workspace.py`，统一管理工作区根目录、运行态目录与 `AGENTS.md` 发现逻辑。
+- 2026-03-18：将会话、todo、plan 占位文件、tool-output 与日志切换为按工作区隔离的 `~/.my-agent/` 目录结构。

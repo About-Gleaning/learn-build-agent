@@ -23,13 +23,13 @@ from ..core.message import (
     get_role,
     trim_messages_by_compaction_checkpoint,
 )
+from .workspace import get_workspace
 
 THRESHOLD = DEFAULT_SUMMARY_TRIGGER_THRESHOLD
 TOOL_OUTPUT_MAX_LINES = DEFAULT_TOOL_OUTPUT_MAX_LINES
 TOOL_OUTPUT_MAX_BYTES = DEFAULT_TOOL_OUTPUT_MAX_BYTES
 
 logger = logging.getLogger(__name__)
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class ToolOutputTruncationResult(TypedDict):
@@ -57,8 +57,7 @@ def _build_tool_output_path(workdir: Path, session_id: str, tool_name: str, tool
     session_segment = _safe_name(session_id, "default_session")
     tool_segment = _safe_name(tool_name, "tool")
     call_segment = _safe_name(tool_call_id, "call")
-    # tool 输出统一固定落到仓库内，避免启动目录变化导致排查路径漂移。
-    return (PROJECT_ROOT / "src" / "storage" / "tool-output" / session_segment / f"{tool_segment}-{call_segment}.log").resolve()
+    return (get_workspace().tool_output_dir / session_segment / f"{tool_segment}-{call_segment}.log").resolve()
 
 
 def _build_preview_text(text: str, *, max_lines: int, max_bytes: int) -> str:
