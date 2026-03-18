@@ -1,10 +1,31 @@
-import logging
 from pathlib import Path
 from typing import Any
 
 WORKDIR = Path.cwd()
 PLAN_WRITE_ROOT = (WORKDIR / "src" / "plan").resolve()
-logger = logging.getLogger(__name__)
+
+
+def build_tool_success(output: str, **metadata: Any) -> dict[str, Any]:
+    """统一构造成功结果，便于工具执行层稳定读取 metadata。"""
+    return {
+        "output": output,
+        "metadata": {
+            "status": "completed",
+            **metadata,
+        },
+    }
+
+
+def build_tool_failure(output: str, *, error_code: str, **metadata: Any) -> dict[str, Any]:
+    """统一构造失败结果，保留原有输出文本以兼容模型侧提示。"""
+    return {
+        "output": output,
+        "metadata": {
+            "status": "failed",
+            "error_code": error_code,
+            **metadata,
+        },
+    }
 
 
 def safe_path(path_str: str) -> Path:
@@ -14,7 +35,7 @@ def safe_path(path_str: str) -> Path:
     return path
 
 
-def run_read(path: str, limit: int | None = None, offset: int = 0) -> str:
+def run_read(path: str, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
     try:
         text = safe_path(path).read_text()
         lines = text.splitlines()
@@ -22,9 +43,9 @@ def run_read(path: str, limit: int | None = None, offset: int = 0) -> str:
         selected = lines[start:]
         if limit is not None and limit < len(selected):
             selected = selected[:limit] + [f"... ({len(lines) - start - limit} more lines)"]
-        return "\n".join(selected)[:50000]
+        return build_tool_success("\n".join(selected)[:50000])
     except Exception as exc:
-        return f"Error: {exc}"
+        return build_tool_failure(f"Error: {exc}", error_code="read_failed", error_type=type(exc).__name__)
 
 
 def is_allowed_plan_write_path(path: str) -> bool:
@@ -35,27 +56,27 @@ def is_allowed_plan_write_path(path: str) -> bool:
     return target.is_relative_to(PLAN_WRITE_ROOT)
 
 
-def run_write(path: str, content: str) -> str:
+def run_write(path: str, content: str) -> dict[str, Any]:
     try:
         target = safe_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-        return f"Wrote {len(content)} bytes to {path}"
+        return build_tool_success(f"Wrote {len(content)} bytes to {path}")
     except Exception as exc:
-        return f"Error: {exc}"
+        return build_tool_failure(f"Error: {exc}", error_code="write_failed", error_type=type(exc).__name__)
 
 
-def run_edit(path: str, old_text: str, new_text: str) -> str:
+def run_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
     try:
         target = safe_path(path)
         content = target.read_text()
         if old_text not in content:
-            return f"Error: Text not found in {path}"
+            return build_tool_failure(f"Error: Text not found in {path}", error_code="text_not_found")
 
         target.write_text(content.replace(old_text, new_text, 1))
-        return f"Edited {path}"
+        return build_tool_success(f"Edited {path}")
     except Exception as exc:
-        return f"Error: {exc}"
+        return build_tool_failure(f"Error: {exc}", error_code="edit_failed", error_type=type(exc).__name__)
 
 
 def build_plan_placeholder_path(session_id: str) -> Path:

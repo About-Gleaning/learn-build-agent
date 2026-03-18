@@ -28,16 +28,18 @@ src/
         client.py                 # LLM 调用适配与 LLM Hook
     runtime/
       agents.py                   # Agent 元信息注册（primary/subagent、description）
-      session.py                  # 会话主循环与工具调用编排
+      session.py                  # 会话主循环与模式/工具编排
       session_memory.py           # 会话记忆与状态持久化辅助
       tool_executor.py            # ToolExecutor 与 Tool Hook 调度
       compaction.py               # 上下文压缩
+      stream_display.py           # 流式事件、display_parts 与响应摘要组装
     web/
       app.py                      # Web API（SSE 聊天、历史查询、模式切换确认、清空会话）
       schemas.py                  # Web 层请求/响应模型
+      serializers.py              # MessageVO 与 SSE payload 序列化
     tools/
       bash_tool.py                # bash 工具执行与 plan 模式只读校验
-      handlers.py                 # 通用工具业务实现（文件读写、模式切换等）
+      handlers.py                 # 通用工具业务实现与结构化结果构造
       specs.py                    # 工具协议定义
       todo_manager.py             # todo 状态管理与持久化
       task.txt                    # task 工具描述模板（含 {agents} 占位）
@@ -66,19 +68,20 @@ pnpm dev
 ```
 
 6. 运行测试：`pytest -q`。
-7. 语法检查：`python3 -m py_compile $(find src -name '*.py')`。
+7. 语法检查：`PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`。
 
 ## 分层职责约束（必须遵守）
 
-- `runtime/session.py` 仅做会话编排（消息循环、模式切换、工具分发），不放工具业务逻辑。
+- `runtime/session.py` 仅做会话编排（消息循环、模式切换、工具分发），不放工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
 - `plan_enter` / `plan_exit` 仅负责发起模式切换申请，确认与取消必须由程序状态机和 Web 交互控制，禁止让 LLM 直接决定确认结果。
 - Web 端“确认切换”必须走流式接口继续执行后续会话，禁止退回阻塞式普通 POST，否则前端会丢失增量事件并表现为无响应。
 - `runtime/agents.py` 统一维护所有 agent 的元信息；每个 agent 必须声明 `model`（`primary` 或 `subagent`）与 `description`。
-- 工具实现统一放在 `tools/handlers.py`，工具协议统一放在 `tools/specs.py`。
+- 工具实现统一放在 `tools/handlers.py`，工具协议统一放在 `tools/specs.py`；通用文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
 - 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
 - 子 Agent 统一通过 `task` 工具路由；`task` 可见的 subagent 列表必须来自 `runtime/agents.py`，不在会话层硬编码分支逻辑。
 - Web 时间线按 `session` 维度累计展示，前端禁止在新一轮提交时清空既有执行轨迹。
 - `task` 委派子 Agent 时，流式事件必须透传子 Agent 内部进度，并携带后端生成的 `delegation_id` 作为稳定关联键。
+- Web 层消息序列化统一收敛在 `web/serializers.py`，`app.py` 只负责路由、异常转换与流式响应封装。
 
 ## Agent 约定
 
@@ -95,7 +98,8 @@ pnpm dev
 1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
 2. 在 `src/agent/tools/specs.py` 增加或调整 JSON Schema；若工具描述较长，优先拆到独立 `.txt` 模板文件。
 3. 在 `src/agent/runtime/session.py` 的工具映射中注册（仅路由）。
-4. 在 `tests/` 补齐测试：成功路径、参数异常、安全边界。
+4. 工具返回优先保持结构化结果，至少稳定返回 `output` 与 `metadata.status`，避免继续扩散 `"Error: ..."` 裸字符串协议。
+5. 在 `tests/` 补齐测试：成功路径、参数异常、安全边界。
 
 ### 2) 新增 Subagent
 
@@ -137,7 +141,13 @@ pnpm dev
 2. 实现 `before_call`、`after_call`、`on_error` 任一或多个阶段。
 3. 通过 `register_global_tool_hook()` 或 `run_session(..., tool_hooks=[...])` 注入。
 
-### 4) 新增 LLM Hook
+### 4) 调整 Web 输出
+
+1. `Message -> MessageVO` 与 SSE payload 序列化优先放在 `src/agent/web/serializers.py`。
+2. `src/agent/web/app.py` 仅保留路由定义、参数校验、异常到 HTTP/SSE 的转换。
+3. 若新增展示字段，先同步 `schemas.py` 与 `serializers.py`，避免在路由函数内手工拼字段。
+
+### 5) 新增 LLM Hook
 
 1. 继承 `src/agent/adapters/llm/client.py` 中的 `LLMHook`。
 2. 在调用前后添加观测、脱敏或审计逻辑。
@@ -169,3 +179,7 @@ pnpm dev
 - 2026-03-16：`build` 模式提示词改为按 `vendor` 选择 `build.<vendor>.txt`，`qwen` 与 `qwen-coder` 共用同一份 Qwen prompt。
 - 2026-03-17：将 bash 工具执行与 Plan 模式只读校验拆分到独立模块，并允许有限的只读管道查询。
 - 2026-03-17：新增 `project_runtime.json`，将上下文压缩关键参数统一改为可配置，并支持按模型厂商 `vendor` 做局部覆盖。
+- 2026-03-18：将会话初始化、`task` 参数解析与模式切换结果处理从 `session.py` 内部收敛为公共逻辑，减少流式与非流式路径重复实现。
+- 2026-03-18：新增 `runtime/stream_display.py`，统一流式事件、`process_items`、`display_parts` 与响应摘要组装。
+- 2026-03-18：统一文件工具与 plan 模式拦截的结构化返回，工具层默认返回 `output + metadata.status/error_code`。
+- 2026-03-18：新增 `web/serializers.py`，将 `Message -> VO` 与 SSE 事件序列化从 `web/app.py` 中抽离。

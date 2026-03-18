@@ -15,6 +15,7 @@
 - `src/agent/runtime/session_memory.py`：会话记忆与状态持久化辅助。
 - `src/agent/runtime/tool_executor.py`：工具执行器与 Tool Hook 分发。
 - `src/agent/runtime/compaction.py`：上下文压缩逻辑。
+- `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要组装。
 - `src/agent/adapters/llm/client.py`：LLM 适配与 LLM Hook。
 - `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
 - `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
@@ -23,13 +24,15 @@
 - `src/agent/tools/task.txt`：`task` 工具描述模板，使用 `{agents}` 占位注入 subagent 列表。
 - `src/agent/core/`：消息模型、上下文与通用 HookDispatcher。
 - `src/agent/web/`：Web API 与请求/响应模型。
+- `src/agent/web/serializers.py`：`Message -> MessageVO` 与 SSE payload 序列化。
 - `tests/`：`pytest` 用例（工具、会话、Web、Hook 等）。
 
 ## 分层职责约束（与 README 对齐）
 
-- `runtime/session.py` 只做会话编排，不放具体工具业务逻辑。
+- `runtime/session.py` 只做会话编排，不放具体工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
 - 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
 - Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
@@ -39,6 +42,7 @@
 - Web 时间线必须按 `session` 维度累计展示，禁止在前端新一轮提交时覆盖上一轮执行轨迹。
 - `task` 委派 subagent 时，流式事件必须透传 subagent 内部进度，并使用后端生成的 `delegation_id` 作为稳定关联键。
 - Web 助手消息展示必须优先基于后端返回的 `display_parts` 顺序片段流，确保 `assistant_text` 与 `tool_call`/`tool_result` 按真实发生顺序穿插；仅在旧消息缺少该字段时才回退到 `process_items + text` 的兼容渲染。
+- Web 序列化逻辑统一收敛在 `web/serializers.py`，禁止在 `web/app.py` 中继续大段手工映射 `MessageVO` 或 SSE payload。
 - 日志必须通过程序显式传递 `agent`、`model` 等上下文字段，禁止依赖 LLM 生成或推断日志元信息。
 - 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
 - 日志文件统一写入 `logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容。
@@ -52,7 +56,7 @@
 
 - `python3 src/main.py`：运行 CLI 示例流程。
 - `pytest -q`：执行测试。
-- `python3 -m py_compile $(find src -name '*.py')`：语法检查。
+- `PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`：语法检查。
 - `python3 -m venv .venv && source .venv/bin/activate`：创建并激活虚拟环境。
 - 新增依赖时必须在 `requirements.txt` 固定版本，并同步更新 README。
 
@@ -87,3 +91,11 @@
 - 所有路径输入必须通过工作区边界校验（如 `safe_path`）。
 - Shell 执行默认高风险，优先白名单、超时与最小权限策略。
 - LLM 调用必须配置显式超时；当主代理在 `task` 委派后继续二轮推理发生超时时，必须记录错误日志并返回可解释失败结果，禁止无限等待。
+
+## 变更记录
+
+- 2026-03-18：完成第一阶段运行时重构，收敛 `session.py` 中的会话初始化、`task` 工具参数解析与模式切换结果处理重复逻辑，并补充非法 `task` 参数回归测试。
+- 2026-03-18：完成第二阶段运行时重构，将流式事件、`process_items`、`display_parts` 与响应摘要汇总逻辑抽离到独立的 `runtime/stream_display.py`，降低 `session.py` 与展示层的耦合。
+- 2026-03-18：完成第三阶段工具层重构，统一文件工具与 plan 模式拦截的结构化返回，补充 `handlers` 成功/失败结果与错误码回归测试，并保持 tool 输出文本兼容原行为。
+- 2026-03-18：完成第四阶段 Web 重构，将 `Message -> VO` 与 SSE 事件序列化抽离到 `web/serializers.py`，降低 `app.py` 中的手工字段映射与重复流式封装逻辑。
+- 2026-03-18：完成第五阶段收口整理，清理 `session.py` 中的未使用局部变量与 `handlers.py` 的无用日志对象，并为工具结果构造与 Web 序列化补充关键注释。

@@ -8,6 +8,7 @@ from agent.runtime import session as session_runtime
 from agent.runtime.session import clear_session_memory, configure_session_memory_store
 from agent.runtime.session_memory import InMemorySessionMemoryStore
 from agent.web.app import create_app
+from agent.web.serializers import message_to_vo, split_stream_event
 
 
 def test_index_should_return_api_overview():
@@ -167,6 +168,26 @@ def test_runtime_options_should_return_backend_config():
     assert any(item["name"] == "build" for item in payload["agents"])
     assert any(item["name"] == "qwen" for item in payload["providers"])
     assert any(item["vendor"] == "qwen" for item in payload["providers"])
+
+
+def test_message_to_vo_should_normalize_missing_optional_fields():
+    assistant = create_message("assistant", "s_msg", status="completed")
+    append_text_part(assistant, "hello")
+
+    message_vo = message_to_vo(assistant)
+
+    assert message_vo.text == "hello"
+    assert message_vo.response_meta.duration_ms == 0
+    assert message_vo.process_items == []
+    assert message_vo.display_parts == []
+    assert message_vo.confirmation is None
+
+
+def test_split_stream_event_should_remove_type_field():
+    event_type, payload = split_stream_event({"type": "done", "message_id": "m1", "status": "completed"}) or ("", {})
+
+    assert event_type == "done"
+    assert payload == {"message_id": "m1", "status": "completed"}
 
 
 def test_get_session_messages_and_clear():

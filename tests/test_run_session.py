@@ -347,6 +347,31 @@ def test_task_with_unknown_subagent_should_return_error(monkeypatch):
     assert "Unknown subagent" in get_message_text(result)
 
 
+def test_task_with_invalid_arguments_should_return_error(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_task_invalid_args",
+                name="task",
+                arguments='["bad"]',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("调用非法 task 参数", session_id="s_task_invalid_args")
+
+    assert "Invalid tool arguments" in get_message_text(result)
+
+
 def test_run_session_should_answer_after_task_result(monkeypatch, caplog):
     call_state = {"count": 0}
 
@@ -743,9 +768,10 @@ def test_run_read_should_support_offset_and_limit(monkeypatch, tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
     monkeypatch.setattr("agent.tools.handlers.WORKDIR", tmp_path)
-    content = run_read("sample.txt", limit=2, offset=1)
+    result = run_read("sample.txt", limit=2, offset=1)
 
-    assert content == "b\nc\n... (1 more lines)"
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "b\nc\n... (1 more lines)"
 
 
 def test_run_session_should_use_memory_between_calls(monkeypatch):
