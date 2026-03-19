@@ -36,10 +36,11 @@
 - 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
-- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/plan/<workspace_id>.md`，plan 模式下仅允许写入该文件。
-- 会话运行态数据写入 `~/.my-agent/workspaces/<workspace_id>/sessions/`；todo、tool-output 等共享运行态数据按类型聚合写入 `~/.my-agent/workspaces/todo/<workspace_id>.json` 与 `~/.my-agent/workspaces/tool-output/<workspace_id>/`，禁止继续写回仓库内 `src/storage/*`。
+- plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`，plan 模式下仅允许写入该文件。
+- 会话运行态数据写入 `~/.my-agent/workspaces/sessions/`；todo、tool-output 等共享运行态数据按类型聚合写入 `~/.my-agent/workspaces/todo/<session_id>.json` 与 `~/.my-agent/workspaces/tool-output/<session_id>/`，禁止继续写回仓库内 `src/storage/*`。
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
 - Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
+- Web 端允许通过 `POST /api/sessions/{session_id}/stop` 停止当前会话；运行时必须按 `session_id` 管理停止标记，并在 loop 顶部优先检查，命中后以 `interrupted/cancelled` 统一收口。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
 - 主 Agent 模式状态统一收敛在 `runtime/main_agent_mode.py`（若启用该模块），禁止散落存储。
 - 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
@@ -52,6 +53,7 @@
 - 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
 - 日志文件统一写入 `~/.my-agent/logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容；如配置 `MY_AGENT_HOME`，则写入对应目录。
 - `build` 主模式的提示词文件必须按厂商 `vendor` 选择，命名统一为 `build.<vendor>.txt`；厂商归属在 `src/agent/config/llm_runtime.json` 中显式声明，缺省时回退 `build.default.txt`。
+- `kimi` provider 统一走 Moonshot OpenAI 兼容接口，`base_url` 固定为 `https://api.moonshot.cn/v1`，API Key 环境变量统一使用 `KIMI_API_KEY`。
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
 - `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
 - `compaction.tool_result_keep_recent` 的计数口径统一按 `role=tool` 消息数量计算，默认保留最近 `3` 条不压缩。
@@ -102,6 +104,11 @@
 
 ## 变更记录
 
+- 2026-03-19：将“停止后继续”收敛为基于真实会话历史的正常多轮续接，移除专用 resume 恢复提示注入；点击停止后即使前端提前断流，后端也必须补齐 `interrupted/cancelled` 助手收尾消息并持久化，避免后续请求依赖额外恢复文件。
+- 2026-03-19：修复 Web 停止后继续执行的恢复链路，补充顶层执行 stop 清理、最近中断任务恢复上下文，以及前端停止等待收口后再超时兜底断流，避免残留“当前执行已手动停止。”污染下一轮并降低继续任务时的上下文丢失。
+- 2026-03-19：将 session 历史落库目录调整为全局 `~/.my-agent/workspaces/sessions/`，文件名直接使用 `session_id` 安全清洗后的结果，不再按工作区目录隔离。
+- 2026-03-19：将 `todo`、`plan` 与 `tool-output` 的运行态路径统一切换为按 `session_id` 组织，移除路径中的 `workspace_id`。
+- 2026-03-19：新增可选 `kimi` provider，统一通过 `KIMI_API_KEY` 读取 Moonshot OpenAI 兼容接口密钥，默认模型名先保留占位值，待按实际账号可用模型补齐。
 - 2026-03-18：完成第一阶段运行时重构，收敛 `session.py` 中的会话初始化、`task` 工具参数解析与模式切换结果处理重复逻辑，并补充非法 `task` 参数回归测试。
 - 2026-03-18：完成第二阶段运行时重构，将流式事件、`process_items`、`display_parts` 与响应摘要汇总逻辑抽离到独立的 `runtime/stream_display.py`，降低 `session.py` 与展示层的耦合。
 - 2026-03-18：完成第三阶段工具层重构，统一文件工具与 plan 模式拦截的结构化返回，补充 `handlers` 成功/失败结果与错误码回归测试，并保持 tool 输出文本兼容原行为。
@@ -111,3 +118,4 @@
 - 2026-03-18：新增 `runtime/workspace.py`，统一工作区根目录、运行态目录、`AGENTS.md` 发现逻辑与 Web/CLI 启动模式。
 - 2026-03-18：将会话、todo、plan 占位文件、tool-output 与日志迁移为按工作区隔离的 `~/.my-agent/` 目录结构。
 - 2026-03-18：将 `plan` 与 `todo` 调整为按类型聚合的工作区单文件，并将 `tool-output` 调整为按类型聚合的工作区子目录，统一运行态路径语义。
+- 2026-03-18：新增会话停止能力与前端停止按钮，支持按 `session_id` 协作式终止当前 loop，并统一落 `interrupted/cancelled` 助手消息。

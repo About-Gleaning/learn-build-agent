@@ -93,6 +93,12 @@ class SessionClearedVO(BaseModel):
     cleared: bool = True
 
 
+class StopSessionVO(BaseModel):
+    session_id: str
+    stopped: bool = True
+    status: Literal["requested"] = "requested"
+
+
 class ModeSwitchActionReq(BaseModel):
     action: Literal["confirm", "cancel"]
 

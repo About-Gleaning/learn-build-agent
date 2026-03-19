@@ -10,11 +10,13 @@ from ...config.settings import ResolvedLLMConfig, resolve_llm_config
 from ...core.hooks import HookDispatcher
 from ...core.message import (
     Message,
+    append_reasoning_part,
     append_text_part,
     append_tool_part,
     create_error_message,
     create_message,
     estimate_message_size,
+    extract_provider_reasoning_content,
     extract_tool_calls,
     get_role,
     mark_message_completed,
@@ -306,6 +308,7 @@ def create_chat_completion_stream(
 
     finish_reason = "stop"
     text_buffer: list[str] = []
+    reasoning_buffer: list[str] = []
     tool_call_map: dict[int, dict[str, str]] = {}
     usage_payload: dict[str, int] | None = None
 
@@ -337,6 +340,10 @@ def create_chat_completion_stream(
                 delta_text = str(delta_content)
                 text_buffer.append(delta_text)
                 yield {"type": "text_delta", "delta": delta_text}
+
+            delta_reasoning = extract_provider_reasoning_content(delta)
+            if delta_reasoning:
+                reasoning_buffer.append(delta_reasoning)
 
             for tool_call in getattr(delta, "tool_calls", None) or []:
                 index = int(getattr(tool_call, "index", 0) or 0)
@@ -378,6 +385,9 @@ def create_chat_completion_stream(
 
     if text_buffer:
         append_text_part(assistant, "".join(text_buffer))
+    if reasoning_buffer:
+        # reasoning 仅持久化到历史，避免改变当前前端流式展示语义。
+        append_reasoning_part(assistant, "".join(reasoning_buffer))
 
     for index in sorted(tool_call_map.keys()):
         tool_call = tool_call_map[index]

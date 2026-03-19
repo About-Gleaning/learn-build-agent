@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -178,6 +178,19 @@ type ModeSwitchResp = {
   status: string;
   current_mode: AgentName;
   message: HistoryResp["messages"][number];
+};
+
+type StopSessionResp = {
+  session_id: string;
+  stopped: boolean;
+  status: "requested";
+};
+
+type ActiveTurn = {
+  kind: "chat" | "mode_switch_confirm";
+  assistantMessageId: string;
+  userMessageId?: string;
+  turnStartedAt: string;
 };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "http://127.0.0.1:8000";
@@ -603,6 +616,7 @@ async function streamSse(params: {
   body: Record<string, unknown>;
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
+  signal?: AbortSignal;
 }): Promise<void> {
   const resp = await fetch(params.url, {
     method: "POST",
@@ -610,6 +624,7 @@ async function streamSse(params: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(params.body),
+    signal: params.signal,
   });
 
   if (!resp.ok || !resp.body) {
@@ -692,6 +707,7 @@ async function streamChat(params: {
   provider: string;
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
+  signal?: AbortSignal;
 }): Promise<void> {
   await streamSse({
     url: `${API_BASE}/api/chat/stream`,
@@ -703,6 +719,7 @@ async function streamChat(params: {
     },
     onDelta: params.onDelta,
     onEvent: params.onEvent,
+    signal: params.signal,
   });
 }
 
@@ -711,6 +728,7 @@ async function streamModeSwitchAction(params: {
   action: "confirm" | "cancel";
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
+  signal?: AbortSignal;
 }): Promise<void> {
   await streamSse({
     url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/mode-switch/stream`,
@@ -719,7 +737,23 @@ async function streamModeSwitchAction(params: {
     },
     onDelta: params.onDelta,
     onEvent: params.onEvent,
+    signal: params.signal,
   });
+}
+
+async function stopSession(sessionId: string): Promise<StopSessionResp> {
+  const resp = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/stop`, {
+    method: "POST",
+  });
+  if (!resp.ok) {
+    const payload = (await resp.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(payload.detail || `停止失败: ${resp.status}`);
+  }
+  return (await resp.json()) as StopSessionResp;
+}
+
+function filterConversationMessages(messages: UiMessage[]): UiMessage[] {
+  return messages.filter((msg) => msg.role === "user" || msg.role === "assistant");
 }
 
 async function loadRuntimeOptions(): Promise<RuntimeOptionsResp> {
@@ -1231,6 +1265,7 @@ export function App() {
   const [isLoadingOptions, setIsLoadingOptions] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isApplyingModeSwitch, setIsApplyingModeSwitch] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const [shouldFollow, setShouldFollow] = useState(true);
   const [mode, setMode] = useState<AgentName>("build");
   const [provider, setProvider] = useState("");
@@ -1238,8 +1273,13 @@ export function App() {
   const [activeModel, setActiveModel] = useState("");
 
   const messageListRef = useRef<HTMLDivElement>(null);
+  const activeStreamControllerRef = useRef<AbortController | null>(null);
+  const activeTurnRef = useRef<ActiveTurn | null>(null);
 
-  const canSubmit = useMemo(() => input.trim().length > 0 && !isStreaming && !isApplyingModeSwitch, [input, isStreaming, isApplyingModeSwitch]);
+  const canSubmit = useMemo(
+    () => input.trim().length > 0 && !isStreaming && !isApplyingModeSwitch && !isStopping,
+    [input, isStreaming, isApplyingModeSwitch, isStopping],
+  );
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant") || null,
@@ -1310,10 +1350,49 @@ export function App() {
     setError("");
     try {
       const history = await loadHistory(sessionId);
-      setMessages(history.filter((msg) => msg.role === "user" || msg.role === "assistant"));
+      startTransition(() => {
+        setMessages(filterConversationMessages(history));
+      });
     } catch (err) {
       setError((err as Error).message || "历史加载失败");
     }
+  };
+
+  const mergeStoppedTurnFromHistory = async (activeTurn: ActiveTurn): Promise<boolean> => {
+    const maxAttempts = 12;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const history = filterConversationMessages(await loadHistory(sessionId));
+        const matchedTurnMessages = history.filter((msg) => msg.turnStartedAt === activeTurn.turnStartedAt);
+        const stoppedAssistantMessage = matchedTurnMessages.find(
+          (msg) => msg.role === "assistant" && msg.status === "interrupted" && msg.finishReason === "cancelled",
+        );
+        if (stoppedAssistantMessage) {
+          startTransition(() => {
+            setMessages((prev) => {
+              const removedIds = new Set(
+                [activeTurn.assistantMessageId, activeTurn.userMessageId].filter((item): item is string => Boolean(item)),
+              );
+              const insertAt = prev.findIndex((msg) => removedIds.has(msg.id));
+              const baseMessages = prev.filter((msg) => !removedIds.has(msg.id));
+              const nextTurnMessages = matchedTurnMessages.filter((msg) => !baseMessages.some((item) => item.id === msg.id));
+              if (nextTurnMessages.length === 0) {
+                return baseMessages;
+              }
+              if (insertAt < 0 || insertAt >= baseMessages.length) {
+                return [...baseMessages, ...nextTurnMessages];
+              }
+              return [...baseMessages.slice(0, insertAt), ...nextTurnMessages, ...baseMessages.slice(insertAt)];
+            });
+          });
+          return true;
+        }
+      } catch {
+        // 停止后的历史同步只做增量合并，失败时保留本地已渲染内容。
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    return false;
   };
 
   const refreshRuntimeOptions = async () => {
@@ -1386,11 +1465,21 @@ export function App() {
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setIsStreaming(true);
+    setIsStopping(false);
     setActiveProvider("");
     setActiveModel("");
+    activeTurnRef.current = {
+      kind: "chat",
+      assistantMessageId: assistantId,
+      userMessageId: userMessage.id,
+      turnStartedAt: now,
+    };
 
     let finalStatus = "completed";
     let finalPayload: Record<string, unknown> = {};
+    const controller = new AbortController();
+    activeStreamControllerRef.current = controller;
+    let wasAborted = false;
 
     try {
       await streamChat({
@@ -1452,6 +1541,7 @@ export function App() {
             finalPayload = payload;
           }
         },
+        signal: controller.signal,
       });
 
       setMessages((prev) =>
@@ -1463,6 +1553,10 @@ export function App() {
         }),
       );
     } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        wasAborted = true;
+        return;
+      }
       setError((err as Error).message || "发送失败");
       setMessages((prev) =>
         prev.map((msg) =>
@@ -1477,7 +1571,14 @@ export function App() {
         ),
       );
     } finally {
+      if (activeStreamControllerRef.current === controller) {
+        activeStreamControllerRef.current = null;
+      }
+      if (!wasAborted && activeTurnRef.current?.assistantMessageId === assistantId) {
+        activeTurnRef.current = null;
+      }
       setIsStreaming(false);
+      setIsStopping(false);
     }
   };
 
@@ -1497,6 +1598,7 @@ export function App() {
     setError("");
     setShouldFollow(true);
     setIsApplyingModeSwitch(true);
+    setIsStopping(false);
     try {
       if (action === "confirm") {
         const now = new Date().toISOString();
@@ -1524,84 +1626,108 @@ export function App() {
         setMessages((prev) => [...prev, assistantMessage]);
         setActiveProvider("");
         setActiveModel("");
+        activeTurnRef.current = {
+          kind: "mode_switch_confirm",
+          assistantMessageId: assistantId,
+          turnStartedAt: now,
+        };
 
         let finalStatus = "completed";
         let finalPayload: Record<string, unknown> = {};
+        const controller = new AbortController();
+        activeStreamControllerRef.current = controller;
+        let wasAborted = false;
 
-        await streamModeSwitchAction({
-          sessionId,
-          action,
-          onDelta: () => {},
-          onEvent: (eventName, payload) => {
-            if (eventName === "text_delta") {
-              const delta = readString(payload, "delta");
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === assistantId
-                    ? appendDisplayTextDelta(msg, delta, payload)
-                    : msg,
-                ),
-              );
-            }
-            const processItem = buildLiveProcessItem(eventName, payload);
-            if (processItem) {
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === assistantId
-                    ? {
-                        ...msg,
-                        processItems: appendProcessItem(msg.processItems, processItem),
-                        displayParts: (() => {
-                          const displayPart = buildLiveDisplayPart(eventName, payload);
-                          return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
-                        })(),
-                        displayTextMergeOpen: false,
-                      }
-                    : msg,
-                ),
-              );
-            } else if (eventName !== "text_delta") {
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === assistantId
-                    ? {
-                        ...msg,
-                        displayTextMergeOpen: false,
-                      }
-                    : msg,
-                ),
-              );
-            }
-            const providerName = readString(payload, "provider");
-            const modelName = readString(payload, "model");
-            if (providerName) {
-              setActiveProvider(providerName);
-            }
-            if (modelName) {
-              setActiveModel(modelName);
-            }
-            if (eventName === "done") {
-              finalStatus = readString(payload, "status", "completed");
-              finalPayload = payload;
-            }
-          },
-        });
+        try {
+          await streamModeSwitchAction({
+            sessionId,
+            action,
+            onDelta: () => {},
+            onEvent: (eventName, payload) => {
+              if (eventName === "text_delta") {
+                const delta = readString(payload, "delta");
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? appendDisplayTextDelta(msg, delta, payload)
+                      : msg,
+                  ),
+                );
+              }
+              const processItem = buildLiveProcessItem(eventName, payload);
+              if (processItem) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          processItems: appendProcessItem(msg.processItems, processItem),
+                          displayParts: (() => {
+                            const displayPart = buildLiveDisplayPart(eventName, payload);
+                            return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
+                          })(),
+                          displayTextMergeOpen: false,
+                        }
+                      : msg,
+                  ),
+                );
+              } else if (eventName !== "text_delta") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          displayTextMergeOpen: false,
+                        }
+                      : msg,
+                  ),
+                );
+              }
+              const providerName = readString(payload, "provider");
+              const modelName = readString(payload, "model");
+              if (providerName) {
+                setActiveProvider(providerName);
+              }
+              if (modelName) {
+                setActiveModel(modelName);
+              }
+              if (eventName === "done") {
+                finalStatus = readString(payload, "status", "completed");
+                finalPayload = payload;
+              }
+            },
+            signal: controller.signal,
+          });
 
-        setMessages((prev) =>
-          prev.map((msg) => {
-            if (msg.id !== assistantId) {
-              return msg;
-            }
-            return mergeMessageWithFinalPayload(msg, finalStatus, finalPayload);
-          }),
-        );
+          setMessages((prev) =>
+            prev.map((msg) => {
+              if (msg.id !== assistantId) {
+                return msg;
+              }
+              return mergeMessageWithFinalPayload(msg, finalStatus, finalPayload);
+            }),
+          );
 
-        const switchedMode = readString(finalPayload, "agent");
-        if (switchedMode === "build" || switchedMode === "plan") {
-          setMode(switchedMode);
+          const switchedMode = readString(finalPayload, "agent");
+          if (switchedMode === "build" || switchedMode === "plan") {
+            setMode(switchedMode);
+          }
+          await refreshHistory();
+          return;
+        } catch (err) {
+          if ((err as Error).name === "AbortError") {
+            wasAborted = true;
+            return;
+          }
+          setError((err as Error).message || "模式切换失败");
+        } finally {
+          if (!wasAborted && activeTurnRef.current?.assistantMessageId === assistantId) {
+            activeTurnRef.current = null;
+          }
+          if (activeStreamControllerRef.current === controller) {
+            activeStreamControllerRef.current = null;
+          }
         }
-        await refreshHistory();
-        return;
       }
 
       const payload = await applyModeSwitchAction({ sessionId, action });
@@ -1611,6 +1737,54 @@ export function App() {
       setError((err as Error).message || "模式切换失败");
     } finally {
       setIsApplyingModeSwitch(false);
+      setIsStopping(false);
+    }
+  };
+
+  const handleStopCurrentRun = async () => {
+    if ((!isStreaming && !isApplyingModeSwitch) || isStopping) {
+      return;
+    }
+
+    setError("");
+    setIsStopping(true);
+    setShouldFollow(true);
+    const activeTurn = activeTurnRef.current;
+
+    try {
+      await stopSession(sessionId);
+      if (!activeTurn) {
+        setIsStopping(false);
+        return;
+      }
+
+      // 优先等待后端返回 stopped 终态，避免前端过早断开流导致 stop 标记残留到下一轮。
+      window.setTimeout(() => {
+        if (activeTurnRef.current?.assistantMessageId !== activeTurn.assistantMessageId) {
+          return;
+        }
+        const controller = activeStreamControllerRef.current;
+        if (!controller) {
+          return;
+        }
+        controller.abort();
+        activeStreamControllerRef.current = null;
+        setIsStreaming(false);
+        setIsApplyingModeSwitch(false);
+        void (async () => {
+          const merged = await mergeStoppedTurnFromHistory(activeTurn);
+          if (!merged) {
+            setError("停止已请求，但本轮停止结果尚未同步完成，请稍后再试。");
+          }
+          if (activeTurnRef.current?.assistantMessageId === activeTurn.assistantMessageId) {
+            activeTurnRef.current = null;
+          }
+          setIsStopping(false);
+        })();
+      }, 2500);
+    } catch (err) {
+      setError((err as Error).message || "停止失败");
+      setIsStopping(false);
     }
   };
 
@@ -1714,7 +1888,7 @@ export function App() {
                   id="agent-mode"
                   value={mode}
                   onChange={(e) => setMode(e.target.value as AgentName)}
-                  disabled={isStreaming || isApplyingModeSwitch}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping}
                   className="terminal-select"
                 >
                   {agentOptions.map((item) => (
@@ -1731,7 +1905,7 @@ export function App() {
                   id="provider-name"
                   value={provider}
                   onChange={(e) => setProvider(e.target.value)}
-                  disabled={isStreaming || isApplyingModeSwitch}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping}
                   className="terminal-select"
                 >
                   {providerOptions.map((item) => (
@@ -1749,7 +1923,7 @@ export function App() {
               <button
                 type="button"
                 onClick={() => void refreshRuntimeOptions()}
-                disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch}
+                disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping}
                 className="plain-btn terminal-inline-btn"
               >
                 {isLoadingOptions ? "刷新中..." : "刷新配置"}
@@ -1769,7 +1943,7 @@ export function App() {
                   rows={3}
                   onKeyDown={onComposerKeyDown}
                   aria-label="消息输入框"
-                  disabled={isApplyingModeSwitch}
+                  disabled={isApplyingModeSwitch || isStopping}
                 />
               </div>
               <div className="composer-footer">
@@ -1777,8 +1951,13 @@ export function App() {
                   <span>{followText}</span>
                   <span>最近消息: {latestMessageTime}</span>
                 </div>
-                <button type="submit" disabled={!canSubmit} className="primary-btn">
-                  {isStreaming ? "生成中..." : isApplyingModeSwitch ? "切换中..." : "发送"}
+                <button
+                  type={isStreaming || isApplyingModeSwitch ? "button" : "submit"}
+                  disabled={isStreaming || isApplyingModeSwitch ? isStopping : !canSubmit}
+                  onClick={isStreaming || isApplyingModeSwitch ? () => void handleStopCurrentRun() : undefined}
+                  className={`primary-btn ${isStreaming || isApplyingModeSwitch || isStopping ? "stop-btn" : ""}`.trim()}
+                >
+                  {isStopping ? "停止中..." : isStreaming || isApplyingModeSwitch ? "停止" : "发送"}
                 </button>
               </div>
             </form>

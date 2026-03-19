@@ -36,7 +36,7 @@ src/
       stream_display.py           # 流式事件、display_parts 与响应摘要组装
       workspace.py                # 当前工作区与运行态目录解析
     web/
-      app.py                      # Web API（SSE 聊天、历史查询、模式切换确认、清空会话）
+      app.py                      # Web API（SSE 聊天、历史查询、模式切换确认、停止会话、清空会话）
       schemas.py                  # Web 层请求/响应模型
       serializers.py              # MessageVO 与 SSE payload 序列化
     tools/
@@ -56,7 +56,7 @@ frontend/
 
 ## 快速开始
 
-1. 准备环境变量：复制 `.env.example` 为 `.env`，并配置所需密钥；如果使用 `websearch`，还要配置 `EXA_API_KEY`。
+1. 准备环境变量：在 `.env` 中配置所需密钥；如果使用 `websearch`，还要配置 `EXA_API_KEY`。当前内置 provider 支持 `QWEN_API_KEY`、`GEMINI_API_KEY`、`OPENAI_API_KEY` 与 `KIMI_API_KEY`。
 2. 安装依赖：`pip install -r requirements.txt`。
 3. 安装当前项目为命令行工具：`pip install -e .`。
 4. 进入任意项目目录后启动 CLI：`my-agent`。
@@ -81,10 +81,10 @@ pnpm dev
 - 工作区内的 `AGENTS.md` 会自动追加到系统提示词中。
 - 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
 - 运行态数据默认落到 `~/.my-agent/`：
-  - 会话历史：`~/.my-agent/workspaces/<workspace_id>/sessions/`
-  - todo：`~/.my-agent/workspaces/todo/<workspace_id>.json`
-  - plan 占位文件：`~/.my-agent/workspaces/plan/<workspace_id>.md`
-  - 长输出落盘：`~/.my-agent/workspaces/tool-output/<workspace_id>/`
+  - 会话历史：`~/.my-agent/workspaces/sessions/`
+  - todo：`~/.my-agent/workspaces/todo/<session_id>.json`
+  - plan 占位文件：`~/.my-agent/workspaces/plan/<session_id>.md`
+  - 长输出落盘：`~/.my-agent/workspaces/tool-output/<session_id>/`
   - 日志：`~/.my-agent/logs/`
 - 如需覆盖默认运行态目录，可设置环境变量 `MY_AGENT_HOME`。
 
@@ -93,6 +93,7 @@ pnpm dev
 - `runtime/session.py` 仅做会话编排（消息循环、模式切换、工具分发），不放工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
 - `plan_enter` / `plan_exit` 仅负责发起模式切换申请，确认与取消必须由程序状态机和 Web 交互控制，禁止让 LLM 直接决定确认结果。
 - Web 端“确认切换”必须走流式接口继续执行后续会话，禁止退回阻塞式普通 POST，否则前端会丢失增量事件并表现为无响应。
+- Web 端允许通过 `POST /api/sessions/{session_id}/stop` 请求停止当前会话；运行时按 `session_id` 记录停止标记，并在 loop 顶部及关键边界协作式收口，统一返回 `interrupted/cancelled`。
 - `runtime/agents.py` 统一维护所有 agent 的元信息；每个 agent 必须声明 `model`（`primary` 或 `subagent`）与 `description`。
 - 工具实现统一放在 `tools/handlers.py`，工具协议统一放在 `tools/specs.py`；通用文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
 - 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
@@ -138,6 +139,13 @@ pnpm dev
 - 未单独调整时建议默认 `60` 秒，优先保证父/子 Agent 二轮推理能稳定失败收口，而不是静默卡住。
 - 当 `task` 委派完成后，若主 Agent 二轮 LLM 调用超时，系统必须记录错误日志并返回可解释失败结果。
 
+### 额外约定：Kimi Provider 接入
+
+- `kimi` 通过 Moonshot 的 OpenAI 兼容接口接入，`base_url` 固定配置为 `https://api.moonshot.cn/v1`。
+- `api_key_env` 使用 `KIMI_API_KEY`，代码中禁止硬编码真实密钥。
+- 默认模型名先保留为占位值 `REPLACE_WITH_KIMI_MODEL_ID`，需要你根据实际账号可用模型在 `.env` 或运行时配置配套调整。
+- 本次仅新增可选 provider，不修改 `build` / `plan` 的默认 provider，避免影响现有运行链路。
+
 ### 额外约定：项目级运行时配置
 
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止在业务代码里继续扩散硬编码常量。
@@ -164,6 +172,7 @@ pnpm dev
 1. `Message -> MessageVO` 与 SSE payload 序列化优先放在 `src/agent/web/serializers.py`。
 2. `src/agent/web/app.py` 仅保留路由定义、参数校验、异常到 HTTP/SSE 的转换。
 3. 若新增展示字段，先同步 `schemas.py` 与 `serializers.py`，避免在路由函数内手工拼字段。
+4. 若新增会话控制接口（如停止当前执行），优先复用现有 `session_id` 维度的运行时状态管理，不在 Web 层缓存执行状态。
 
 ### 5) 新增 LLM Hook
 
@@ -187,7 +196,7 @@ pnpm dev
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
 - `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。
-- plan 模式占位文件统一落到当前工作区对应的 `~/.my-agent/workspaces/plan/<workspace_id>.md`；plan 模式下仅允许写入该文件。
+- plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`；plan 模式下仅允许写入该文件。
 
 ## 变更记录
 
@@ -206,3 +215,7 @@ pnpm dev
 - 2026-03-18：新增 `runtime/workspace.py`，统一管理工作区根目录、运行态目录与 `AGENTS.md` 发现逻辑。
 - 2026-03-18：将会话、todo、plan 占位文件、tool-output 与日志切换为按工作区隔离的 `~/.my-agent/` 目录结构。
 - 2026-03-18：将 `plan` 与 `todo` 收敛为按类型聚合的工作区单文件，并将 `tool-output` 收敛为按类型聚合的工作区子目录，统一路径形态为 `workspaces/<type>/<workspace_id>...`。
+- 2026-03-18：新增 `POST /api/sessions/{session_id}/stop` 与前端停止按钮，支持按 session 协作式终止当前 loop，并统一以 `interrupted/cancelled` 收口。
+- 2026-03-19：将 session 历史落库目录调整为全局 `~/.my-agent/workspaces/sessions/`，文件名直接使用 `session_id` 安全清洗后的结果，不再按工作区目录隔离。
+- 2026-03-19：将 `todo`、`plan` 与 `tool-output` 的运行态路径统一切换为按 `session_id` 组织，移除路径中的 `workspace_id`。
+- 2026-03-19：新增可选 `kimi` provider，统一通过 `KIMI_API_KEY` 读取 Moonshot OpenAI 兼容接口密钥，默认模型名使用占位值等待按实际账号能力补齐。

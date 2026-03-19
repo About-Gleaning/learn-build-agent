@@ -119,6 +119,7 @@ class TaskToolRequest:
 
 
 PENDING_MODE_SWITCHES: dict[str, PendingModeSwitch] = {}
+STOP_REQUESTED_SESSION_IDS: set[str] = set()
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
@@ -578,6 +579,25 @@ def _clear_pending_mode_switch(session_id: str | None = None) -> None:
     PENDING_MODE_SWITCHES.pop(normalized, None)
 
 
+def request_session_stop(session_id: str) -> None:
+    normalized = (session_id or "").strip()
+    if normalized:
+        STOP_REQUESTED_SESSION_IDS.add(normalized)
+
+
+def is_session_stop_requested(session_id: str) -> bool:
+    normalized = (session_id or "").strip()
+    return bool(normalized) and normalized in STOP_REQUESTED_SESSION_IDS
+
+
+def clear_session_stop(session_id: str | None = None) -> None:
+    normalized = (session_id or "").strip()
+    if not normalized:
+        STOP_REQUESTED_SESSION_IDS.clear()
+        return
+    STOP_REQUESTED_SESSION_IDS.discard(normalized)
+
+
 def _build_mode_switch_confirm_input(pending: PendingModeSwitch) -> str:
     action_type = str(pending.get("action_type", "")).strip().lower()
     plan_path = str(pending.get("plan_path", "")).strip()
@@ -864,6 +884,32 @@ def _build_cancelled_mode_switch_message(
     return message
 
 
+def _build_stopped_session_message(
+    *,
+    session_id: str,
+    active_agent: str,
+    current_runtime: ResolvedLLMConfig,
+    turn_started_at: str,
+) -> Message:
+    message = create_message(
+        role="assistant",
+        session_id=session_id,
+        status="interrupted",
+        finish_reason="cancelled",
+    )
+    # 用户主动停止后，统一落一条可追踪的助手消息，保证前端历史与事件流一致。
+    append_text_part(message, "当前执行已手动停止。")
+    _set_message_runtime_info(
+        message,
+        agent=active_agent,
+        model=current_runtime.model,
+        provider=current_runtime.provider,
+        turn_started_at=turn_started_at,
+        turn_completed_at=utc_now_iso(),
+    )
+    return message
+
+
 def _sanitize_preview(text: str, *, limit: int = 220) -> str:
     normalized = text.replace("\r", " ").replace("\n", " ").strip()
     if not normalized:
@@ -899,6 +945,7 @@ def configure_session_memory_store(store: SessionMemoryStore) -> None:
 def clear_session_memory(session_id: str | None = None) -> None:
     SESSION_MEMORY_STORE.clear(session_id)
     _clear_pending_mode_switch(session_id)
+    clear_session_stop(session_id)
 
 
 def apply_mode_switch_action(session_id: str, action: ModeSwitchAction) -> Message:
@@ -1087,6 +1134,7 @@ def _run_session_stream(
     current_provider_explicit = bootstrap.current_provider_explicit
     initial_agent = bootstrap.initial_agent
     agent_kind = _resolve_agent_kind(initial_agent)
+    stop_message_saved = False
 
     def _emit_event(event_type: str, **payload: Any) -> dict[str, Any]:
         nonlocal display_text_merge_open
@@ -1107,6 +1155,69 @@ def _run_session_stream(
         display_text_merge_open = False
         return event
 
+    def _build_stop_result_message(active_agent: str, runtime_config: ResolvedLLMConfig) -> Message:
+        nonlocal stop_message_saved
+        message = _build_stopped_session_message(
+            session_id=active_session_id,
+            active_agent=active_agent,
+            current_runtime=runtime_config,
+            turn_started_at=turn_started_at,
+        )
+        completed_at = str(message["info"].get("turn_completed_at", ""))
+        response_meta = _attach_response_summary(
+            message,
+            process_items=active_process_items,
+            display_parts=active_display_parts,
+            turn_started_at=turn_started_at,
+            turn_completed_at=completed_at,
+        )
+        messages.append(message)
+        if mode_enabled:
+            SESSION_MEMORY_STORE.save(active_session_id, messages)
+        stop_message_saved = True
+        if depth == 0:
+            clear_session_stop(active_session_id)
+        yield _emit_event(
+            "round_end",
+            agent=active_agent,
+            agent_kind=_resolve_agent_kind(active_agent),
+            depth=depth,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            round=round_no,
+            status="interrupted",
+            finish_reason="cancelled",
+            provider=runtime_config.provider,
+            model=runtime_config.model,
+            completed_at=completed_at,
+        )
+        yield _emit_event(
+            "done",
+            agent=active_agent,
+            agent_kind=_resolve_agent_kind(active_agent),
+            depth=depth,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            message_id=str(message["info"].get("message_id", "")),
+            status="interrupted",
+            finish_reason="cancelled",
+            provider=runtime_config.provider,
+            model=runtime_config.model,
+            completed_at=completed_at,
+            turn_started_at=turn_started_at,
+            turn_completed_at=completed_at,
+            response_meta=response_meta,
+            process_items=[dict(item) for item in active_process_items],
+            display_parts=message["info"].get("display_parts", []),
+            confirmation=message["info"].get("confirmation"),
+        )
+        return message
+
+    def _consume_stop_request_if_needed(active_agent: str, runtime_config: ResolvedLLMConfig) -> Generator[dict[str, Any], None, Message | None]:
+        if not is_session_stop_requested(active_session_id):
+            return None
+        return (yield from _build_stop_result_message(active_agent, runtime_config))
+
     tool_executor = ToolExecutor(
         _build_tool_handlers(
             session_id=active_session_id,
@@ -1116,50 +1227,55 @@ def _run_session_stream(
         )
     )
 
-    yield _emit_event(
-        "start",
-        agent=initial_agent,
-        agent_kind=agent_kind,
-        depth=depth,
-        delegation_id=delegation_id,
-        parent_tool_call_id=parent_tool_call_id,
-        mode=bootstrap.initial_mode,
-        provider=current_runtime.provider,
-        model=current_runtime.model,
-        started_at=turn_started_at,
-    )
-
-    round_no = 0
-    while True:
-        round_no += 1
-        pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
-        messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
-
-        selected_tools = bootstrap.initial_tools
-        if mode_enabled:
-            current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
-            current_runtime, current_provider_explicit = _resolve_runtime_config(
-                messages,
-                mode=current_mode,
-                provider=provider,
-                provider_specified=False,
-            )
-            selected_tools = _get_tools_for_mode(current_mode)
-            messages = _ensure_system_prompt(
-                messages,
-                _get_system_prompt_for_mode(
-                    current_mode,
-                    model=current_runtime.model,
-                    provider=current_runtime.provider,
-                    vendor=current_runtime.vendor,
-                    session_id=active_session_id,
-                ),
-                active_session_id,
-            )
-        active_agent = current_mode if mode_enabled else (runtime_agent or "build")
-        agent_kind = _resolve_agent_kind(active_agent)
-
+    try:
         yield _emit_event(
+            "start",
+            agent=initial_agent,
+            agent_kind=agent_kind,
+            depth=depth,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            mode=bootstrap.initial_mode,
+            provider=current_runtime.provider,
+            model=current_runtime.model,
+            started_at=turn_started_at,
+        )
+
+        round_no = 0
+        while True:
+            round_no += 1
+            pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
+            messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
+
+            selected_tools = bootstrap.initial_tools
+            if mode_enabled:
+                current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
+                current_runtime, current_provider_explicit = _resolve_runtime_config(
+                    messages,
+                    mode=current_mode,
+                    provider=provider,
+                    provider_specified=False,
+                )
+                selected_tools = _get_tools_for_mode(current_mode)
+                messages = _ensure_system_prompt(
+                    messages,
+                    _get_system_prompt_for_mode(
+                        current_mode,
+                        model=current_runtime.model,
+                        provider=current_runtime.provider,
+                        vendor=current_runtime.vendor,
+                        session_id=active_session_id,
+                    ),
+                    active_session_id,
+                )
+            active_agent = current_mode if mode_enabled else (runtime_agent or "build")
+            agent_kind = _resolve_agent_kind(active_agent)
+
+            stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
+            if stopped_message is not None:
+                return stopped_message
+
+            yield _emit_event(
             "round_start",
             agent=active_agent,
             agent_kind=agent_kind,
@@ -1170,81 +1286,85 @@ def _run_session_stream(
             provider=current_runtime.provider,
             model=current_runtime.model,
             started_at=utc_now_iso(),
-        )
+            )
 
-        stream_iter = _call_chat_completion_stream(
-            messages=messages,
-            tools=selected_tools,
-            llm_config=current_runtime,
-            agent=active_agent,
-        )
-        while True:
-            try:
-                stream_event = next(stream_iter)
-            except StopIteration as stop:
-                assistant_message = stop.value
-                break
+            stream_iter = _call_chat_completion_stream(
+                messages=messages,
+                tools=selected_tools,
+                llm_config=current_runtime,
+                agent=active_agent,
+            )
+            while True:
+                try:
+                    stream_event = next(stream_iter)
+                except StopIteration as stop:
+                    assistant_message = stop.value
+                    break
 
-            if stream_event.get("type") == "text_delta":
-                delta = str(stream_event.get("delta", ""))
-                if delta:
-                    delta_event = _build_stream_event(
-                        "text_delta",
-                        session_id=active_session_id,
+                if stream_event.get("type") == "text_delta":
+                    delta = str(stream_event.get("delta", ""))
+                    if delta:
+                        delta_event = _build_stream_event(
+                            "text_delta",
+                            session_id=active_session_id,
+                            agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                            round=round_no,
+                            delta=delta,
+                        )
+                        _append_display_text_part(
+                            active_display_parts,
+                            delta=delta,
+                            created_at=str(delta_event.get("timestamp", "")) or utc_now_iso(),
+                            agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            round_no=round_no,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                            merge_allowed=display_text_merge_open,
+                        )
+                        display_text_merge_open = True
+                        yield delta_event
+
+            stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
+            if stopped_message is not None:
+                return stopped_message
+
+            _set_message_runtime_info(
+                assistant_message,
+                agent=active_agent,
+                model=current_runtime.model,
+                provider=current_runtime.provider,
+                turn_started_at=turn_started_at,
+            )
+            messages.append(assistant_message)
+
+            tool_calls = extract_tool_calls(assistant_message)
+            has_tool_calls = bool(tool_calls)
+
+            if has_tool_calls:
+                for tool_call in tool_calls:
+                    yield _emit_event(
+                        "tool_call",
                         agent=active_agent,
                         agent_kind=agent_kind,
                         depth=depth,
                         delegation_id=delegation_id,
                         parent_tool_call_id=parent_tool_call_id,
                         round=round_no,
-                        delta=delta,
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                        arguments=tool_call["arguments"],
                     )
-                    _append_display_text_part(
-                        active_display_parts,
-                        delta=delta,
-                        created_at=str(delta_event.get("timestamp", "")) or utc_now_iso(),
-                        agent=active_agent,
-                        agent_kind=agent_kind,
-                        depth=depth,
-                        round_no=round_no,
-                        delegation_id=delegation_id,
-                        parent_tool_call_id=parent_tool_call_id,
-                        merge_allowed=display_text_merge_open,
-                    )
-                    display_text_merge_open = True
-                    yield delta_event
 
-        _set_message_runtime_info(
-            assistant_message,
-            agent=active_agent,
-            model=current_runtime.model,
-            provider=current_runtime.provider,
-            turn_started_at=turn_started_at,
-        )
-        messages.append(assistant_message)
-
-        tool_calls = extract_tool_calls(assistant_message)
-        has_tool_calls = bool(tool_calls)
-
-        if has_tool_calls:
-            for tool_call in tool_calls:
+            if not has_tool_calls:
+                completed_at = utc_now_iso()
+                assistant_message["info"]["turn_completed_at"] = completed_at
                 yield _emit_event(
-                    "tool_call",
-                    agent=active_agent,
-                    agent_kind=agent_kind,
-                    depth=depth,
-                    delegation_id=delegation_id,
-                    parent_tool_call_id=parent_tool_call_id,
-                    round=round_no,
-                    tool_call_id=tool_call["id"],
-                    name=tool_call["name"],
-                    arguments=tool_call["arguments"],
-                )
-
-        if not has_tool_calls:
-            completed_at = utc_now_iso()
-            assistant_message["info"]["turn_completed_at"] = completed_at
-            yield _emit_event(
                 "round_end",
                 agent=active_agent,
                 agent_kind=agent_kind,
@@ -1257,130 +1377,139 @@ def _run_session_stream(
                 provider=current_runtime.provider,
                 model=current_runtime.model,
                 completed_at=completed_at,
-            )
-            response_meta = _attach_response_summary(
-                assistant_message,
-                process_items=active_process_items,
-                display_parts=active_display_parts,
-                turn_started_at=turn_started_at,
-                turn_completed_at=completed_at,
-            )
-            if mode_enabled:
-                SESSION_MEMORY_STORE.save(active_session_id, messages)
-            yield _emit_event(
-                "done",
-                agent=active_agent,
-                agent_kind=agent_kind,
-                depth=depth,
-                delegation_id=delegation_id,
-                parent_tool_call_id=parent_tool_call_id,
-                message_id=str(assistant_message["info"].get("message_id", "")),
-                status=assistant_message["info"].get("status", "completed"),
-                finish_reason=assistant_message["info"].get("finish_reason", "stop"),
-                provider=current_runtime.provider,
-                model=current_runtime.model,
-                completed_at=completed_at,
-                turn_started_at=turn_started_at,
-                turn_completed_at=completed_at,
-                response_meta=response_meta,
-                process_items=[dict(item) for item in active_process_items],
-                display_parts=assistant_message["info"].get("display_parts", []),
-                confirmation=assistant_message["info"].get("confirmation"),
-            )
-            return assistant_message
-
-        should_interrupt = False
-        task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
-        for tool_call in tool_calls:
-            if tool_call["name"] == "task":
-                delegation_instance_id = _new_delegation_id()
-                task_request = _prepare_task_tool_request(
-                    tool_call["arguments"],
-                    delegation_id=delegation_instance_id,
                 )
-                result = task_request.result
-                if task_request.should_execute:
-                    delegated_message = yield from _run_session_stream(
-                        task_request.prompt,
-                        session_id=active_session_id,
-                        tools=build_base_tools(registry.list_briefs()),
-                        system_prompt=_call_build_system_prompt(
-                            agent=task_request.agent,
-                            model=current_runtime.model,
-                            provider=current_runtime.provider,
-                            vendor=current_runtime.vendor,
-                            session_id=active_session_id,
-                        ),
-                        runtime_agent=task_request.agent,
-                        todo_tool_names={"todo_write", "todo_read"},
-                        llm_config=current_runtime,
-                        depth=depth + 1,
-                        delegation_id=delegation_instance_id,
-                        parent_tool_call_id=tool_call["id"],
-                        process_items=active_process_items,
-                        display_parts=active_display_parts,
-                    )
-                    result["output"] = get_message_text(delegated_message)
-            else:
-                result = tool_executor.execute(
-                    tool_call["name"],
-                    tool_call["arguments"],
-                    session_id=active_session_id,
-                    tool_call_id=tool_call["id"],
-                    round_no=round_no,
-                    hooks=effective_tool_hooks,
+                response_meta = _attach_response_summary(
+                    assistant_message,
+                    process_items=active_process_items,
+                    display_parts=active_display_parts,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                )
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                if depth == 0:
+                    clear_session_stop(active_session_id)
+                yield _emit_event(
+                    "done",
                     agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    message_id=str(assistant_message["info"].get("message_id", "")),
+                    status=assistant_message["info"].get("status", "completed"),
+                    finish_reason=assistant_message["info"].get("finish_reason", "stop"),
+                    provider=current_runtime.provider,
                     model=current_runtime.model,
-                    vendor=current_runtime.vendor,
-                    task_available=task_available,
-                    workdir=str(_get_workdir()),
+                    completed_at=completed_at,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                    response_meta=response_meta,
+                    process_items=[dict(item) for item in active_process_items],
+                    display_parts=assistant_message["info"].get("display_parts", []),
+                    confirmation=assistant_message["info"].get("confirmation"),
+                )
+                return assistant_message
+
+            should_interrupt = False
+            task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
+            for tool_call in tool_calls:
+                stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
+                if stopped_message is not None:
+                    return stopped_message
+                if tool_call["name"] == "task":
+                    delegation_instance_id = _new_delegation_id()
+                    task_request = _prepare_task_tool_request(
+                        tool_call["arguments"],
+                        delegation_id=delegation_instance_id,
+                    )
+                    result = task_request.result
+                    if task_request.should_execute:
+                        delegated_message = yield from _run_session_stream(
+                            task_request.prompt,
+                            session_id=active_session_id,
+                            tools=build_base_tools(registry.list_briefs()),
+                            system_prompt=_call_build_system_prompt(
+                                agent=task_request.agent,
+                                model=current_runtime.model,
+                                provider=current_runtime.provider,
+                                vendor=current_runtime.vendor,
+                                session_id=active_session_id,
+                            ),
+                            runtime_agent=task_request.agent,
+                            todo_tool_names={"todo_write", "todo_read"},
+                            llm_config=current_runtime,
+                            depth=depth + 1,
+                            delegation_id=delegation_instance_id,
+                            parent_tool_call_id=tool_call["id"],
+                            process_items=active_process_items,
+                            display_parts=active_display_parts,
+                        )
+                        result["output"] = get_message_text(delegated_message)
+                else:
+                    result = tool_executor.execute(
+                        tool_call["name"],
+                        tool_call["arguments"],
+                        session_id=active_session_id,
+                        tool_call_id=tool_call["id"],
+                        round_no=round_no,
+                        hooks=effective_tool_hooks,
+                        agent=active_agent,
+                        model=current_runtime.model,
+                        vendor=current_runtime.vendor,
+                        task_available=task_available,
+                        workdir=str(_get_workdir()),
+                    )
+
+                messages.append(
+                    _build_tool_message(
+                        active_session_id,
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_call["name"],
+                        arguments=tool_call["arguments"],
+                        result=result,
+                        agent=active_agent,
+                        turn_started_at=turn_started_at,
+                    )
+                )
+                metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+                yield _emit_event(
+                    "tool_result",
+                    agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=str(metadata.get("delegation_id", delegation_id or "")).strip() or delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    round=round_no,
+                    tool_call_id=tool_call["id"],
+                    name=tool_call["name"],
+                    status=str(metadata.get("status", "completed")),
+                    output_preview=_tool_result_preview(result),
                 )
 
-            messages.append(
-                _build_tool_message(
-                    active_session_id,
-                    tool_call_id=tool_call["id"],
+                stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
+                if stopped_message is not None:
+                    return stopped_message
+
+                if tool_call["name"] not in {"plan_enter", "plan_exit"}:
+                    continue
+
+                status = str(metadata.get("status", "")).strip().lower()
+
+                interrupted_message, should_cancel = _handle_mode_switch_tool_result(
+                    session_id=active_session_id,
                     tool_name=tool_call["name"],
-                    arguments=tool_call["arguments"],
                     result=result,
-                    agent=active_agent,
+                    messages=messages,
+                    active_agent=active_agent,
+                    current_runtime=current_runtime,
+                    current_provider_explicit=current_provider_explicit,
                     turn_started_at=turn_started_at,
                 )
-            )
-            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-            yield _emit_event(
-                "tool_result",
-                agent=active_agent,
-                agent_kind=agent_kind,
-                depth=depth,
-                delegation_id=str(metadata.get("delegation_id", delegation_id or "")).strip() or delegation_id,
-                parent_tool_call_id=parent_tool_call_id,
-                round=round_no,
-                tool_call_id=tool_call["id"],
-                name=tool_call["name"],
-                status=str(metadata.get("status", "completed")),
-                output_preview=_tool_result_preview(result),
-            )
 
-            if tool_call["name"] not in {"plan_enter", "plan_exit"}:
-                continue
-
-            status = str(metadata.get("status", "")).strip().lower()
-
-            interrupted_message, should_cancel = _handle_mode_switch_tool_result(
-                session_id=active_session_id,
-                tool_name=tool_call["name"],
-                result=result,
-                messages=messages,
-                active_agent=active_agent,
-                current_runtime=current_runtime,
-                current_provider_explicit=current_provider_explicit,
-                turn_started_at=turn_started_at,
-            )
-
-            if interrupted_message is not None:
-                completed_at = str(interrupted_message["info"].get("turn_completed_at", ""))
-                yield _emit_event(
+                if interrupted_message is not None:
+                    completed_at = str(interrupted_message["info"].get("turn_completed_at", ""))
+                    yield _emit_event(
                     "round_end",
                     agent=active_agent,
                     agent_kind=agent_kind,
@@ -1393,51 +1522,53 @@ def _run_session_stream(
                     provider=current_runtime.provider,
                     model=current_runtime.model,
                     completed_at=completed_at,
-                )
-                response_meta = _attach_response_summary(
-                    interrupted_message,
-                    process_items=active_process_items,
-                    display_parts=active_display_parts,
+                    )
+                    response_meta = _attach_response_summary(
+                        interrupted_message,
+                        process_items=active_process_items,
+                        display_parts=active_display_parts,
+                        turn_started_at=turn_started_at,
+                        turn_completed_at=completed_at,
+                    )
+                    if mode_enabled:
+                        SESSION_MEMORY_STORE.save(active_session_id, messages)
+                    if depth == 0:
+                        clear_session_stop(active_session_id)
+                    yield _emit_event(
+                        "done",
+                        agent=active_agent,
+                        agent_kind=agent_kind,
+                        depth=depth,
+                        delegation_id=delegation_id,
+                        parent_tool_call_id=parent_tool_call_id,
+                        message_id=str(interrupted_message["info"].get("message_id", "")),
+                        status=interrupted_message["info"].get("status", "interrupted"),
+                        finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
+                        provider=current_runtime.provider,
+                        model=current_runtime.model,
+                        completed_at=completed_at,
+                        turn_started_at=turn_started_at,
+                        turn_completed_at=completed_at,
+                        response_meta=response_meta,
+                        process_items=[dict(item) for item in active_process_items],
+                        display_parts=interrupted_message["info"].get("display_parts", []),
+                        confirmation=interrupted_message["info"].get("confirmation"),
+                    )
+                    return interrupted_message
+
+                if should_cancel:
+                    should_interrupt = True
+
+            if should_interrupt:
+                message = _build_cancelled_mode_switch_message(
+                    session_id=active_session_id,
+                    active_agent=active_agent,
+                    current_runtime=current_runtime,
                     turn_started_at=turn_started_at,
-                    turn_completed_at=completed_at,
                 )
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                completed_at = str(message["info"].get("turn_completed_at", ""))
+                messages.append(message)
                 yield _emit_event(
-                    "done",
-                    agent=active_agent,
-                    agent_kind=agent_kind,
-                    depth=depth,
-                    delegation_id=delegation_id,
-                    parent_tool_call_id=parent_tool_call_id,
-                    message_id=str(interrupted_message["info"].get("message_id", "")),
-                    status=interrupted_message["info"].get("status", "interrupted"),
-                    finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
-                    provider=current_runtime.provider,
-                    model=current_runtime.model,
-                    completed_at=completed_at,
-                    turn_started_at=turn_started_at,
-                    turn_completed_at=completed_at,
-                    response_meta=response_meta,
-                    process_items=[dict(item) for item in active_process_items],
-                    display_parts=interrupted_message["info"].get("display_parts", []),
-                    confirmation=interrupted_message["info"].get("confirmation"),
-                )
-                return interrupted_message
-
-            if should_cancel:
-                should_interrupt = True
-
-        if should_interrupt:
-            message = _build_cancelled_mode_switch_message(
-                session_id=active_session_id,
-                active_agent=active_agent,
-                current_runtime=current_runtime,
-                turn_started_at=turn_started_at,
-            )
-            completed_at = str(message["info"].get("turn_completed_at", ""))
-            messages.append(message)
-            yield _emit_event(
                 "round_end",
                 agent=active_agent,
                 agent_kind=agent_kind,
@@ -1450,52 +1581,75 @@ def _run_session_stream(
                 provider=current_runtime.provider,
                 model=current_runtime.model,
                 completed_at=completed_at,
-            )
-            response_meta = _attach_response_summary(
-                message,
-                process_items=active_process_items,
-                display_parts=active_display_parts,
-                turn_started_at=turn_started_at,
-                turn_completed_at=completed_at,
-            )
-            if mode_enabled:
-                SESSION_MEMORY_STORE.save(active_session_id, messages)
+                )
+                response_meta = _attach_response_summary(
+                    message,
+                    process_items=active_process_items,
+                    display_parts=active_display_parts,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                )
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                if depth == 0:
+                    clear_session_stop(active_session_id)
+                yield _emit_event(
+                    "done",
+                    agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    message_id=str(message["info"].get("message_id", "")),
+                    status="interrupted",
+                    finish_reason="cancelled",
+                    provider=current_runtime.provider,
+                    model=current_runtime.model,
+                    completed_at=completed_at,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                    response_meta=response_meta,
+                    process_items=[dict(item) for item in active_process_items],
+                    display_parts=message["info"].get("display_parts", []),
+                    confirmation=message["info"].get("confirmation"),
+                )
+                return message
+
             yield _emit_event(
-                "done",
+                "round_end",
                 agent=active_agent,
                 agent_kind=agent_kind,
                 depth=depth,
                 delegation_id=delegation_id,
                 parent_tool_call_id=parent_tool_call_id,
-                message_id=str(message["info"].get("message_id", "")),
-                status="interrupted",
-                finish_reason="cancelled",
+                round=round_no,
+                status="completed",
+                finish_reason="tool_call",
                 provider=current_runtime.provider,
                 model=current_runtime.model,
-                completed_at=completed_at,
-                turn_started_at=turn_started_at,
-                turn_completed_at=completed_at,
-                response_meta=response_meta,
-                process_items=[dict(item) for item in active_process_items],
-                display_parts=message["info"].get("display_parts", []),
-                confirmation=message["info"].get("confirmation"),
+                completed_at=utc_now_iso(),
             )
-            return message
-
-        yield _emit_event(
-            "round_end",
-            agent=active_agent,
-            agent_kind=agent_kind,
-            depth=depth,
-            delegation_id=delegation_id,
-            parent_tool_call_id=parent_tool_call_id,
-            round=round_no,
-            status="completed",
-            finish_reason="tool_call",
-            provider=current_runtime.provider,
-            model=current_runtime.model,
-            completed_at=utc_now_iso(),
-        )
+    finally:
+        if depth == 0:
+            if is_session_stop_requested(active_session_id) and not stop_message_saved:
+                fallback_message = _build_stopped_session_message(
+                    session_id=active_session_id,
+                    active_agent=current_mode if mode_enabled else (runtime_agent or "build"),
+                    current_runtime=current_runtime,
+                    turn_started_at=turn_started_at,
+                )
+                completed_at = str(fallback_message["info"].get("turn_completed_at", ""))
+                _attach_response_summary(
+                    fallback_message,
+                    process_items=active_process_items,
+                    display_parts=active_display_parts,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                )
+                messages.append(fallback_message)
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+            clear_session_stop(active_session_id)
 
 
 def _build_tool_handlers(
@@ -1514,16 +1668,18 @@ def _build_tool_handlers(
 
     def _run_mode_aware_write(path: str, content: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
+            plan_path = str(build_plan_placeholder_path(session_id))
             return build_tool_failure(
-                f"Error: plan 模式下仅允许写入 {get_workspace().plan_path} 文件。",
+                f"Error: plan 模式下仅允许写入 {plan_path} 文件。",
                 error_code="plan_write_forbidden",
             )
         return run_write(path, content)
 
     def _run_mode_aware_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
+            plan_path = str(build_plan_placeholder_path(session_id))
             return build_tool_failure(
-                f"Error: plan 模式下仅允许编辑 {get_workspace().plan_path} 文件。",
+                f"Error: plan 模式下仅允许编辑 {plan_path} 文件。",
                 error_code="plan_edit_forbidden",
             )
         return run_edit(path, old_text, new_text)

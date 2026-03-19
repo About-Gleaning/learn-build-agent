@@ -236,6 +236,18 @@ button:disabled {
   color: #eff8ff;
 }
 
+.primary-btn.stop-btn {
+  border-color: rgba(255, 120, 120, 0.5);
+  background: rgba(122, 24, 24, 0.84);
+  color: #fff3f1;
+}
+
+.primary-btn.stop-btn:hover:not(:disabled) {
+  border-color: rgba(255, 162, 162, 0.88);
+  background: rgba(156, 28, 28, 0.92);
+  color: #fffaf9;
+}
+
 .message-list {
   flex: 1 1 auto;
   min-height: 0;

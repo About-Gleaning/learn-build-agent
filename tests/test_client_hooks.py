@@ -14,6 +14,7 @@ from agent.adapters.llm.client import (
 )
 from agent.config.settings import ResolvedLLMConfig
 from agent.core.message import append_text_part, append_tool_part, create_message
+from agent.core.message import append_reasoning_part, append_tool_call_part, extract_reasoning_content
 
 
 @pytest.fixture(autouse=True)
@@ -263,6 +264,83 @@ def test_stream_should_yield_delta_and_return_message(monkeypatch):
 
     assert "".join(deltas) == "流式"
     assert final_message["info"]["status"] == "completed"
+
+
+def test_stream_should_persist_reasoning_content(monkeypatch):
+    class Delta:
+        def __init__(self, content="", reasoning_content="", tool_calls=None):
+            self.content = content
+            self.reasoning_content = reasoning_content
+            self.tool_calls = tool_calls or []
+
+    class Choice:
+        def __init__(self, delta, finish_reason=""):
+            self.delta = delta
+            self.finish_reason = finish_reason
+
+    class Chunk:
+        def __init__(self, delta, finish_reason=""):
+            self.choices = [Choice(delta, finish_reason=finish_reason)]
+            self.usage = None
+
+    def _fake_stream(**kwargs):
+        yield Chunk(Delta(reasoning_content="先"), "")
+        yield Chunk(Delta(reasoning_content="分析"), "")
+        yield Chunk(Delta(content="结果"), "stop")
+
+    _patch_openai_client(monkeypatch, _fake_stream)
+    stream = create_chat_completion_stream(_build_user_message(), tools=[])
+
+    while True:
+        try:
+            next(stream)
+        except StopIteration as stop:
+            final_message = stop.value
+            break
+
+    assert extract_reasoning_content(final_message) == "先分析"
+    assert final_message["parts"][0]["type"] == "text"
+    assert final_message["parts"][0]["content"] == "结果"
+
+
+def test_create_chat_completion_should_replay_reasoning_content_in_request(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    _patch_openai_client(monkeypatch, _capture_create)
+
+    session_id = "s_reasoning_replay"
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "帮我看一下文件")
+
+    assistant_msg = create_message("assistant", session_id)
+    append_reasoning_part(assistant_msg, "先定位文件。")
+    append_tool_call_part(
+        assistant_msg,
+        tool_call_id="call_1",
+        name="read_file",
+        arguments='{"path":"a.txt"}',
+    )
+
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_1",
+        name="read_file",
+        status="completed",
+        arguments='{"path":"a.txt"}',
+        output={"output": "file-content"},
+    )
+
+    create_chat_completion([user_msg, assistant_msg, tool_msg], tools=[])
+
+    provider_messages = captured_payload["messages"]
+    assert provider_messages[1]["role"] == "assistant"
+    assert provider_messages[1]["reasoning_content"] == "先定位文件。"
+    assert provider_messages[1]["tool_calls"][0]["function"]["name"] == "read_file"
 
 
 def test_logging_hook_should_log_latest_message(monkeypatch, caplog):

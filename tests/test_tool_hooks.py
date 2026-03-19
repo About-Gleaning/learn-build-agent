@@ -169,7 +169,6 @@ def test_tool_executor_should_truncate_long_output_and_write_full_file(tmp_path)
     assert "bash + rg" in result["output"]
     full_output_path = (
         get_workspace().tool_output_root
-        / get_workspace().workspace_id
         / "s_truncate"
         / "demo_tool-call_demo.log"
     )
@@ -292,7 +291,6 @@ def test_tool_logging_hook_should_log_truncation_file_path(caplog, tmp_path):
 
     expected_path = (
         get_workspace().tool_output_root
-        / get_workspace().workspace_id
         / "s_truncated_log"
         / "demo_tool-call_truncated_log.log"
     )
@@ -368,7 +366,6 @@ def test_tool_executor_should_write_full_file_to_workspace_runtime_when_cwd_diff
 
     output_path = (
         get_workspace().tool_output_root
-        / get_workspace().workspace_id
         / "s_fixed_root"
         / "demo_tool-call_fixed_root.log"
     )

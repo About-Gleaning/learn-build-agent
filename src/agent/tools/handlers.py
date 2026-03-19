@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Any
 
+from ..core.context import get_session_id
+from ..runtime.workspace import build_plan_storage_path
 from ..runtime.workspace import get_workspace
 
 
@@ -29,7 +31,7 @@ def build_tool_failure(output: str, *, error_code: str, **metadata: Any) -> dict
 
 def safe_path(path_str: str) -> Path:
     workspace_root = get_workspace().root
-    plan_path = get_workspace().plan_path
+    plan_path = build_plan_storage_path(get_session_id())
     raw_path = Path(path_str).expanduser()
     path = raw_path.resolve() if raw_path.is_absolute() else (workspace_root / path_str).resolve()
     if not path.is_relative_to(workspace_root) and path != plan_path:
@@ -55,7 +57,7 @@ def is_allowed_plan_write_path(path: str) -> bool:
         target = safe_path(path)
     except Exception:
         return False
-    return target == get_workspace().plan_path
+    return target == build_plan_storage_path(get_session_id())
 
 
 def run_write(path: str, content: str) -> dict[str, Any]:
@@ -82,8 +84,7 @@ def run_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
 
 
 def build_plan_placeholder_path(session_id: str) -> Path:
-    del session_id
-    return get_workspace().plan_path
+    return build_plan_storage_path(session_id)
 
 
 def run_plan_enter(

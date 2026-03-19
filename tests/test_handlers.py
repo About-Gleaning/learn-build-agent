@@ -11,13 +11,13 @@ from agent.tools.handlers import (
     run_write,
 )
 from agent.tools.todo_manager import TodoManager
-from agent.runtime.workspace import configure_workspace, get_workspace
+from agent.runtime.workspace import build_plan_storage_path, build_todo_storage_path, configure_workspace, get_workspace
 
 
 def test_build_plan_placeholder_path_should_be_absolute():
     path = build_plan_placeholder_path("s:1/test")
     assert path.is_absolute()
-    assert path == get_workspace().plan_path
+    assert path == build_plan_storage_path("s:1/test")
 
 
 def test_run_plan_enter_should_return_confirmation_required_when_unconfirmed():
@@ -108,8 +108,9 @@ def test_validate_readonly_bash_should_block_non_whitelisted_pipe_command():
 
 def test_is_allowed_plan_write_path():
     configure_workspace()
-    assert is_allowed_plan_write_path(str(get_workspace().plan_path))
-    assert not is_allowed_plan_write_path(str(get_workspace().plan_path.parent / "other.md"))
+    expected_path = build_plan_storage_path("default_session")
+    assert is_allowed_plan_write_path(str(expected_path))
+    assert not is_allowed_plan_write_path(str(expected_path.parent / "other.md"))
     assert not is_allowed_plan_write_path("src/main.py")
 
 
@@ -170,7 +171,7 @@ def test_build_plan_placeholder_path_should_anchor_to_workspace_plan_path(tmp_pa
 
     path = build_plan_placeholder_path("session:plan")
 
-    assert path == get_workspace().plan_path.resolve()
+    assert path == build_plan_storage_path("session:plan").resolve()
 
 def test_todo_manager_should_default_to_workspace_runtime_home(tmp_path):
     project_root = tmp_path / "project-root"
@@ -179,4 +180,14 @@ def test_todo_manager_should_default_to_workspace_runtime_home(tmp_path):
 
     manager = TodoManager()
 
-    assert manager.storage_dir == get_workspace().todo_path
+    assert manager.storage_dir == get_workspace().todo_root
+
+
+def test_todo_manager_should_build_session_scoped_storage_path(tmp_path):
+    project_root = tmp_path / "project-root"
+    project_root.mkdir()
+    configure_workspace(project_root)
+
+    manager = TodoManager()
+
+    assert manager._session_file("session:todo") == build_todo_storage_path("session:todo")

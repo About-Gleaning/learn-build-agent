@@ -17,6 +17,7 @@ from .schemas import (
     RuntimeOptionsVO,
     SessionClearedVO,
     SessionMessagesVO,
+    StopSessionVO,
 )
 from .serializers import message_to_vo, split_stream_event, sse_event
 
@@ -119,6 +120,14 @@ def create_app() -> FastAPI:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @app.post("/api/sessions/{session_id}/stop", response_model=StopSessionVO)
+    def stop_session(session_id: str) -> StopSessionVO:
+        normalized_id = (session_id or "").strip()
+        if not normalized_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        session_runtime.request_session_stop(normalized_id)
+        return StopSessionVO(session_id=normalized_id)
 
     @app.get("/api/sessions/{session_id}/messages", response_model=SessionMessagesVO)
     def get_session_messages(session_id: str, limit: int = Query(default=50, ge=1, le=200)) -> SessionMessagesVO:

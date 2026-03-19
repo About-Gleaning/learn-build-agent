@@ -217,6 +217,10 @@ def append_text_part(message: Message, content: str, meta: dict[str, Any] | None
     return append_part(message, "text", content=content, meta=meta)
 
 
+def append_reasoning_part(message: Message, content: str, meta: dict[str, Any] | None = None) -> Part:
+    return append_part(message, "reasoning", content=content, meta=meta)
+
+
 def append_compaction_part(message: Message, content: str, meta: dict[str, Any] | None = None) -> Part:
     return append_part(message, "compaction", content=content, meta=meta)
 
@@ -310,6 +314,14 @@ def get_message_text(message: Message) -> str:
     return "\n".join(lines).strip()
 
 
+def _get_provider_message_content(message: Message) -> str:
+    lines: list[str] = []
+    for part in message["parts"]:
+        if part.get("type") in {"text", "compaction", "compact_summary", "error"} and part.get("content"):
+            lines.append(str(part["content"]))
+    return "\n".join(lines).strip()
+
+
 def has_compaction_part(message: Message) -> bool:
     return any(part.get("type") == "compaction" for part in message["parts"])
 
@@ -395,6 +407,49 @@ def _tool_result_for_provider(message: Message) -> tuple[str, str]:
     return tool_call_id, content
 
 
+def _collect_reasoning_text(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        content = value.strip()
+        return [content] if content else []
+    if isinstance(value, list):
+        texts: list[str] = []
+        for item in value:
+            texts.extend(_collect_reasoning_text(item))
+        return texts
+    if isinstance(value, dict):
+        texts: list[str] = []
+        for key in ("text", "content", "reasoning_content", "reasoning"):
+            if key in value:
+                texts.extend(_collect_reasoning_text(value.get(key)))
+        return texts
+
+    for attr_name in ("text", "content", "reasoning_content", "reasoning"):
+        attr_value = getattr(value, attr_name, None)
+        if attr_value is not None:
+            return _collect_reasoning_text(attr_value)
+    return []
+
+
+def extract_reasoning_content(message: Message) -> str:
+    texts: list[str] = []
+    for part in message["parts"]:
+        if part.get("type") != "reasoning":
+            continue
+        content = str(part.get("content", "")).strip()
+        if content:
+            texts.append(content)
+    return "\n".join(texts).strip()
+
+
+def extract_provider_reasoning_content(provider_message: Any) -> str:
+    texts = _collect_reasoning_text(getattr(provider_message, "reasoning_content", None))
+    if not texts and isinstance(provider_message, dict):
+        texts = _collect_reasoning_text(provider_message.get("reasoning_content"))
+    return "\n".join(texts).strip()
+
+
 def to_provider_messages(messages: list[Message]) -> list[dict[str, Any]]:
     provider_messages: list[dict[str, Any]] = []
     for message in messages:
@@ -413,7 +468,7 @@ def to_provider_messages(messages: list[Message]) -> list[dict[str, Any]]:
 
         provider_message = {
             "role": role,
-            "content": get_message_text(message),
+            "content": _get_provider_message_content(message),
         }
 
         if role == "assistant":
@@ -430,6 +485,9 @@ def to_provider_messages(messages: list[Message]) -> list[dict[str, Any]]:
                     }
                     for tc in tool_calls
                 ]
+                reasoning_content = extract_reasoning_content(message)
+                if reasoning_content:
+                    provider_message["reasoning_content"] = reasoning_content
 
         provider_messages.append(provider_message)
 
@@ -461,6 +519,11 @@ def parse_provider_response(
     content = getattr(provider_msg, "content", None)
     if content:
         append_text_part(assistant, str(content))
+
+    reasoning_content = extract_provider_reasoning_content(provider_msg)
+    if reasoning_content:
+        # 保留 provider thinking 原文，供后续多轮 tool call 历史回放使用。
+        append_reasoning_part(assistant, reasoning_content)
 
     for tool_call in getattr(provider_msg, "tool_calls", None) or []:
         append_tool_part(

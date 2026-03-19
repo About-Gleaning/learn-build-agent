@@ -167,6 +167,8 @@ def test_runtime_options_should_return_backend_config():
     assert payload["default_agent"] == "build"
     assert any(item["name"] == "build" for item in payload["agents"])
     assert any(item["name"] == "qwen" for item in payload["providers"])
+    assert any(item["name"] == "kimi" for item in payload["providers"])
+    assert any(item["vendor"] == "kimi" for item in payload["providers"])
     assert any(item["vendor"] == "qwen" for item in payload["providers"])
     assert payload["workspace_root"]
     assert payload["workspace_name"]
@@ -394,3 +396,33 @@ def test_apply_mode_switch_should_return_conflict_when_no_pending(monkeypatch):
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == "当前没有待确认的模式切换。"
+
+
+def test_stop_session_should_return_requested(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+    captured: list[str] = []
+
+    monkeypatch.setattr("agent.web.app.session_runtime.request_session_stop", lambda session_id: captured.append(session_id))
+
+    resp = client.post("/api/sessions/s_stop/stop")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "session_id": "s_stop",
+        "stopped": True,
+        "status": "requested",
+    }
+    assert captured == ["s_stop"]
+
+
+def test_clear_session_should_also_clear_stop_state():
+    session_runtime.request_session_stop("s_clear_stop")
+
+    app = create_app()
+    client = TestClient(app)
+
+    resp = client.delete("/api/sessions/s_clear_stop")
+
+    assert resp.status_code == 200
+    assert session_runtime.is_session_stop_requested("s_clear_stop") is False
