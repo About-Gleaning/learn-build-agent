@@ -23,6 +23,7 @@ from ..core.message import (
     get_role,
     trim_messages_by_compaction_checkpoint,
 )
+from .workspace import build_session_storage_name, get_workspace
 
 THRESHOLD = DEFAULT_SUMMARY_TRIGGER_THRESHOLD
 TOOL_OUTPUT_MAX_LINES = DEFAULT_TOOL_OUTPUT_MAX_LINES
@@ -52,10 +53,11 @@ def _line_count(text: str) -> int:
 
 
 def _build_tool_output_path(workdir: Path, session_id: str, tool_name: str, tool_call_id: str) -> Path:
-    session_segment = _safe_name(session_id, "default_session")
+    del workdir
+    session_segment = build_session_storage_name(session_id)
     tool_segment = _safe_name(tool_name, "tool")
     call_segment = _safe_name(tool_call_id, "call")
-    return (workdir / "src" / "storage" / "tool-output" / session_segment / f"{tool_segment}-{call_segment}.log").resolve()
+    return (get_workspace().tool_output_root / session_segment / f"{tool_segment}-{call_segment}.log").resolve()
 
 
 def _build_preview_text(text: str, *, max_lines: int, max_bytes: int) -> str:

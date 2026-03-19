@@ -93,6 +93,12 @@ class SessionClearedVO(BaseModel):
     cleared: bool = True
 
 
+class StopSessionVO(BaseModel):
+    session_id: str
+    stopped: bool = True
+    status: Literal["requested"] = "requested"
+
+
 class ModeSwitchActionReq(BaseModel):
     action: Literal["confirm", "cancel"]
 
@@ -120,3 +126,7 @@ class RuntimeOptionsVO(BaseModel):
     default_agent: Literal["build", "plan"]
     agents: list[RuntimeAgentVO]
     providers: list[RuntimeProviderVO]
+    workspace_root: str
+    workspace_name: str
+    has_agents_md: bool
+    launch_mode: str

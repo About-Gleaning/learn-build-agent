@@ -1,28 +1,30 @@
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..core.context import get_session_id
+from ..runtime.workspace import build_todo_storage_path, get_workspace
 
 
 class TodoManager:
     VALID_STATUSES = ["pending", "in_progress", "completed", "cancelled"]
     VALID_PRIORITIES = ["high", "medium", "low"]
 
-    def __init__(self, storage_dir: str = "src/storage/todo"):
+    def __init__(self, storage_dir: str | Path | None = None):
         self.todos = []
-        self.storage_dir = Path(storage_dir)
-
-    def _safe_session_id(self, session_id: str) -> str:
-        """将会话 ID 规整为安全文件名，防止路径穿越。"""
-        normalized = re.sub(r"[^a-zA-Z0-9._-]", "_", session_id).strip("._")
-        return normalized or "default_session"
+        if storage_dir is None:
+            self.storage_dir = get_workspace().todo_root
+            return
+        storage_path = Path(storage_dir)
+        if not storage_path.is_absolute():
+            storage_path = (get_workspace().workspace_home / storage_path).resolve()
+        self.storage_dir = storage_path.resolve()
 
     def _session_file(self, session_id: str) -> Path:
-        safe_id = self._safe_session_id(session_id)
-        return self.storage_dir / f"{safe_id}.json"
+        if self.storage_dir.is_dir() or self.storage_dir.suffix == "":
+            return (self.storage_dir / build_todo_storage_path(session_id).name).resolve()
+        return self.storage_dir
 
     def _persist(self, session_id: str, todo_list: list[dict[str, Any]]) -> None:
         payload = {
@@ -79,7 +81,7 @@ class TodoManager:
         return self.render()
 
     def read_current_session(self) -> str:
-        """读取当前会话下的 todo JSON。"""
+        """读取当前工作区共享的 todo JSON。"""
         session_id = get_session_id()
         file_path = self._session_file(session_id)
         if not file_path.exists():

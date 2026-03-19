@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Generator
-from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,104 +8,18 @@ from fastapi.responses import StreamingResponse
 
 from ..config.logging_setup import init_logging
 from ..config.settings import build_runtime_options
-from ..core.message import Message, get_message_text
 from ..runtime import session as session_runtime
+from ..runtime.workspace import configure_workspace, get_workspace
 from .schemas import (
     ChatStreamReq,
-    DisplayPartVO,
-    MessageVO,
     ModeSwitchActionReq,
     ModeSwitchActionVO,
     RuntimeOptionsVO,
     SessionClearedVO,
     SessionMessagesVO,
+    StopSessionVO,
 )
-
-
-def _to_message_vo(message: Message) -> MessageVO:
-    info = message.get("info", {})
-    response_meta = info.get("response_meta") if isinstance(info.get("response_meta"), dict) else {}
-    process_items = info.get("process_items") if isinstance(info.get("process_items"), list) else []
-    display_parts = info.get("display_parts") if isinstance(info.get("display_parts"), list) else []
-    confirmation = info.get("confirmation") if isinstance(info.get("confirmation"), dict) else None
-    return MessageVO(
-        message_id=str(info.get("message_id", "")),
-        role=str(info.get("role", "")),
-        text=get_message_text(message),
-        created_at=str(info.get("created_at", "")),
-        status=str(info.get("status", "")),
-        agent=str(info.get("agent", "")),
-        provider=str(info.get("provider", "")),
-        model=str(info.get("model", "")),
-        finish_reason=str(info.get("finish_reason", "")),
-        turn_started_at=str(info.get("turn_started_at", "")),
-        turn_completed_at=str(info.get("turn_completed_at", "")),
-        response_meta={
-            "round_count": int(response_meta.get("round_count", 0) or 0),
-            "tool_call_count": int(response_meta.get("tool_call_count", 0) or 0),
-            "tool_names": [str(item) for item in response_meta.get("tool_names", []) if str(item).strip()],
-            "delegation_count": int(response_meta.get("delegation_count", 0) or 0),
-            "delegated_agents": [str(item) for item in response_meta.get("delegated_agents", []) if str(item).strip()],
-            "duration_ms": int(response_meta.get("duration_ms", 0) or 0),
-        },
-        process_items=[
-            {
-                "id": str(item.get("id", "")),
-                "kind": str(item.get("kind", "")),
-                "title": str(item.get("title", "")),
-                "detail": str(item.get("detail", "")),
-                "created_at": str(item.get("created_at", "")),
-                "agent": str(item.get("agent", "")),
-                "agent_kind": str(item.get("agent_kind", "")),
-                "depth": int(item.get("depth", 0) or 0),
-                "round": int(item.get("round", 0) or 0),
-                "status": str(item.get("status", "")),
-                "delegation_id": str(item.get("delegation_id", "")),
-                "parent_tool_call_id": str(item.get("parent_tool_call_id", "")),
-                "tool_name": str(item.get("tool_name", "")),
-                "tool_call_id": str(item.get("tool_call_id", "")),
-            }
-            for item in process_items
-            if isinstance(item, dict)
-        ],
-        display_parts=[
-            DisplayPartVO(
-                id=str(item.get("id", "")),
-                kind=str(item.get("kind", "")),
-                title=str(item.get("title", "")),
-                detail=str(item.get("detail", "")),
-                text=str(item.get("text", "")),
-                created_at=str(item.get("created_at", "")),
-                agent=str(item.get("agent", "")),
-                agent_kind=str(item.get("agent_kind", "")),
-                depth=int(item.get("depth", 0) or 0),
-                round=int(item.get("round", 0) or 0),
-                status=str(item.get("status", "")),
-                delegation_id=str(item.get("delegation_id", "")),
-                parent_tool_call_id=str(item.get("parent_tool_call_id", "")),
-                tool_name=str(item.get("tool_name", "")),
-                tool_call_id=str(item.get("tool_call_id", "")),
-            )
-            for item in display_parts
-            if isinstance(item, dict)
-        ],
-        confirmation=(
-            {
-                "tool": str(confirmation.get("tool", "")),
-                "question": str(confirmation.get("question", "")),
-                "target_agent": str(confirmation.get("target_agent", "")),
-                "current_agent": str(confirmation.get("current_agent", "")),
-                "action_type": str(confirmation.get("action_type", "")),
-                "plan_path": str(confirmation.get("plan_path", "")),
-            }
-            if confirmation is not None
-            else None
-        ),
-    )
-
-
-def _sse_event(event: str, payload: dict[str, object]) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+from .serializers import message_to_vo, split_stream_event, sse_event
 
 
 def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
@@ -119,13 +31,13 @@ def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
             provider=req.provider,
             provider_specified="provider" in req.model_fields_set,
         ):
-            event_type = str(event.get("type", "")).strip()
-            if not event_type:
+            serialized = split_stream_event(event)
+            if serialized is None:
                 continue
-            payload: dict[str, Any] = {k: v for k, v in event.items() if k != "type"}
-            yield _sse_event(event_type, payload)
+            event_type, payload = serialized
+            yield sse_event(event_type, payload)
     except Exception as exc:  # pragma: no cover - 兜底分支
-        yield _sse_event(
+        yield sse_event(
             "error",
             {
                 "code": "internal_error",
@@ -137,13 +49,13 @@ def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
 def _stream_mode_switch(session_id: str, req: ModeSwitchActionReq) -> Generator[str, None, None]:
     try:
         for event in session_runtime.run_mode_switch_stream_events(session_id, req.action):
-            event_type = str(event.get("type", "")).strip()
-            if not event_type:
+            serialized = split_stream_event(event)
+            if serialized is None:
                 continue
-            payload: dict[str, Any] = {k: v for k, v in event.items() if k != "type"}
-            yield _sse_event(event_type, payload)
+            event_type, payload = serialized
+            yield sse_event(event_type, payload)
     except ValueError as exc:
-        yield _sse_event(
+        yield sse_event(
             "error",
             {
                 "code": "mode_switch_conflict",
@@ -151,7 +63,7 @@ def _stream_mode_switch(session_id: str, req: ModeSwitchActionReq) -> Generator[
             },
         )
     except Exception as exc:  # pragma: no cover - 兜底分支
-        yield _sse_event(
+        yield sse_event(
             "error",
             {
                 "code": "internal_error",
@@ -161,7 +73,8 @@ def _stream_mode_switch(session_id: str, req: ModeSwitchActionReq) -> Generator[
 
 
 def create_app() -> FastAPI:
-    init_logging()
+    configure_workspace(get_workspace().root, launch_mode="web")
+    init_logging(get_workspace().logs_dir)
     app = FastAPI(title="my-main-agent web api", version="0.1.0")
 
     app.add_middleware(
@@ -208,6 +121,14 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/api/sessions/{session_id}/stop", response_model=StopSessionVO)
+    def stop_session(session_id: str) -> StopSessionVO:
+        normalized_id = (session_id or "").strip()
+        if not normalized_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        session_runtime.request_session_stop(normalized_id)
+        return StopSessionVO(session_id=normalized_id)
+
     @app.get("/api/sessions/{session_id}/messages", response_model=SessionMessagesVO)
     def get_session_messages(session_id: str, limit: int = Query(default=50, ge=1, le=200)) -> SessionMessagesVO:
         normalized_id = (session_id or "").strip()
@@ -218,7 +139,7 @@ def create_app() -> FastAPI:
         selected = messages[-limit:]
         return SessionMessagesVO(
             session_id=normalized_id,
-            messages=[_to_message_vo(msg) for msg in selected],
+            messages=[message_to_vo(msg) for msg in selected],
         )
 
     @app.post("/api/sessions/{session_id}/mode-switch", response_model=ModeSwitchActionVO)
@@ -237,7 +158,7 @@ def create_app() -> FastAPI:
             session_id=normalized_id,
             status=str(message["info"].get("status", "")),
             current_mode=current_mode,  # type: ignore[arg-type]
-            message=_to_message_vo(message),
+            message=message_to_vo(message),
         )
 
     @app.post("/api/sessions/{session_id}/mode-switch/stream")
