@@ -29,7 +29,9 @@ def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
             session_id=req.session_id,
             mode=req.mode,
             provider=req.provider,
+            model=req.model,
             provider_specified="provider" in req.model_fields_set,
+            model_specified="model" in req.model_fields_set,
         ):
             serialized = split_stream_event(event)
             if serialized is None:

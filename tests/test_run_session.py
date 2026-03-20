@@ -1307,7 +1307,7 @@ def test_merge_display_parts_with_message_should_not_append_fallback_when_stream
     assert merged == display_parts
 
 
-def test_run_session_should_remember_explicit_provider(monkeypatch):
+def test_run_session_should_remember_explicit_provider_and_model(monkeypatch):
     configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
     clear_session_memory("s_provider_memory")
     seen: list[tuple[str, str]] = []
@@ -1321,32 +1321,65 @@ def test_run_session_should_remember_explicit_provider(monkeypatch):
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
 
-    run_session("第一轮", session_id="s_provider_memory", provider="gpt", provider_specified=True)
+    run_session(
+        "第一轮",
+        session_id="s_provider_memory",
+        provider="qwen",
+        provider_specified=True,
+        model="qwen3-coder-next",
+        model_specified=True,
+    )
     run_session("第二轮", session_id="s_provider_memory")
 
-    assert seen[0][0] == "gpt"
-    assert seen[1][0] == "gpt"
+    assert seen[0] == ("qwen", "qwen3-coder-next")
+    assert seen[1] == ("qwen", "qwen3-coder-next")
 
 
-def test_run_session_should_reset_to_agent_default_provider(monkeypatch):
+def test_run_session_should_reset_to_agent_default_provider_and_model(monkeypatch):
     configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
     clear_session_memory("s_provider_reset")
-    seen: list[str] = []
+    seen: list[tuple[str, str]] = []
 
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
-        seen.append(llm_config.provider)
+        seen.append((llm_config.provider, llm_config.model))
         assistant = create_message("assistant", session_id, status="completed")
         append_text_part(assistant, "ok")
         return assistant
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
 
-    run_session("第一轮", session_id="s_provider_reset", provider="gpt", provider_specified=True)
+    run_session(
+        "第一轮",
+        session_id="s_provider_reset",
+        provider="qwen",
+        provider_specified=True,
+        model="qwen3-coder-next",
+        model_specified=True,
+    )
     run_session("第二轮", session_id="s_provider_reset", mode="plan", provider="", provider_specified=True)
 
-    assert seen[0] == "gpt"
-    assert seen[1] == "qwen"
+    assert seen[0] == ("qwen", "qwen3-coder-next")
+    assert seen[1] == ("qwen", "qwen3.5-flash")
+
+
+def test_run_session_should_use_provider_default_model_when_model_is_omitted(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_provider_default_model")
+    seen: list[tuple[str, str]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        seen.append((llm_config.provider, llm_config.model))
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    run_session("第一轮", session_id="s_provider_default_model", provider="gpt", provider_specified=True)
+
+    assert seen[0] == ("gpt", "gpt-4.1")
 
 
 def test_build_system_prompt_should_use_model_specific_prompt(monkeypatch):
@@ -1460,7 +1493,7 @@ def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch)
 
     assert get_message_text(result) == "ok"
     assert seen_system_prompts[0] == "PROMPT::build::qwen::qwen::qwen3-max"
-    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen::qwen3-max"
+    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen::qwen3.5-flash"
 
 
 def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
@@ -1491,10 +1524,12 @@ def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
     clear_runtime_settings_cache()
 
     try:
-        config = resolve_llm_config("build", "qwen-coder")
-        assert config.provider == "qwen-coder"
+        config = resolve_llm_config("build", "qwen", "qwen3-coder-next")
+        assert config.provider == "qwen"
         assert config.vendor == "qwen"
         assert config.model == "qwen3-coder-next"
+        assert config.api_mode == "responses"
+        assert config.base_url == "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
         assert config.timeout_seconds == 60
     finally:
         clear_runtime_settings_cache()
@@ -1509,8 +1544,22 @@ def test_resolve_llm_config_should_support_kimi_provider(monkeypatch):
         assert config.provider == "kimi"
         assert config.vendor == "kimi"
         assert config.model == "kimi-k2.5"
+        assert config.api_mode == "chat_completions"
         assert config.base_url == "https://api.moonshot.cn/v1"
         assert config.timeout_seconds == 60
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_resolve_llm_config_should_use_provider_default_model_when_provider_overridden(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    clear_runtime_settings_cache()
+
+    try:
+        config = resolve_llm_config("build", "gpt")
+        assert config.provider == "gpt"
+        assert config.model == "gpt-4.1"
+        assert config.api_mode == "responses"
     finally:
         clear_runtime_settings_cache()
 
@@ -1535,16 +1584,21 @@ def test_get_runtime_settings_should_require_vendor(tmp_path, monkeypatch):
           "providers": {
             "qwen": {
               "base_url": "https://example.com/v1",
-              "model": "qwen3-max",
+              "default_model": "qwen3-max",
+              "models": {
+                "qwen3-max": {}
+              },
               "api_key_env": "QWEN_API_KEY"
             }
           },
           "agent_defaults": {
             "build": {
-              "provider": "qwen"
+              "provider": "qwen",
+              "model": "qwen3-max"
             },
             "plan": {
-              "provider": "qwen"
+              "provider": "qwen",
+              "model": "qwen3-max"
             }
           }
         }
@@ -1559,6 +1613,88 @@ def test_get_runtime_settings_should_require_vendor(tmp_path, monkeypatch):
         raise AssertionError("期望缺少 vendor 时抛出异常")
     except ValueError as exc:
         assert "vendor" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_runtime_settings_should_require_agent_default_model_in_provider_models(tmp_path, monkeypatch):
+    config_path = tmp_path / "llm_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "providers": {
+            "qwen": {
+              "vendor": "qwen",
+              "base_url": "https://example.com/v1",
+              "default_model": "qwen3-max",
+              "models": {
+                "qwen3-max": {}
+              },
+              "api_key_env": "QWEN_API_KEY",
+              "api_mode": "chat_completions"
+            }
+          },
+          "agent_defaults": {
+            "build": {
+              "provider": "qwen",
+              "model": "qwen3-coder-next"
+            },
+            "plan": {
+              "provider": "qwen",
+              "model": "qwen3-max"
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.LLM_CONFIG_PATH", config_path)
+
+    try:
+        with pytest.raises(ValueError, match="agent_defaults.build.model"):
+            resolve_llm_config("build")
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_runtime_settings_should_default_api_mode_to_responses(tmp_path, monkeypatch):
+    config_path = tmp_path / "llm_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "providers": {
+            "gpt": {
+              "vendor": "openai",
+              "base_url": "https://api.openai.com/v1",
+              "default_model": "gpt-4.1",
+              "models": {
+                "gpt-4.1": {}
+              },
+              "api_key_env": "OPENAI_API_KEY"
+            }
+          },
+          "agent_defaults": {
+            "build": {
+              "provider": "gpt",
+              "model": "gpt-4.1"
+            },
+            "plan": {
+              "provider": "gpt",
+              "model": "gpt-4.1"
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.LLM_CONFIG_PATH", config_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+
+    try:
+        config = resolve_llm_config("build")
+        assert config.api_mode == "responses"
     finally:
         clear_runtime_settings_cache()
 

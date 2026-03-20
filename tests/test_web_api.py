@@ -38,7 +38,9 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     def fake_stream_events(user_input: str, session_id: str | None = None, mode: str | None = None, **kwargs):
         assert user_input == "你好"
         assert kwargs["provider"] == "gpt"
+        assert kwargs["model"] == "gpt-4.1"
         assert kwargs["provider_specified"] is True
+        assert kwargs["model_specified"] is True
         yield {
             "type": "start",
             "event_id": "evt_1",
@@ -139,7 +141,7 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     with client.stream(
         "POST",
         "/api/chat/stream",
-        json={"session_id": "s_web", "user_input": "你好", "mode": "build", "provider": "gpt"},
+        json={"session_id": "s_web", "user_input": "你好", "mode": "build", "provider": "gpt", "model": "gpt-4.1"},
     ) as resp:
         assert resp.status_code == 200
         body = "".join(resp.iter_text())
@@ -170,6 +172,9 @@ def test_runtime_options_should_return_backend_config():
     assert any(item["name"] == "kimi" for item in payload["providers"])
     assert any(item["vendor"] == "kimi" for item in payload["providers"])
     assert any(item["vendor"] == "qwen" for item in payload["providers"])
+    assert any("qwen3-max" in item["models"] for item in payload["providers"] if item["name"] == "qwen")
+    assert any(item["api_mode"] == "responses" for item in payload["providers"] if item["name"] == "gpt")
+    assert any(item["api_mode"] == "chat_completions" for item in payload["agents"] if item["name"] == "build")
     assert payload["workspace_root"]
     assert payload["workspace_name"]
     assert payload["launch_mode"] == "web"

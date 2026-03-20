@@ -2,46 +2,59 @@
   "providers": {
     "qwen": {
       "vendor": "qwen",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "model": "qwen3-max",
+      "base_url": "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
       "api_key_env": "QWEN_API_KEY",
-      "timeout_seconds": 60
-    },
-    "qwen-coder": {
-      "vendor": "qwen",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "model": "qwen3-coder-next",
-      "api_key_env": "QWEN_API_KEY",
+      "api_mode": "responses",
+      "default_model": "qwen3.5-flash",
+      "models": {
+        "qwen3-max": {},
+        "qwen3-coder-next": {},
+        "qwen3.5-flash": {}
+      },
       "timeout_seconds": 60
     },
     "gemini": {
       "vendor": "google",
       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-      "model": "gemini-2.0-flash",
       "api_key_env": "GEMINI_API_KEY",
+      "api_mode": "chat_completions",
+      "default_model": "gemini-2.0-flash",
+      "models": {
+        "gemini-2.0-flash": {}
+      },
       "timeout_seconds": 60
     },
     "gpt": {
       "vendor": "openai",
       "base_url": "https://api.openai.com/v1",
-      "model": "gpt-4.1",
       "api_key_env": "OPENAI_API_KEY",
+      "api_mode": "responses",
+      "default_model": "gpt-4.1",
+      "models": {
+        "gpt-4.1": {}
+      },
       "timeout_seconds": 60
     },
     "kimi": {
       "vendor": "kimi",
       "base_url": "https://api.moonshot.cn/v1",
-      "model": "kimi-k2.5",
       "api_key_env": "KIMI_API_KEY",
+      "api_mode": "chat_completions",
+      "default_model": "kimi-k2.5",
+      "models": {
+        "kimi-k2.5": {}
+      },
       "timeout_seconds": 60
     }
   },
   "agent_defaults": {
     "build": {
-      "provider": "qwen"
+      "provider": "qwen",
+      "model": "qwen3-max"
     },
     "plan": {
-      "provider": "qwen"
+      "provider": "qwen",
+      "model": "qwen3.5-flash"
     }
   }
 }

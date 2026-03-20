@@ -10,21 +10,18 @@ from ...config.settings import ResolvedLLMConfig, resolve_llm_config
 from ...core.hooks import HookDispatcher
 from ...core.message import (
     Message,
-    append_reasoning_part,
-    append_text_part,
-    append_tool_part,
     create_error_message,
-    create_message,
     estimate_message_size,
-    extract_provider_reasoning_content,
     extract_tool_calls,
     get_role,
-    mark_message_completed,
     normalize_error,
-    parse_provider_response,
-    to_provider_messages,
 )
+from .protocols import ProviderAdapter, normalize_responses_tools
+from .vendors import build_provider_adapter
 logger = logging.getLogger(__name__)
+
+# 兼容现有测试与内部调用路径，继续从 client 暴露该辅助函数。
+_normalize_responses_tools = normalize_responses_tools
 
 
 class HookContext(TypedDict, total=False):
@@ -32,6 +29,7 @@ class HookContext(TypedDict, total=False):
     agent: str
     provider: str
     model: str
+    api_mode: str
     parent_id: str
     max_tokens: int
     message_count: int
@@ -70,9 +68,14 @@ class LoggingHook(LLMHook):
         latest_message = _build_latest_message_preview(ctx.get("source_messages", []))
         log_extra = build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", ""))
         if latest_message is None:
-            logger.info("llm.request", extra=log_extra)
+            logger.info("llm.request api_mode=%s", ctx.get("api_mode", "unknown"), extra=log_extra)
             return
-        logger.info("llm.request latest_message=%s", latest_message, extra=log_extra)
+        logger.info(
+            "llm.request api_mode=%s latest_message=%s",
+            ctx.get("api_mode", "unknown"),
+            latest_message,
+            extra=log_extra,
+        )
 
     def after_call(self, ctx: HookContext, message: Message) -> None:
         tool_names = [tool_call["name"] for tool_call in extract_tool_calls(message) if tool_call.get("name")]
@@ -121,31 +124,6 @@ def _build_response_preview(message: Message) -> str:
         if part.get("type") in {"text", "error"} and str(part.get("content", "")).strip()
     ]
     return sanitize_log_text("\n".join(text_parts))
-
-
-class OpenAICompatibleAdapter:
-    """OpenAI 兼容接口适配层，负责内部 Message 与 provider 协议互转。"""
-
-    def __init__(self, config: ResolvedLLMConfig) -> None:
-        self.config = config
-        self.model = config.model
-        self.provider = config.provider
-
-    def build_request(self, messages: list[Message], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "model": self.model,
-            "messages": to_provider_messages(messages),
-            "tools": tools,
-        }
-
-    def parse_response(self, response: Any, *, session_id: str, parent_id: str = "") -> Message:
-        return parse_provider_response(
-            response,
-            session_id=session_id,
-            model=self.model,
-            provider=self.provider,
-            parent_id=parent_id,
-        )
 
 
 _GLOBAL_HOOKS: list[LLMHook] = []
@@ -203,6 +181,22 @@ def _build_openai_client(llm_config: ResolvedLLMConfig) -> OpenAI:
     )
 
 
+def _create_provider_completion(client: OpenAI, request_payload: dict[str, Any], adapter: ProviderAdapter) -> Any:
+    if adapter.uses_responses_api:
+        return client.responses.create(**request_payload)
+    return client.chat.completions.create(**request_payload)
+
+
+def _create_provider_completion_stream(
+    client: OpenAI,
+    request_payload: dict[str, Any],
+    adapter: ProviderAdapter,
+) -> Any:
+    if adapter.uses_responses_api:
+        return client.responses.create(**request_payload)
+    return client.chat.completions.create(**request_payload)
+
+
 def create_chat_completion(
     messages: list[Message],
     tools: list[dict[str, Any]],
@@ -215,17 +209,18 @@ def create_chat_completion(
     session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
     effective_config = _resolve_effective_config(llm_config)
-    adapter = OpenAICompatibleAdapter(effective_config)
+    adapter = build_provider_adapter(effective_config)
     client = _build_openai_client(effective_config)
 
     request_payload = adapter.build_request(messages, tools)
-    request_payload["max_tokens"] = max_tokens
+    request_payload[adapter.request_token_key] = max_tokens
 
     ctx: HookContext = {
         "session_id": session_id,
         "agent": agent,
         "provider": adapter.provider,
         "model": adapter.model,
+        "api_mode": effective_config.api_mode,
         "parent_id": parent_id,
         "max_tokens": max_tokens,
         "message_count": len(messages),
@@ -243,7 +238,7 @@ def create_chat_completion(
     ctx["start_time"] = start
 
     try:
-        response = client.chat.completions.create(**request_payload)
+        response = _create_provider_completion(client, request_payload, adapter)
         message = adapter.parse_response(response, session_id=session_id, parent_id=parent_id)
     except Exception as exc:
         ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
@@ -278,11 +273,11 @@ def create_chat_completion_stream(
     session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
     effective_config = _resolve_effective_config(llm_config)
-    adapter = OpenAICompatibleAdapter(effective_config)
+    adapter = build_provider_adapter(effective_config)
     client = _build_openai_client(effective_config)
 
     request_payload = adapter.build_request(messages, tools)
-    request_payload["max_tokens"] = max_tokens
+    request_payload[adapter.request_token_key] = max_tokens
     request_payload["stream"] = True
 
     ctx: HookContext = {
@@ -290,6 +285,7 @@ def create_chat_completion_stream(
         "agent": agent,
         "provider": adapter.provider,
         "model": adapter.model,
+        "api_mode": effective_config.api_mode,
         "parent_id": parent_id,
         "max_tokens": max_tokens,
         "message_count": len(messages),
@@ -306,60 +302,31 @@ def create_chat_completion_stream(
     start = time.perf_counter()
     ctx["start_time"] = start
 
-    finish_reason = "stop"
-    text_buffer: list[str] = []
-    reasoning_buffer: list[str] = []
-    tool_call_map: dict[int, dict[str, str]] = {}
-    usage_payload: dict[str, int] | None = None
+    stream_state = adapter.new_stream_state()
 
     try:
-        stream = client.chat.completions.create(**request_payload)
+        stream = _create_provider_completion_stream(client, request_payload, adapter)
         for chunk in stream:
-            if getattr(chunk, "usage", None) is not None:
-                usage = chunk.usage
-                usage_payload = {
-                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-                    "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-                }
-
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue
-            choice = choices[0]
-            chunk_finish_reason = str(getattr(choice, "finish_reason", "") or "").strip()
-            if chunk_finish_reason:
-                finish_reason = chunk_finish_reason
-
-            delta = getattr(choice, "delta", None)
-            if delta is None:
-                continue
-
-            delta_content = getattr(delta, "content", None)
-            if delta_content:
-                delta_text = str(delta_content)
-                text_buffer.append(delta_text)
-                yield {"type": "text_delta", "delta": delta_text}
-
-            delta_reasoning = extract_provider_reasoning_content(delta)
-            if delta_reasoning:
-                reasoning_buffer.append(delta_reasoning)
-
-            for tool_call in getattr(delta, "tool_calls", None) or []:
-                index = int(getattr(tool_call, "index", 0) or 0)
-                state = tool_call_map.setdefault(index, {"id": "", "name": "", "arguments": ""})
-                tc_id = str(getattr(tool_call, "id", "") or "")
-                if tc_id:
-                    state["id"] = tc_id
-                function_obj = getattr(tool_call, "function", None)
-                if function_obj is None:
-                    continue
-                tc_name = str(getattr(function_obj, "name", "") or "")
-                if tc_name:
-                    state["name"] = tc_name
-                tc_arguments = str(getattr(function_obj, "arguments", "") or "")
-                if tc_arguments:
-                    state["arguments"] += tc_arguments
+            try:
+                events = adapter.consume_stream_chunk(chunk, stream_state)
+            except RuntimeError:
+                if adapter.uses_responses_api:
+                    log_fields = adapter.get_stream_failure_log_fields(chunk)  # type: ignore[attr-defined]
+                    logger.warning(
+                        "llm.responses_stream_failure event_type=%s status=%s error_code=%s error_type=%s incomplete_reason=%s detail=%s event_keys=%s response_keys=%s",
+                        sanitize_log_text(log_fields["event_type"], limit=80),
+                        sanitize_log_text(log_fields["status"], limit=80),
+                        sanitize_log_text(log_fields["error_code"], limit=80),
+                        sanitize_log_text(log_fields["error_type"], limit=80),
+                        sanitize_log_text(log_fields["incomplete_reason"], limit=120),
+                        sanitize_log_text(log_fields["detail"], limit=200),
+                        sanitize_log_text(log_fields["event_keys"], limit=200),
+                        sanitize_log_text(log_fields["response_keys"], limit=200),
+                        extra=build_log_extra(agent="", model=effective_config.model),
+                    )
+                raise
+            for event in events:
+                yield event
     except Exception as exc:
         ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
         normalized = normalize_error(exc)
@@ -373,38 +340,7 @@ def create_chat_completion_stream(
             parent_id=parent_id,
         )
 
-    assistant = create_message(
-        "assistant",
-        session_id,
-        model=adapter.model,
-        provider=adapter.provider,
-        status="running",
-        finish_reason=finish_reason,
-        parent_id=parent_id,
-    )
-
-    if text_buffer:
-        append_text_part(assistant, "".join(text_buffer))
-    if reasoning_buffer:
-        # reasoning 仅持久化到历史，避免改变当前前端流式展示语义。
-        append_reasoning_part(assistant, "".join(reasoning_buffer))
-
-    for index in sorted(tool_call_map.keys()):
-        tool_call = tool_call_map[index]
-        if not tool_call["id"] or not tool_call["name"]:
-            continue
-        append_tool_part(
-            assistant,
-            tool_call_id=tool_call["id"],
-            name=tool_call["name"],
-            status="requested",
-            arguments=tool_call["arguments"] or "{}",
-        )
-
-    if usage_payload is not None:
-        assistant["info"]["token_usage"] = usage_payload
-
-    mark_message_completed(assistant, finish_reason=assistant["info"].get("finish_reason", "stop") or "stop")
+    assistant = adapter.build_stream_message(stream_state, session_id=session_id, parent_id=parent_id)
     ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
     for hook in effective_hooks:
         _invoke_hook(hook, "after", ctx=ctx, message=assistant)

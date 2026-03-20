@@ -12,6 +12,7 @@ from ..runtime.workspace import get_workspace
 load_dotenv()
 
 MainAgentMode = Literal["build", "plan"]
+LLMApiMode = Literal["responses", "chat_completions"]
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_LLM_PROMPT = os.getenv("LOG_LLM_PROMPT", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -43,15 +44,17 @@ class ProviderSettings:
     name: str
     vendor: str
     base_url: str
-    model: str
+    default_model: str
+    models: tuple[str, ...]
     api_key_env: str
     timeout_seconds: float
+    api_mode: LLMApiMode
 
 
 @dataclass(frozen=True)
 class AgentDefaultSettings:
     provider: str
-    model: str | None = None
+    model: str
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,7 @@ class ResolvedLLMConfig:
     provider: str
     vendor: str
     model: str
+    api_mode: LLMApiMode
     base_url: str
     api_key: str
     timeout_seconds: float
@@ -295,11 +299,29 @@ def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
 
         base_url = str(raw_value.get("base_url", "")).strip()
         vendor = str(raw_value.get("vendor", "")).strip().lower()
-        model = str(raw_value.get("model", "")).strip()
         api_key_env = str(raw_value.get("api_key_env", "")).strip()
+        default_model = str(raw_value.get("default_model", "")).strip()
+        raw_models = raw_value.get("models")
+        raw_api_mode = str(raw_value.get("api_mode", "responses")).strip().lower()
         timeout_seconds_raw = raw_value.get("timeout_seconds", 60)
-        if not base_url or not vendor or not model or not api_key_env:
-            raise ValueError(f"provider '{name}' 必须配置 vendor、base_url、model、api_key_env。")
+        if not base_url or not vendor or not api_key_env:
+            raise ValueError(f"provider '{name}' 必须配置 vendor、base_url、api_key_env。")
+        if raw_api_mode not in {"responses", "chat_completions"}:
+            raise ValueError(f"provider '{name}'.api_mode 仅支持 responses 或 chat_completions。")
+        if not isinstance(raw_models, dict) or not raw_models:
+            raise ValueError(f"provider '{name}'.models 必须是非空对象。")
+        models: list[str] = []
+        for raw_model_name, raw_model_value in raw_models.items():
+            model_name = str(raw_model_name).strip()
+            if not model_name:
+                raise ValueError(f"provider '{name}'.models 中的模型名称不能为空。")
+            if raw_model_value is not None and not isinstance(raw_model_value, dict):
+                raise ValueError(f"provider '{name}'.models.{model_name} 必须是对象或 null。")
+            models.append(model_name)
+        if not default_model:
+            raise ValueError(f"provider '{name}'.default_model 不能为空。")
+        if default_model not in models:
+            raise ValueError(f"provider '{name}'.default_model '{default_model}' 未在 models 中定义。")
         try:
             timeout_seconds = float(timeout_seconds_raw)
         except (TypeError, ValueError) as exc:
@@ -311,9 +333,11 @@ def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
             name=name,
             vendor=vendor,
             base_url=base_url,
-            model=model,
+            default_model=default_model,
+            models=tuple(models),
             api_key_env=api_key_env,
             timeout_seconds=timeout_seconds,
+            api_mode=raw_api_mode,  # type: ignore[arg-type]
         )
     return providers
 
@@ -328,9 +352,13 @@ def _load_agent_defaults(raw_agent_defaults: Any, providers: dict[str, ProviderS
         if not isinstance(raw_value, dict):
             raise ValueError(f"agent_defaults.{agent} 必须是对象。")
         provider = str(raw_value.get("provider", "")).strip().lower()
-        model = str(raw_value.get("model", "")).strip() or None
+        model = str(raw_value.get("model", "")).strip()
         if provider not in providers:
             raise ValueError(f"agent_defaults.{agent}.provider '{provider}' 未在 providers 中定义。")
+        if not model:
+            raise ValueError(f"agent_defaults.{agent}.model 不能为空。")
+        if model not in providers[provider].models:
+            raise ValueError(f"agent_defaults.{agent}.model '{model}' 未在 provider '{provider}' 的 models 中定义。")
         defaults[agent] = AgentDefaultSettings(provider=provider, model=model)
     return defaults
 
@@ -363,7 +391,7 @@ def clear_runtime_settings_cache() -> None:
     get_project_runtime_settings.cache_clear()
 
 
-def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None) -> ResolvedLLMConfig:
+def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None, model_name: str | None = None) -> ResolvedLLMConfig:
     settings = get_runtime_settings()
     agent_default = settings.agent_defaults[agent]
     provider_key = (provider_name or agent_default.provider).strip().lower()
@@ -375,12 +403,21 @@ def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None) -
     if not api_key:
         raise ValueError(f"缺少 API Key，请配置环境变量 {provider.api_key_env}。")
 
-    model = agent_default.model or provider.model
+    explicit_model = str(model_name or "").strip()
+    if explicit_model:
+        model = explicit_model
+    elif provider_name:
+        model = provider.default_model
+    else:
+        model = agent_default.model
+    if model not in provider.models:
+        raise ValueError(f"provider '{provider.name}' 未定义模型 '{model}'。")
     return ResolvedLLMConfig(
         agent=agent,
         provider=provider.name,
         vendor=provider.vendor,
         model=model,
+        api_mode=provider.api_mode,
         base_url=provider.base_url,
         api_key=api_key,
         timeout_seconds=provider.timeout_seconds,
@@ -394,7 +431,9 @@ def build_runtime_options() -> dict[str, Any]:
         {
             "name": provider.name,
             "vendor": provider.vendor,
-            "default_model": provider.model,
+            "default_model": provider.default_model,
+            "models": list(provider.models),
+            "api_mode": provider.api_mode,
         }
         for provider in settings.providers.values()
     ]
@@ -402,8 +441,8 @@ def build_runtime_options() -> dict[str, Any]:
         {
             "name": agent,
             "default_provider": settings.agent_defaults[agent].provider,
-            "default_model": settings.agent_defaults[agent].model
-            or settings.providers[settings.agent_defaults[agent].provider].model,
+            "default_model": settings.agent_defaults[agent].model,
+            "api_mode": settings.providers[settings.agent_defaults[agent].provider].api_mode,
         }
         for agent in ("build", "plan")
     ]
