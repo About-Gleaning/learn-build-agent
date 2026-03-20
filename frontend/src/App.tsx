@@ -100,11 +100,22 @@ type RuntimeOptionsResp = {
     name: AgentName;
     default_provider: string;
     default_model: string;
+    api_mode: "responses" | "chat_completions";
   }>;
   providers: Array<{
     name: string;
+    vendor: string;
     default_model: string;
+    models: string[];
+    api_mode: "responses" | "chat_completions";
   }>;
+};
+
+type ProviderModelOption = {
+  key: string;
+  provider: string;
+  model: string;
+  label: string;
 };
 
 type HistoryResp = {
@@ -204,6 +215,18 @@ function buildSessionId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 10);
   return `s_${ts}_${rand}`;
+}
+
+function buildProviderModelKey(provider: string, model: string): string {
+  return `${provider}::${model}`;
+}
+
+function parseProviderModelKey(selectionKey: string): { provider: string; model: string } {
+  const [provider, ...rest] = selectionKey.split("::");
+  return {
+    provider: (provider || "").trim(),
+    model: rest.join("::").trim(),
+  };
 }
 
 function emptyResponseMeta(): ResponseMeta {
@@ -705,6 +728,7 @@ async function streamChat(params: {
   userInput: string;
   mode: AgentName;
   provider: string;
+  model: string;
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
   signal?: AbortSignal;
@@ -716,6 +740,7 @@ async function streamChat(params: {
       user_input: params.userInput,
       mode: params.mode,
       provider: params.provider,
+      model: params.model,
     },
     onDelta: params.onDelta,
     onEvent: params.onEvent,
@@ -1268,7 +1293,7 @@ export function App() {
   const [isStopping, setIsStopping] = useState(false);
   const [shouldFollow, setShouldFollow] = useState(true);
   const [mode, setMode] = useState<AgentName>("build");
-  const [provider, setProvider] = useState("");
+  const [providerModelKey, setProviderModelKey] = useState("");
   const [activeProvider, setActiveProvider] = useState("");
   const [activeModel, setActiveModel] = useState("");
 
@@ -1307,12 +1332,41 @@ export function App() {
     [runtimeOptions],
   );
   const providerOptions = runtimeOptions?.providers || [];
-  const providerNames = useMemo(() => providerOptions.map((item) => item.name), [providerOptions]);
+  const providerModelOptions = useMemo<ProviderModelOption[]>(() => {
+    const options: ProviderModelOption[] = [];
+    for (const item of providerOptions) {
+      for (const modelName of item.models || []) {
+        options.push({
+          key: buildProviderModelKey(item.name, modelName),
+          provider: item.name,
+          model: modelName,
+          label: `${item.name} / ${modelName}`,
+        });
+      }
+    }
+    return options;
+  }, [providerOptions]);
+  const providerModelKeys = useMemo(() => providerModelOptions.map((item) => item.key), [providerModelOptions]);
+  const isRuntimeBusy = isStreaming || isApplyingModeSwitch || isStopping;
+  const selectedProviderModel = useMemo(
+    () => providerModelOptions.find((item) => item.key === providerModelKey) || null,
+    [providerModelKey, providerModelOptions],
+  );
+  const defaultProviderModelKey = useMemo(() => {
+    const defaultProvider = modeDefaults.get(mode)?.defaultProvider || "";
+    const defaultModel = modeDefaults.get(mode)?.defaultModel || providerDefaults.get(defaultProvider) || "";
+    if (defaultProvider && defaultModel) {
+      return buildProviderModelKey(defaultProvider, defaultModel);
+    }
+    return providerModelOptions[0]?.key || "";
+  }, [mode, modeDefaults, providerDefaults, providerModelOptions]);
 
-  const displayProvider = activeProvider || provider || modeDefaults.get(mode)?.defaultProvider || "--";
+  const displayProvider =
+    (isRuntimeBusy ? activeProvider : "") || selectedProviderModel?.provider || modeDefaults.get(mode)?.defaultProvider || "--";
   const displayModel =
-    activeModel ||
-    providerDefaults.get(activeProvider || provider) ||
+    (isRuntimeBusy ? activeModel : "") ||
+    selectedProviderModel?.model ||
+    providerDefaults.get(activeProvider || selectedProviderModel?.provider || "") ||
     modeDefaults.get(mode)?.defaultModel ||
     "--";
   const currentRuntimeSummary = `${mode} / ${displayProvider} / ${displayModel}`;
@@ -1340,11 +1394,22 @@ export function App() {
     if (!runtimeOptions) {
       return;
     }
-    const hasProvider = providerNames.includes(provider);
-    if (!provider || !hasProvider) {
-      setProvider(modeDefaults.get(mode)?.defaultProvider || providerNames[0] || "");
+    const hasSelection = providerModelKeys.includes(providerModelKey);
+    if (!providerModelKey || !hasSelection) {
+      setProviderModelKey(defaultProviderModelKey);
     }
-  }, [runtimeOptions, mode, provider, providerNames, modeDefaults]);
+  }, [runtimeOptions, mode, providerModelKey, providerModelKeys, defaultProviderModelKey]);
+
+  useEffect(() => {
+    // 仅在当前轮执行期间用实际运行时回填选择器，避免执行结束后覆盖用户的新选择。
+    if (!isRuntimeBusy || !activeProvider || !activeModel) {
+      return;
+    }
+    const activeKey = buildProviderModelKey(activeProvider, activeModel);
+    if (providerModelKeys.includes(activeKey) && activeKey !== providerModelKey) {
+      setProviderModelKey(activeKey);
+    }
+  }, [activeProvider, activeModel, isRuntimeBusy, providerModelKey, providerModelKeys]);
 
   const refreshHistory = async () => {
     setError("");
@@ -1480,13 +1545,23 @@ export function App() {
     const controller = new AbortController();
     activeStreamControllerRef.current = controller;
     let wasAborted = false;
+    const selectedRuntime =
+      selectedProviderModel ||
+      (defaultProviderModelKey
+        ? {
+            key: defaultProviderModelKey,
+            label: defaultProviderModelKey,
+            ...parseProviderModelKey(defaultProviderModelKey),
+          }
+        : null);
 
     try {
       await streamChat({
         sessionId,
         userInput: trimmed,
         mode,
-        provider,
+        provider: selectedRuntime?.provider || "",
+        model: selectedRuntime?.model || "",
         onDelta: () => {},
         onEvent: (eventName, payload) => {
           if (eventName === "text_delta") {
@@ -1900,17 +1975,17 @@ export function App() {
                 </select>
               </div>
               <div className="terminal-statusline-group">
-                <span className="terminal-label">provider</span>
+                <span className="terminal-label">provider/model</span>
                 <select
                   id="provider-name"
-                  value={provider}
-                  onChange={(e) => setProvider(e.target.value)}
+                  value={providerModelKey}
+                  onChange={(e) => setProviderModelKey(e.target.value)}
                   disabled={isStreaming || isApplyingModeSwitch || isStopping}
                   className="terminal-select"
                 >
-                  {providerOptions.map((item) => (
-                    <option key={item.name} value={item.name}>
-                      {item.name}
+                  {providerModelOptions.map((item) => (
+                    <option key={item.key} value={item.key}>
+                      {item.label}
                     </option>
                   ))}
                 </select>

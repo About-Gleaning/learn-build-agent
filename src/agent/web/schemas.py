@@ -63,6 +63,7 @@ class ChatStreamReq(BaseModel):
     user_input: str = Field(min_length=1, max_length=8000)
     mode: Literal["build", "plan"] = "build"
     provider: str | None = None
+    model: str | None = None
 
 
 class MessageVO(BaseModel):
@@ -114,12 +115,15 @@ class RuntimeProviderVO(BaseModel):
     name: str
     vendor: str
     default_model: str
+    models: list[str]
+    api_mode: Literal["responses", "chat_completions"]
 
 
 class RuntimeAgentVO(BaseModel):
     name: Literal["build", "plan"]
     default_provider: str
     default_model: str
+    api_mode: Literal["responses", "chat_completions"]
 
 
 class RuntimeOptionsVO(BaseModel):

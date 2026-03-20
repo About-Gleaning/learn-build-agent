@@ -199,6 +199,7 @@ def test_build_openai_client_should_pass_timeout_seconds(monkeypatch):
         provider="qwen",
         vendor="qwen",
         model="qwen3-max",
+        api_mode="chat_completions",
         base_url="https://example.com/v1",
         api_key="test-key",
         timeout_seconds=12.5,
@@ -227,6 +228,31 @@ def test_create_chat_completion_stream_should_return_timeout_error_message(monke
     final_message = stop.value.value
     assert final_message["info"]["status"] == "failed"
     assert recorder == ["timeout"]
+
+
+def test_create_chat_completion_should_keep_current_call_path_when_api_mode_is_responses(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    _patch_openai_client(monkeypatch, _capture_create)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    result = create_chat_completion(_build_user_message(), tools=[], llm_config=config)
+
+    assert result["info"]["status"] == "completed"
+    assert captured_payload["model"] == "gpt-4.1"
 
 
 def test_stream_should_yield_delta_and_return_message(monkeypatch):
@@ -349,7 +375,7 @@ def test_logging_hook_should_log_latest_message(monkeypatch, caplog):
     with caplog.at_level("INFO"):
         create_chat_completion(_build_user_message(), tools=[], agent="build")
 
-    assert "llm.request latest_message=hello" in caplog.text
+    assert "llm.request api_mode=chat_completions latest_message=hello" in caplog.text
     assert all(record.agent == "build" for record in caplog.records)
     assert all(record.model == "unknown" or isinstance(record.model, str) for record in caplog.records)
 
@@ -379,5 +405,5 @@ def test_logging_hook_should_not_repeat_previous_user_message_on_tool_followup(m
     with caplog.at_level("INFO"):
         create_chat_completion(_build_tool_followup_messages(), tools=[], agent="build")
 
-    assert "llm.request latest_message=plan_enter工具的描述怎么写的" not in caplog.text
+    assert "latest_message=plan_enter工具的描述怎么写的" not in caplog.text
     assert "llm.request" in caplog.text

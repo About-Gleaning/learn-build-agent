@@ -97,6 +97,7 @@ class SessionBootstrap:
     history_messages: list[Message]
     initial_runtime: ResolvedLLMConfig
     initial_provider_explicit: bool
+    initial_model_explicit: bool
     initial_tools: list[dict[str, Any]]
     initial_system_prompt: str
     user_meta: dict[str, Any] | None
@@ -104,6 +105,7 @@ class SessionBootstrap:
     current_mode: MainAgentMode
     current_runtime: ResolvedLLMConfig
     current_provider_explicit: bool
+    current_model_explicit: bool
     initial_agent: str
 
 
@@ -329,6 +331,16 @@ def _resolve_provider_preference_from_messages(messages: list[Message]) -> str |
     return None
 
 
+def _resolve_model_preference_from_messages(messages: list[Message]) -> str | None:
+    for meta in _iter_user_text_meta(messages):
+        if bool(meta.get("provider_reset_to_default")) or bool(meta.get("model_reset_to_default")):
+            return ""
+        model = str(meta.get("model", "")).strip()
+        if model and bool(meta.get("model_explicit")):
+            return model
+    return None
+
+
 def _resolve_provider_selection(
     messages: list[Message],
     *,
@@ -354,14 +366,32 @@ def _resolve_runtime_config(
     mode: MainAgentMode,
     provider: str | None,
     provider_specified: bool,
-) -> tuple[ResolvedLLMConfig, bool]:
+    model: str | None = None,
+    model_specified: bool = False,
+) -> tuple[ResolvedLLMConfig, bool, bool]:
     provider_name, is_explicit = _resolve_provider_selection(
         messages,
         mode=mode,
         provider=provider,
         provider_specified=provider_specified,
     )
-    return resolve_llm_config(mode, provider_name), is_explicit
+    normalized_provider = (provider or "").strip()
+    normalized_model = (model or "").strip()
+
+    if provider_specified and not normalized_provider:
+        return resolve_llm_config(mode), False, False
+
+    if normalized_model and model_specified:
+        return resolve_llm_config(mode, provider_name, normalized_model), is_explicit, True
+
+    if provider_specified:
+        return resolve_llm_config(mode, provider_name), is_explicit, False
+
+    inherited_model = _resolve_model_preference_from_messages(messages)
+    if inherited_model:
+        return resolve_llm_config(mode, provider_name, inherited_model), is_explicit, True
+
+    return resolve_llm_config(mode, provider_name), is_explicit, False
 
 
 def _build_user_message_meta(
@@ -370,8 +400,11 @@ def _build_user_message_meta(
     initial_mode: MainAgentMode,
     initial_runtime: ResolvedLLMConfig,
     initial_provider_explicit: bool,
+    initial_model_explicit: bool,
     provider: str | None,
     provider_specified: bool,
+    model: str | None,
+    model_specified: bool,
 ) -> dict[str, Any] | None:
     if not mode_enabled:
         return None
@@ -381,6 +414,11 @@ def _build_user_message_meta(
         "provider_explicit": initial_provider_explicit,
         "provider_reset_to_default": provider_specified and not (provider or "").strip(),
         "model": initial_runtime.model,
+        "model_explicit": initial_model_explicit,
+        "model_reset_to_default": (
+            (provider_specified and not (provider or "").strip())
+            or (model_specified and not (model or "").strip())
+        ),
     }
 
 
@@ -416,6 +454,8 @@ def _bootstrap_session(
     mode: MainAgentMode | None = None,
     provider: str | None = None,
     provider_specified: bool = False,
+    model: str | None = None,
+    model_specified: bool = False,
     tools: list[dict] | None = None,
     system_prompt: str | None = None,
     llm_config: ResolvedLLMConfig | None = None,
@@ -434,15 +474,18 @@ def _bootstrap_session(
         initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
 
     if mode_enabled:
-        initial_runtime, initial_provider_explicit = _resolve_runtime_config(
+        initial_runtime, initial_provider_explicit, initial_model_explicit = _resolve_runtime_config(
             history_messages,
             mode=initial_mode,
             provider=provider,
             provider_specified=provider_specified,
+            model=model,
+            model_specified=model_specified,
         )
     else:
         initial_runtime = llm_config or resolve_llm_config("build")
         initial_provider_explicit = False
+        initial_model_explicit = False
 
     initial_tools = (
         _get_tools_for_mode(initial_mode)
@@ -475,8 +518,11 @@ def _bootstrap_session(
         initial_mode=initial_mode,
         initial_runtime=initial_runtime,
         initial_provider_explicit=initial_provider_explicit,
+        initial_model_explicit=initial_model_explicit,
         provider=provider,
         provider_specified=provider_specified,
+        model=model,
+        model_specified=model_specified,
     )
     messages = _build_session_messages(
         session_id=active_session_id,
@@ -498,6 +544,7 @@ def _bootstrap_session(
         history_messages=history_messages,
         initial_runtime=initial_runtime,
         initial_provider_explicit=initial_provider_explicit,
+        initial_model_explicit=initial_model_explicit,
         initial_tools=initial_tools,
         initial_system_prompt=initial_system_prompt,
         user_meta=user_meta,
@@ -505,6 +552,7 @@ def _bootstrap_session(
         current_mode=initial_mode,
         current_runtime=initial_runtime if mode_enabled else (llm_config or resolve_llm_config("build")),
         current_provider_explicit=initial_provider_explicit,
+        current_model_explicit=initial_model_explicit,
         initial_agent=initial_agent,
     )
 
@@ -626,6 +674,7 @@ def _append_synthetic_user_message(
     provider: str,
     provider_explicit: bool,
     model: str,
+    model_explicit: bool,
 ) -> None:
     synthetic = _build_text_message(
         "user",
@@ -640,6 +689,7 @@ def _append_synthetic_user_message(
             "provider": provider,
             "provider_explicit": provider_explicit,
             "model": model,
+            "model_explicit": model_explicit,
         },
     )
     messages.append(synthetic)
@@ -801,6 +851,7 @@ def _handle_mode_switch_tool_result(
     active_agent: str,
     current_runtime: ResolvedLLMConfig,
     current_provider_explicit: bool,
+    current_model_explicit: bool,
     turn_started_at: str,
 ) -> tuple[Message | None, bool]:
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
@@ -839,11 +890,13 @@ def _handle_mode_switch_tool_result(
         plan_path = str(metadata.get("plan_path", "")).strip()
 
         if synthetic_agent in {"build", "plan"} and synthetic_text:
-            synthetic_runtime, synthetic_provider_explicit = _resolve_runtime_config(
+            synthetic_runtime, synthetic_provider_explicit, synthetic_model_explicit = _resolve_runtime_config(
                 messages,
                 mode=synthetic_agent,  # type: ignore[arg-type]
                 provider=current_runtime.provider if current_provider_explicit else None,
                 provider_specified=current_provider_explicit,
+                model=current_runtime.model if current_model_explicit else None,
+                model_specified=current_model_explicit,
             )
             _append_synthetic_user_message(
                 messages,
@@ -854,6 +907,7 @@ def _handle_mode_switch_tool_result(
                 provider=synthetic_runtime.provider,
                 provider_explicit=synthetic_provider_explicit,
                 model=synthetic_runtime.model,
+                model_explicit=synthetic_model_explicit,
             )
 
     return None, status == "cancelled"
@@ -1096,6 +1150,8 @@ def _run_session_stream(
     mode: MainAgentMode | None = None,
     provider: str | None = None,
     provider_specified: bool = False,
+    model: str | None = None,
+    model_specified: bool = False,
     tools: list[dict] | None = None,
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
@@ -1115,6 +1171,8 @@ def _run_session_stream(
         mode=mode,
         provider=provider,
         provider_specified=provider_specified,
+        model=model,
+        model_specified=model_specified,
         tools=tools,
         system_prompt=system_prompt,
         llm_config=llm_config,
@@ -1132,6 +1190,7 @@ def _run_session_stream(
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
     current_provider_explicit = bootstrap.current_provider_explicit
+    current_model_explicit = bootstrap.current_model_explicit
     initial_agent = bootstrap.initial_agent
     agent_kind = _resolve_agent_kind(initial_agent)
     stop_message_saved = False
@@ -1250,11 +1309,13 @@ def _run_session_stream(
             selected_tools = bootstrap.initial_tools
             if mode_enabled:
                 current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
-                current_runtime, current_provider_explicit = _resolve_runtime_config(
+                current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
                     messages,
                     mode=current_mode,
                     provider=provider,
                     provider_specified=False,
+                    model=model,
+                    model_specified=False,
                 )
                 selected_tools = _get_tools_for_mode(current_mode)
                 messages = _ensure_system_prompt(
@@ -1504,6 +1565,7 @@ def _run_session_stream(
                     active_agent=active_agent,
                     current_runtime=current_runtime,
                     current_provider_explicit=current_provider_explicit,
+                    current_model_explicit=current_model_explicit,
                     turn_started_at=turn_started_at,
                 )
 
@@ -1730,6 +1792,8 @@ def run_session(
     mode: MainAgentMode | None = None,
     provider: str | None = None,
     provider_specified: bool = False,
+    model: str | None = None,
+    model_specified: bool = False,
     tools: list[dict] | None = None,
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
@@ -1744,6 +1808,8 @@ def run_session(
         mode=mode,
         provider=provider,
         provider_specified=provider_specified,
+        model=model,
+        model_specified=model_specified,
         tools=tools,
         system_prompt=system_prompt,
         llm_config=llm_config,
@@ -1757,6 +1823,7 @@ def run_session(
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
     current_provider_explicit = bootstrap.current_provider_explicit
+    current_model_explicit = bootstrap.current_model_explicit
 
     tool_executor = ToolExecutor(
         _build_tool_handlers(
@@ -1776,11 +1843,13 @@ def run_session(
         selected_tools = bootstrap.initial_tools
         if mode_enabled:
             current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
-            current_runtime, current_provider_explicit = _resolve_runtime_config(
+            current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
                 messages,
                 mode=current_mode,
                 provider=provider,
                 provider_specified=False,
+                model=model,
+                model_specified=False,
             )
             selected_tools = _get_tools_for_mode(current_mode)
             messages = _ensure_system_prompt(
@@ -1870,6 +1939,7 @@ def run_session(
                 active_agent=active_agent,
                 current_runtime=current_runtime,
                 current_provider_explicit=current_provider_explicit,
+                current_model_explicit=current_model_explicit,
                 turn_started_at=turn_started_at,
             )
             if interrupted_message is not None:
@@ -1899,6 +1969,8 @@ def run_session_stream_events(
     mode: MainAgentMode | None = None,
     provider: str | None = None,
     provider_specified: bool = False,
+    model: str | None = None,
+    model_specified: bool = False,
     tools: list[dict] | None = None,
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
@@ -1913,6 +1985,8 @@ def run_session_stream_events(
         mode=mode,
         provider=provider,
         provider_specified=provider_specified,
+        model=model,
+        model_specified=model_specified,
         tools=tools,
         system_prompt=system_prompt,
         todo_tool_names=todo_tool_names,

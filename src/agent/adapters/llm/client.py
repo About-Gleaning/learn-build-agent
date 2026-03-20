@@ -32,6 +32,7 @@ class HookContext(TypedDict, total=False):
     agent: str
     provider: str
     model: str
+    api_mode: str
     parent_id: str
     max_tokens: int
     message_count: int
@@ -70,9 +71,14 @@ class LoggingHook(LLMHook):
         latest_message = _build_latest_message_preview(ctx.get("source_messages", []))
         log_extra = build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", ""))
         if latest_message is None:
-            logger.info("llm.request", extra=log_extra)
+            logger.info("llm.request api_mode=%s", ctx.get("api_mode", "unknown"), extra=log_extra)
             return
-        logger.info("llm.request latest_message=%s", latest_message, extra=log_extra)
+        logger.info(
+            "llm.request api_mode=%s latest_message=%s",
+            ctx.get("api_mode", "unknown"),
+            latest_message,
+            extra=log_extra,
+        )
 
     def after_call(self, ctx: HookContext, message: Message) -> None:
         tool_names = [tool_call["name"] for tool_call in extract_tool_calls(message) if tool_call.get("name")]
@@ -203,6 +209,24 @@ def _build_openai_client(llm_config: ResolvedLLMConfig) -> OpenAI:
     )
 
 
+def _create_provider_completion(client: OpenAI, request_payload: dict[str, Any], llm_config: ResolvedLLMConfig) -> Any:
+    # 当前先统一复用 chat.completions，保留 api_mode 入口，后续再接 responses 的真实实现。
+    if llm_config.api_mode == "responses":
+        return client.chat.completions.create(**request_payload)
+    return client.chat.completions.create(**request_payload)
+
+
+def _create_provider_completion_stream(
+    client: OpenAI,
+    request_payload: dict[str, Any],
+    llm_config: ResolvedLLMConfig,
+) -> Any:
+    # 流式链路同样先保持现有行为不变，避免这次配置重构引入回归。
+    if llm_config.api_mode == "responses":
+        return client.chat.completions.create(**request_payload)
+    return client.chat.completions.create(**request_payload)
+
+
 def create_chat_completion(
     messages: list[Message],
     tools: list[dict[str, Any]],
@@ -226,6 +250,7 @@ def create_chat_completion(
         "agent": agent,
         "provider": adapter.provider,
         "model": adapter.model,
+        "api_mode": effective_config.api_mode,
         "parent_id": parent_id,
         "max_tokens": max_tokens,
         "message_count": len(messages),
@@ -243,7 +268,7 @@ def create_chat_completion(
     ctx["start_time"] = start
 
     try:
-        response = client.chat.completions.create(**request_payload)
+        response = _create_provider_completion(client, request_payload, effective_config)
         message = adapter.parse_response(response, session_id=session_id, parent_id=parent_id)
     except Exception as exc:
         ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
@@ -290,6 +315,7 @@ def create_chat_completion_stream(
         "agent": agent,
         "provider": adapter.provider,
         "model": adapter.model,
+        "api_mode": effective_config.api_mode,
         "parent_id": parent_id,
         "max_tokens": max_tokens,
         "message_count": len(messages),
@@ -313,7 +339,7 @@ def create_chat_completion_stream(
     usage_payload: dict[str, int] | None = None
 
     try:
-        stream = client.chat.completions.create(**request_payload)
+        stream = _create_provider_completion_stream(client, request_payload, effective_config)
         for chunk in stream:
             if getattr(chunk, "usage", None) is not None:
                 usage = chunk.usage

@@ -53,6 +53,9 @@
 - 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
 - 日志文件统一写入 `~/.my-agent/logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容；如配置 `MY_AGENT_HOME`，则写入对应目录。
 - `build` 主模式的提示词文件必须按厂商 `vendor` 选择，命名统一为 `build.<vendor>.txt`；厂商归属在 `src/agent/config/llm_runtime.json` 中显式声明，缺省时回退 `build.default.txt`。
+- `llm_runtime.json` 的 provider 配置必须采用“厂商公共配置 + 多模型列表”结构：显式声明 `default_model`、`models` 与 `api_mode`；`agent_defaults` 必须显式声明 `provider + model`，禁止继续使用“一个 provider 绑定一个 model”的旧结构。
+- `api_mode` 当前支持 `responses` 与 `chat_completions`；在真正接入 `responses api` 前，运行时允许先完成配置解析与调用入口预留，但不得影响现有 `chat.completions` 链路稳定性。
+- Web 端运行时选择必须支持 `provider / model` 组合，而不是仅选择 provider；前端提交会话请求时必须同时传递 `provider` 与 `model`，运行时需按完整组合跨轮记忆显式选择。
 - `kimi` provider 统一走 Moonshot OpenAI 兼容接口，`base_url` 固定为 `https://api.moonshot.cn/v1`，API Key 环境变量统一使用 `KIMI_API_KEY`。
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
 - `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
@@ -104,6 +107,8 @@
 
 ## 变更记录
 
+- 2026-03-20：将 Web 端运行时选择从仅 provider 下拉升级为 `provider / model` 组合下拉；`/api/chat/stream` 新增 `model` 入参，session 运行时改为跨轮记忆完整的 `provider + model` 显式选择。
+- 2026-03-20：重构 `llm_runtime.json` 为 provider 多模型结构，新增 `default_model`、`models` 与 `api_mode` 解析；`ResolvedLLMConfig` 增加 `api_mode`，并在 LLM client 中预留协议分流入口，同时保持当前 `chat.completions` 调用链不变。
 - 2026-03-19：将“停止后继续”收敛为基于真实会话历史的正常多轮续接，移除专用 resume 恢复提示注入；点击停止后即使前端提前断流，后端也必须补齐 `interrupted/cancelled` 助手收尾消息并持久化，避免后续请求依赖额外恢复文件。
 - 2026-03-19：修复 Web 停止后继续执行的恢复链路，补充顶层执行 stop 清理、最近中断任务恢复上下文，以及前端停止等待收口后再超时兜底断流，避免残留“当前执行已手动停止。”污染下一轮并降低继续任务时的上下文丢失。
 - 2026-03-19：将 session 历史落库目录调整为全局 `~/.my-agent/workspaces/sessions/`，文件名直接使用 `session_id` 安全清洗后的结果，不再按工作区目录隔离。

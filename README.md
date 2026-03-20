@@ -138,6 +138,8 @@ pnpm dev
 - 所有 provider 必须在 `src/agent/config/llm_runtime.json` 中显式配置 `timeout_seconds`，禁止依赖 SDK 默认超时无限等待。
 - 未单独调整时建议默认 `60` 秒，优先保证父/子 Agent 二轮推理能稳定失败收口，而不是静默卡住。
 - 当 `task` 委派完成后，若主 Agent 二轮 LLM 调用超时，系统必须记录错误日志并返回可解释失败结果。
+- `llm_runtime.json` 的 provider 配置采用“厂商公共配置 + 多模型列表”结构：必须显式声明 `default_model` 与 `models`，`agent_defaults` 必须显式声明 `provider + model`。
+- `api_mode` 由 provider 级配置统一声明，当前支持 `responses` 与 `chat_completions`；本阶段先完成配置与解析收敛，具体 `responses api` 调用链可后续再接入。
 
 ### 额外约定：Kimi Provider 接入
 
