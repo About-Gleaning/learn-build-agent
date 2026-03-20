@@ -7,14 +7,23 @@ from agent.adapters.llm.client import (
     LLMHook,
     LoggingHook,
     _build_openai_client,
+    _normalize_responses_tools,
     clear_global_hooks,
     create_chat_completion,
     create_chat_completion_stream,
     register_global_hook,
 )
+from agent.adapters.llm.protocols import normalize_qwen_responses_tools
+from agent.adapters.llm.vendors import (
+    KimiChatCompletionsAdapter,
+    OpenAIResponsesAdapter,
+    QwenResponsesAdapter,
+    build_provider_adapter,
+)
 from agent.config.settings import ResolvedLLMConfig
 from agent.core.message import append_text_part, append_tool_part, create_message
 from agent.core.message import append_reasoning_part, append_tool_call_part, extract_reasoning_content
+from agent.tools.specs import build_agent_tools
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +91,52 @@ def _build_user_message(session_id: str = "s_hook"):
     return [msg]
 
 
+def _build_responses_text_response(content: str = "ok", reasoning: str = ""):
+    output = []
+    if reasoning:
+        output.append(
+            SimpleNamespace(
+                type="reasoning",
+                summary=[SimpleNamespace(text=reasoning)],
+            )
+        )
+    output.append(
+        SimpleNamespace(
+            type="message",
+            role="assistant",
+            content=[SimpleNamespace(type="output_text", text=content)],
+        )
+    )
+    usage = SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2)
+    return SimpleNamespace(output=output, usage=usage, status="completed")
+
+
+def _build_responses_tool_call_response(name: str = "todo_read", arguments: str = "{}"):
+    output = [
+        SimpleNamespace(
+            type="function_call",
+            call_id="call_1",
+            name=name,
+            arguments=arguments,
+        )
+    ]
+    usage = SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2)
+    return SimpleNamespace(output=output, usage=usage, status="completed")
+
+
+def _build_chat_config() -> ResolvedLLMConfig:
+    return ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3-max",
+        api_mode="chat_completions",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+
 def _build_tool_followup_messages(session_id: str = "s_hook"):
     user_msg = create_message("user", session_id)
     append_text_part(user_msg, "plan_enter工具的描述怎么写的")
@@ -101,13 +156,17 @@ def _build_tool_followup_messages(session_id: str = "s_hook"):
     return [user_msg, assistant_msg, tool_msg]
 
 
-def _patch_openai_client(monkeypatch, create_fn):
+def _patch_openai_client(monkeypatch, create_fn, responses_create_fn=None):
+    responses_create = responses_create_fn or create_fn
     fake_client = SimpleNamespace(
         chat=SimpleNamespace(
             completions=SimpleNamespace(
                 create=create_fn,
             )
-        )
+        ),
+        responses=SimpleNamespace(
+            create=responses_create,
+        ),
     )
     monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
 
@@ -123,7 +182,7 @@ def test_hooks_execute_in_order_global_then_local(monkeypatch):
 
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
-    create_chat_completion(_build_user_message(), tools=[], hooks=[local_hook])
+    create_chat_completion(_build_user_message(), tools=[], hooks=[local_hook], llm_config=_build_chat_config())
 
     assert recorder == [
         "g1.before",
@@ -143,7 +202,7 @@ def test_hook_fail_open_should_continue(monkeypatch):
 
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("continue"))
 
-    result = create_chat_completion(_build_user_message(), tools=[])
+    result = create_chat_completion(_build_user_message(), tools=[], llm_config=_build_chat_config())
 
     assert result["info"]["status"] == "completed"
 
@@ -162,7 +221,7 @@ def test_hook_fail_fast_should_raise(monkeypatch):
     _patch_openai_client(monkeypatch, _provider_call)
 
     with pytest.raises(RuntimeError, match="Hook 'broken' failed"):
-        create_chat_completion(_build_user_message(), tools=[])
+        create_chat_completion(_build_user_message(), tools=[], llm_config=_build_chat_config())
 
     assert called["provider"] is False
 
@@ -179,7 +238,7 @@ def test_on_error_hook_called_when_provider_fails(monkeypatch):
 
     _patch_openai_client(monkeypatch, _raise_timeout)
 
-    result = create_chat_completion(_build_user_message(), tools=[])
+    result = create_chat_completion(_build_user_message(), tools=[], llm_config=_build_chat_config())
 
     assert result["info"]["status"] == "failed"
     assert recorder == ["timeout"]
@@ -221,7 +280,7 @@ def test_create_chat_completion_stream_should_return_timeout_error_message(monke
 
     _patch_openai_client(monkeypatch, _raise_timeout)
 
-    stream = create_chat_completion_stream(_build_user_message(), tools=[])
+    stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=_build_chat_config())
     with pytest.raises(StopIteration) as stop:
         next(stream)
 
@@ -230,14 +289,20 @@ def test_create_chat_completion_stream_should_return_timeout_error_message(monke
     assert recorder == ["timeout"]
 
 
-def test_create_chat_completion_should_keep_current_call_path_when_api_mode_is_responses(monkeypatch):
+def test_create_chat_completion_should_call_responses_api_when_api_mode_is_responses(monkeypatch):
     captured_payload: dict[str, object] = {}
+    call_recorder: list[str] = []
 
-    def _capture_create(**kwargs):
+    def _capture_chat_create(**kwargs):
+        call_recorder.append("chat")
+        return _build_success_response("unexpected")
+
+    def _capture_responses_create(**kwargs):
+        call_recorder.append("responses")
         captured_payload.update(kwargs)
-        return _build_success_response("done")
+        return _build_responses_text_response("done")
 
-    _patch_openai_client(monkeypatch, _capture_create)
+    _patch_openai_client(monkeypatch, _capture_chat_create, responses_create_fn=_capture_responses_create)
     config = ResolvedLLMConfig(
         agent="build",
         provider="gpt",
@@ -252,7 +317,497 @@ def test_create_chat_completion_should_keep_current_call_path_when_api_mode_is_r
     result = create_chat_completion(_build_user_message(), tools=[], llm_config=config)
 
     assert result["info"]["status"] == "completed"
+    assert call_recorder == ["responses"]
     assert captured_payload["model"] == "gpt-4.1"
+    assert captured_payload["max_output_tokens"] == 4096
+    assert captured_payload["store"] is False
+    assert captured_payload["input"] == [{"role": "user", "content": "hello"}]
+
+
+def test_build_provider_adapter_should_choose_qwen_responses_adapter():
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    adapter = build_provider_adapter(config)
+
+    assert isinstance(adapter, QwenResponsesAdapter)
+
+
+def test_build_provider_adapter_should_choose_kimi_chat_adapter():
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="kimi",
+        vendor="kimi",
+        model="kimi-k2.5",
+        api_mode="chat_completions",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    adapter = build_provider_adapter(config)
+
+    assert isinstance(adapter, KimiChatCompletionsAdapter)
+
+
+def test_build_provider_adapter_should_fallback_to_openai_responses_adapter():
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    adapter = build_provider_adapter(config)
+
+    assert isinstance(adapter, OpenAIResponsesAdapter)
+
+
+def test_create_chat_completion_should_convert_tool_history_for_responses_input(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_responses_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_responses_text_response("done")
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_capture_responses_create)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    create_chat_completion(_build_tool_followup_messages(), tools=[], llm_config=config)
+
+    assert captured_payload["input"] == [
+        {"role": "user", "content": "plan_enter工具的描述怎么写的"},
+        {"role": "assistant", "content": "我来读取工具描述"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "使用这个工具来建议用户切换到 plan agent"},
+    ]
+
+
+def test_create_chat_completion_should_flatten_function_tools_for_responses(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_responses_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_responses_text_response("done")
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_capture_responses_create)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    create_chat_completion(
+        _build_user_message(),
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo_read",
+                    "description": "读取 todo",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        llm_config=config,
+    )
+
+    assert captured_payload["tools"] == [
+        {
+            "type": "function",
+            "name": "todo_read",
+            "description": "读取 todo",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        }
+    ]
+
+
+def test_normalize_responses_tools_should_remove_default_and_lock_object_boundaries():
+    normalized = _normalize_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "task",
+                    "description": "委派子代理",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string"},
+                            "agent": {
+                                "type": "string",
+                                "enum": ["explorer", "worker"],
+                                "default": "explorer",
+                            },
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+            }
+        ]
+    )
+
+    parameters = normalized[0]["parameters"]
+    assert parameters["additionalProperties"] is False
+    assert "default" not in parameters["properties"]["agent"]
+
+
+def test_normalize_responses_tools_should_recurse_nested_object_items():
+    normalized = _normalize_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo_write",
+                    "description": "写入 todo",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "todo_list": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {"type": "string"},
+                                        "status": {"type": "string", "default": "pending"},
+                                    },
+                                    "required": ["text"],
+                                },
+                            }
+                        },
+                        "required": ["todo_list"],
+                    },
+                },
+            }
+        ]
+    )
+
+    item_schema = normalized[0]["parameters"]["properties"]["todo_list"]["items"]
+    assert normalized[0]["parameters"]["additionalProperties"] is False
+    assert item_schema["additionalProperties"] is False
+    assert "default" not in item_schema["properties"]["status"]
+
+
+def test_normalize_responses_tools_should_not_affect_chat_completion_payload(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    _patch_openai_client(monkeypatch, _capture_create)
+
+    create_chat_completion(
+        _build_user_message(),
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "task",
+                    "description": "委派子代理",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent": {"type": "string", "default": "explorer"},
+                        },
+                    },
+                },
+            }
+        ],
+        llm_config=_build_chat_config(),
+    )
+
+    assert captured_payload["tools"][0]["function"]["parameters"]["properties"]["agent"]["default"] == "explorer"
+
+
+def test_normalize_qwen_responses_tools_should_remove_non_core_schema_keywords():
+    normalized = normalize_qwen_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "task",
+                    "description": "委派子代理",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "任务说明"},
+                            "agent": {
+                                "type": "string",
+                                "enum": ["explore", "worker"],
+                                "default": "explore",
+                            },
+                        },
+                        "required": ["prompt"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+    )
+
+    tool = normalized[0]
+    parameters = tool["parameters"]
+    assert "strict" not in tool
+    assert parameters["required"] == ["prompt"]
+    assert parameters["properties"]["agent"]["enum"] == ["explore", "worker"]
+    assert "default" not in parameters["properties"]["agent"]
+    assert parameters["properties"]["prompt"]["description"] == "任务说明"
+
+
+def test_normalize_qwen_responses_tools_should_recurse_nested_items_and_keep_minimal_schema():
+    normalized = normalize_qwen_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo_write",
+                    "description": "写入 todo",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "todo_list": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {"type": "string"},
+                                        "status": {"type": "string", "default": "pending"},
+                                    },
+                                    "required": ["text"],
+                                    "additionalProperties": False,
+                                },
+                            }
+                        },
+                        "required": ["todo_list"],
+                    },
+                },
+            }
+        ]
+    )
+
+    item_schema = normalized[0]["parameters"]["properties"]["todo_list"]["items"]
+    assert item_schema["required"] == ["text"]
+    assert "default" not in item_schema["properties"]["status"]
+    assert item_schema["additionalProperties"] is False
+
+
+def test_normalize_qwen_responses_tools_should_collapse_empty_object_parameters():
+    normalized = normalize_qwen_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo_read",
+                    "description": "读取 todo",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+    )
+
+    assert normalized[0]["parameters"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+
+
+def test_qwen_responses_adapter_should_use_vendor_specific_tool_normalization():
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+    adapter = QwenResponsesAdapter(config)
+
+    request = adapter.build_request(
+        _build_user_message(),
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo_read",
+                    "description": "读取 todo",
+                    "strict": True,
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+    )
+
+    assert request["tools"] == [
+        {
+            "type": "function",
+            "name": "todo_read",
+            "description": "读取 todo",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        }
+    ]
+
+
+def test_qwen_responses_adapter_should_omit_parameters_for_empty_object_tools_in_build_agent():
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+    adapter = QwenResponsesAdapter(config)
+
+    request = adapter.build_request(
+        _build_user_message(),
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo_read",
+                    "description": "读取 todo",
+                    "parameters": {"type": "object"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "task",
+                    "description": "委派子代理",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"prompt": {"type": "string"}},
+                        "required": ["prompt"],
+                    },
+                },
+            },
+        ],
+    )
+
+    assert request["tools"][0] == {
+        "type": "function",
+        "name": "todo_read",
+        "description": "读取 todo",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
+    assert request["tools"][1]["parameters"]["required"] == ["prompt"]
+
+
+def test_qwen_responses_adapter_should_omit_parameters_for_no_arg_agent_tools():
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+    adapter = QwenResponsesAdapter(config)
+
+    request = adapter.build_request(_build_user_message(), tools=build_agent_tools("build", skills=[]))
+    tools_by_name = {tool["name"]: tool for tool in request["tools"]}
+
+    assert tools_by_name["todo_read"]["parameters"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    assert tools_by_name["plan_enter"]["parameters"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    assert tools_by_name["read_file"]["parameters"]["required"] == ["path"]
+    assert tools_by_name["task"]["parameters"]["required"] == ["prompt"]
+
+
+def test_normalize_qwen_responses_tools_should_keep_boolean_and_additional_properties():
+    normalized = normalize_qwen_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "toggle",
+                    "description": "布尔参数",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                        },
+                        "required": ["enabled"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+    )
+
+    parameters = normalized[0]["parameters"]
+    assert parameters["properties"]["enabled"]["type"] == "boolean"
+    assert parameters["additionalProperties"] is False
+
+
+def test_normalize_qwen_responses_tools_should_filter_required_fields_not_in_properties():
+    normalized = normalize_qwen_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "task",
+                    "description": "required 过滤",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"prompt": {"type": "string"}},
+                        "required": ["prompt", "missing"],
+                    },
+                },
+            }
+        ]
+    )
+
+    assert normalized[0]["parameters"]["required"] == ["prompt"]
 
 
 def test_stream_should_yield_delta_and_return_message(monkeypatch):
@@ -277,7 +832,7 @@ def test_stream_should_yield_delta_and_return_message(monkeypatch):
         yield Chunk("", finish_reason="stop")
 
     _patch_openai_client(monkeypatch, _fake_stream)
-    stream = create_chat_completion_stream(_build_user_message(), tools=[])
+    stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=_build_chat_config())
 
     deltas: list[str] = []
     while True:
@@ -315,7 +870,7 @@ def test_stream_should_persist_reasoning_content(monkeypatch):
         yield Chunk(Delta(content="结果"), "stop")
 
     _patch_openai_client(monkeypatch, _fake_stream)
-    stream = create_chat_completion_stream(_build_user_message(), tools=[])
+    stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=_build_chat_config())
 
     while True:
         try:
@@ -327,6 +882,186 @@ def test_stream_should_persist_reasoning_content(monkeypatch):
     assert extract_reasoning_content(final_message) == "先分析"
     assert final_message["parts"][0]["type"] == "text"
     assert final_message["parts"][0]["content"] == "结果"
+
+
+def test_responses_stream_should_yield_delta_and_return_message(monkeypatch):
+    def _fake_responses_stream(**kwargs):
+        yield SimpleNamespace(type="response.output_text.delta", delta="流")
+        yield SimpleNamespace(type="response.output_text.delta", delta="式")
+        yield SimpleNamespace(type="response.completed", response=_build_responses_text_response("流式", reasoning="先分析"))
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_fake_responses_stream)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=config)
+
+    deltas: list[str] = []
+    while True:
+        try:
+            item = next(stream)
+            deltas.append(str(item.get("delta", "")))
+        except StopIteration as stop:
+            final_message = stop.value
+            break
+
+    assert "".join(deltas) == "流式"
+    assert final_message["info"]["status"] == "completed"
+    text_part = next(part for part in final_message["parts"] if part["type"] == "text")
+    assert text_part["content"] == "流式"
+    assert extract_reasoning_content(final_message) == "先分析"
+
+
+def test_responses_stream_should_aggregate_function_call_arguments(monkeypatch):
+    def _fake_responses_stream(**kwargs):
+        yield SimpleNamespace(
+            type="response.output_item.added",
+            output_index=0,
+            item=SimpleNamespace(type="function_call", call_id="call_1", name="todo_read", arguments=""),
+        )
+        yield SimpleNamespace(type="response.function_call_arguments.delta", output_index=0, delta='{"path":"')
+        yield SimpleNamespace(type="response.function_call_arguments.delta", output_index=0, delta='todo.md"}')
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_fake_responses_stream)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=config)
+
+    while True:
+        try:
+            next(stream)
+        except StopIteration as stop:
+            final_message = stop.value
+            break
+
+    tool_part = next(part for part in final_message["parts"] if part["type"] == "tool")
+    assert tool_part["name"] == "todo_read"
+    assert tool_part["state"]["input"]["arguments"] == '{"path":"todo.md"}'
+
+
+def test_responses_stream_should_surface_nested_failed_error_message(monkeypatch, caplog):
+    recorder: list[str] = []
+    clear_global_hooks()
+    register_global_hook(ErrorCaptureHook(recorder))
+
+    def _fake_responses_stream(**kwargs):
+        yield SimpleNamespace(
+            type="response.failed",
+            response=SimpleNamespace(
+                status="failed",
+                error=SimpleNamespace(code="bad_request", type="invalid_request_error", message="provider rejected request"),
+            ),
+        )
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_fake_responses_stream)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    with caplog.at_level("WARNING"):
+        stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=config)
+        with pytest.raises(StopIteration) as stop:
+            next(stream)
+
+    final_message = stop.value.value
+    assert final_message["info"]["status"] == "failed"
+    assert final_message["info"]["error"]["message"] == "provider rejected request"
+    assert "llm.responses_stream_failure event_type=response.failed" in caplog.text
+    assert "error_code=bad_request" in caplog.text
+    assert recorder == ["api_error"]
+
+
+def test_responses_stream_should_surface_incomplete_reason(monkeypatch, caplog):
+    recorder: list[str] = []
+    clear_global_hooks()
+    register_global_hook(ErrorCaptureHook(recorder))
+
+    def _fake_responses_stream(**kwargs):
+        yield SimpleNamespace(
+            type="response.incomplete",
+            response=SimpleNamespace(
+                status="incomplete",
+                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+            ),
+        )
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_fake_responses_stream)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    with caplog.at_level("WARNING"):
+        stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=config)
+        with pytest.raises(StopIteration) as stop:
+            next(stream)
+
+    final_message = stop.value.value
+    assert final_message["info"]["status"] == "failed"
+    assert final_message["info"]["error"]["message"] == "max_output_tokens"
+    assert "llm.responses_stream_failure event_type=response.incomplete" in caplog.text
+    assert "incomplete_reason=max_output_tokens" in caplog.text
+    assert recorder == ["api_error"]
+
+
+def test_responses_stream_should_fallback_to_event_type_when_no_detail_exists(monkeypatch):
+    recorder: list[str] = []
+    clear_global_hooks()
+    register_global_hook(ErrorCaptureHook(recorder))
+
+    def _fake_responses_stream(**kwargs):
+        yield SimpleNamespace(type="response.failed", response=SimpleNamespace(status="failed"))
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_fake_responses_stream)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    stream = create_chat_completion_stream(_build_user_message(), tools=[], llm_config=config)
+    with pytest.raises(StopIteration) as stop:
+        next(stream)
+
+    final_message = stop.value.value
+    assert final_message["info"]["status"] == "failed"
+    assert final_message["info"]["error"]["message"] == "failed"
+    assert recorder == ["api_error"]
 
 
 def test_create_chat_completion_should_replay_reasoning_content_in_request(monkeypatch):
@@ -361,7 +1096,7 @@ def test_create_chat_completion_should_replay_reasoning_content_in_request(monke
         output={"output": "file-content"},
     )
 
-    create_chat_completion([user_msg, assistant_msg, tool_msg], tools=[])
+    create_chat_completion([user_msg, assistant_msg, tool_msg], tools=[], llm_config=_build_chat_config())
 
     provider_messages = captured_payload["messages"]
     assert provider_messages[1]["role"] == "assistant"
@@ -373,7 +1108,7 @@ def test_logging_hook_should_log_latest_message(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     with caplog.at_level("INFO"):
-        create_chat_completion(_build_user_message(), tools=[], agent="build")
+        create_chat_completion(_build_user_message(), tools=[], agent="build", llm_config=_build_chat_config())
 
     assert "llm.request api_mode=chat_completions latest_message=hello" in caplog.text
     assert all(record.agent == "build" for record in caplog.records)
@@ -384,7 +1119,7 @@ def test_logging_hook_should_log_response_text(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     with caplog.at_level("INFO"):
-        create_chat_completion(_build_user_message(), tools=[], agent="plan")
+        create_chat_completion(_build_user_message(), tools=[], agent="plan", llm_config=_build_chat_config())
 
     assert "llm.response message=done" in caplog.text
     assert any(record.agent == "plan" for record in caplog.records)
@@ -394,7 +1129,12 @@ def test_logging_hook_should_log_tool_name_when_model_requests_tool(monkeypatch,
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_tool_call_response("todo_read"))
 
     with caplog.at_level("INFO"):
-        create_chat_completion(_build_user_message(), tools=[{"type": "function"}], agent="build")
+        create_chat_completion(
+            _build_user_message(),
+            tools=[{"type": "function"}],
+            agent="build",
+            llm_config=_build_chat_config(),
+        )
 
     assert "llm.response tool_names=todo_read" in caplog.text
 
@@ -403,7 +1143,7 @@ def test_logging_hook_should_not_repeat_previous_user_message_on_tool_followup(m
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     with caplog.at_level("INFO"):
-        create_chat_completion(_build_tool_followup_messages(), tools=[], agent="build")
+        create_chat_completion(_build_tool_followup_messages(), tools=[], agent="build", llm_config=_build_chat_config())
 
     assert "latest_message=plan_enter工具的描述怎么写的" not in caplog.text
     assert "llm.request" in caplog.text

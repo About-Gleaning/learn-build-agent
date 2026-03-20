@@ -1360,7 +1360,7 @@ def test_run_session_should_reset_to_agent_default_provider_and_model(monkeypatc
     run_session("第二轮", session_id="s_provider_reset", mode="plan", provider="", provider_specified=True)
 
     assert seen[0] == ("qwen", "qwen3-coder-next")
-    assert seen[1] == ("qwen", "qwen3-max")
+    assert seen[1] == ("qwen", "qwen3.5-flash")
 
 
 def test_run_session_should_use_provider_default_model_when_model_is_omitted(monkeypatch):
@@ -1493,7 +1493,7 @@ def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch)
 
     assert get_message_text(result) == "ok"
     assert seen_system_prompts[0] == "PROMPT::build::qwen::qwen::qwen3-max"
-    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen::qwen3-max"
+    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen::qwen3.5-flash"
 
 
 def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
@@ -1528,7 +1528,8 @@ def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
         assert config.provider == "qwen"
         assert config.vendor == "qwen"
         assert config.model == "qwen3-coder-next"
-        assert config.api_mode == "chat_completions"
+        assert config.api_mode == "responses"
+        assert config.base_url == "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
         assert config.timeout_seconds == 60
     finally:
         clear_runtime_settings_cache()

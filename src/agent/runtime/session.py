@@ -369,14 +369,26 @@ def _resolve_runtime_config(
     model: str | None = None,
     model_specified: bool = False,
 ) -> tuple[ResolvedLLMConfig, bool, bool]:
+    normalized_provider = (provider or "").strip()
+    normalized_model = (model or "").strip()
+
+    # 当本轮既没有显式 provider，也没有从历史继承 provider 偏好时，应优先回到 agent 默认配置。
+    if not provider_specified and _resolve_provider_preference_from_messages(messages) is None:
+        if normalized_model and model_specified:
+            return resolve_llm_config(mode, model_name=normalized_model), False, True
+
+        inherited_model = _resolve_model_preference_from_messages(messages)
+        if inherited_model:
+            return resolve_llm_config(mode, model_name=inherited_model), False, True
+
+        return resolve_llm_config(mode), False, False
+
     provider_name, is_explicit = _resolve_provider_selection(
         messages,
         mode=mode,
         provider=provider,
         provider_specified=provider_specified,
     )
-    normalized_provider = (provider or "").strip()
-    normalized_model = (model or "").strip()
 
     if provider_specified and not normalized_provider:
         return resolve_llm_config(mode), False, False

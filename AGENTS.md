@@ -18,7 +18,9 @@
 - `src/agent/runtime/compaction.py`：上下文压缩逻辑。
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要组装。
 - `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与启动模式解析。
-- `src/agent/adapters/llm/client.py`：LLM 适配与 LLM Hook。
+- `src/agent/adapters/llm/client.py`：LLM 统一调用入口与 LLM Hook。
+- `src/agent/adapters/llm/protocols.py`：协议层适配（`responses` / `chat_completions`）。
+- `src/agent/adapters/llm/vendors.py`：厂商方言注册与独立转换层。
 - `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
 - `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
 - `src/agent/tools/`：工具实现（`handlers.py`）与协议定义（`specs.py`）。
@@ -32,6 +34,7 @@
 ## 分层职责约束（与 README 对齐）
 
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
+- `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口；协议级转换统一收敛在 `adapters/llm/protocols.py`，厂商差异统一收敛在 `adapters/llm/vendors.py`，禁止继续把 `qwen` / `kimi` 等厂商分支散落回 `client.py` 或 `runtime/session.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
 - 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
@@ -54,7 +57,8 @@
 - 日志文件统一写入 `~/.my-agent/logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容；如配置 `MY_AGENT_HOME`，则写入对应目录。
 - `build` 主模式的提示词文件必须按厂商 `vendor` 选择，命名统一为 `build.<vendor>.txt`；厂商归属在 `src/agent/config/llm_runtime.json` 中显式声明，缺省时回退 `build.default.txt`。
 - `llm_runtime.json` 的 provider 配置必须采用“厂商公共配置 + 多模型列表”结构：显式声明 `default_model`、`models` 与 `api_mode`；`agent_defaults` 必须显式声明 `provider + model`，禁止继续使用“一个 provider 绑定一个 model”的旧结构。
-- `api_mode` 当前支持 `responses` 与 `chat_completions`；在真正接入 `responses api` 前，运行时允许先完成配置解析与调用入口预留，但不得影响现有 `chat.completions` 链路稳定性。
+- `api_mode` 当前支持 `responses` 与 `chat_completions`；其中 `responses` 已接入真实 `/v1/responses` 调用链，覆盖非流式、流式、函数工具调用与工具结果回灌，仍保持仓库侧显式维护消息历史，不引入 `previous_response_id` 隐式会话状态。
+- `qwen` 在 `api_mode=responses` 下必须使用 DashScope Responses 兼容入口 `https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1`；禁止继续沿用 `chat.completions` 的旧兼容入口 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
 - Web 端运行时选择必须支持 `provider / model` 组合，而不是仅选择 provider；前端提交会话请求时必须同时传递 `provider` 与 `model`，运行时需按完整组合跨轮记忆显式选择。
 - `kimi` provider 统一走 Moonshot OpenAI 兼容接口，`base_url` 固定为 `https://api.moonshot.cn/v1`，API Key 环境变量统一使用 `KIMI_API_KEY`。
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
@@ -107,6 +111,11 @@
 
 ## 变更记录
 
+- 2026-03-20：修复 `qwen` 在 `api_mode=responses` 下的无参 function tool schema 兼容问题；无参工具不再下发 `parameters: {}`，避免 DashScope 返回 `InternalError.Algo.InvalidParameter`。
+- 2026-03-20：为 `qwen` 的 `responses` 独立收敛 function tool 参数 schema，避免继续复用 OpenAI 更严格的 `additionalProperties/default/strict` 规范化结果导致 DashScope 兼容层报 `InternalError.Algo.InvalidParameter`。
+- 2026-03-20：将 LLM 适配层重构为“统一入口 + 协议层 + 厂商方言层”，新增 `adapters/llm/protocols.py` 与 `adapters/llm/vendors.py`，在不改变 `Message` 结构的前提下为 `qwen` / `kimi` 保留独立转换扩展点。
+- 2026-03-20：将 `qwen` provider 在 `api_mode=responses` 下的 `base_url` 修正为 DashScope Responses 兼容入口 `https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1`，避免继续误用旧的 `chat.completions` 兼容入口导致请求失败。
+- 2026-03-20：OpenAI `gpt` provider 的 `api_mode=responses` 已接入真实 `/v1/responses` 调用链，补齐非流式、流式、函数工具调用与工具结果回灌适配，继续由仓库自行维护多轮历史，不引入 `previous_response_id` 隐式状态。
 - 2026-03-20：将 Web 端运行时选择从仅 provider 下拉升级为 `provider / model` 组合下拉；`/api/chat/stream` 新增 `model` 入参，session 运行时改为跨轮记忆完整的 `provider + model` 显式选择。
 - 2026-03-20：重构 `llm_runtime.json` 为 provider 多模型结构，新增 `default_model`、`models` 与 `api_mode` 解析；`ResolvedLLMConfig` 增加 `api_mode`，并在 LLM client 中预留协议分流入口，同时保持当前 `chat.completions` 调用链不变。
 - 2026-03-19：将“停止后继续”收敛为基于真实会话历史的正常多轮续接，移除专用 resume 恢复提示注入；点击停止后即使前端提前断流，后端也必须补齐 `interrupted/cancelled` 助手收尾消息并持久化，避免后续请求依赖额外恢复文件。

@@ -26,7 +26,9 @@ src/
       hooks.py                    # 通用 HookDispatcher
     adapters/
       llm/
-        client.py                 # LLM 调用适配与 LLM Hook
+        client.py                 # LLM 统一调用入口与 LLM Hook
+        protocols.py              # 协议层适配（responses / chat_completions）
+        vendors.py                # 厂商方言注册与独立转换层
     runtime/
       agents.py                   # Agent 元信息注册（primary/subagent、description）
       session.py                  # 会话主循环与模式/工具编排
@@ -91,6 +93,7 @@ pnpm dev
 ## 分层职责约束（必须遵守）
 
 - `runtime/session.py` 仅做会话编排（消息循环、模式切换、工具分发），不放工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
+- `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口；协议级转换收敛在 `adapters/llm/protocols.py`，厂商差异收敛在 `adapters/llm/vendors.py`，禁止继续把 `qwen` / `kimi` 等分支散落回 `client.py` 或 `runtime/session.py`。
 - `plan_enter` / `plan_exit` 仅负责发起模式切换申请，确认与取消必须由程序状态机和 Web 交互控制，禁止让 LLM 直接决定确认结果。
 - Web 端“确认切换”必须走流式接口继续执行后续会话，禁止退回阻塞式普通 POST，否则前端会丢失增量事件并表现为无响应。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 请求停止当前会话；运行时按 `session_id` 记录停止标记，并在 loop 顶部及关键边界协作式收口，统一返回 `interrupted/cancelled`。
@@ -139,7 +142,8 @@ pnpm dev
 - 未单独调整时建议默认 `60` 秒，优先保证父/子 Agent 二轮推理能稳定失败收口，而不是静默卡住。
 - 当 `task` 委派完成后，若主 Agent 二轮 LLM 调用超时，系统必须记录错误日志并返回可解释失败结果。
 - `llm_runtime.json` 的 provider 配置采用“厂商公共配置 + 多模型列表”结构：必须显式声明 `default_model` 与 `models`，`agent_defaults` 必须显式声明 `provider + model`。
-- `api_mode` 由 provider 级配置统一声明，当前支持 `responses` 与 `chat_completions`；本阶段先完成配置与解析收敛，具体 `responses api` 调用链可后续再接入。
+- `api_mode` 由 provider 级配置统一声明，当前支持 `responses` 与 `chat_completions`；其中 `responses` 已接入真实 `/v1/responses` 调用链，覆盖非流式、流式、函数工具调用与工具结果回灌，仍由仓库自行维护多轮历史，不引入 `previous_response_id` 隐式会话状态。
+- `qwen` 在 `api_mode=responses` 下必须使用 DashScope Responses 兼容入口 `https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1`；不要继续复用 `chat.completions` 的旧兼容入口 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
 
 ### 额外约定：Kimi Provider 接入
 
@@ -202,6 +206,8 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-20：修复 qwen `responses` 自定义 function tool 的无参 schema 兼容问题；无参工具不再下发 `parameters: {}`，避免 DashScope 返回 `InternalError.Algo.InvalidParameter`。
+- 2026-03-20：将 LLM 适配层重构为“统一入口 + 协议层 + 厂商方言层”，新增 `adapters/llm/protocols.py` 与 `adapters/llm/vendors.py`，在不改变 `Message` 结构的前提下为 `qwen` / `kimi` 保留独立转换扩展点。
 - 2026-03-12：同步文档结构与当前代码，补充 `session_memory.py`、Web/测试说明、分层职责约束。
 - 2026-03-13：补充 agent 注册约定、`task` 动态描述模板与 subagent 扩展说明。
 - 2026-03-13：将 skills 暴露方式从 `explore` prompt 占位符迁移为 `load_skill` 工具描述动态注入。
