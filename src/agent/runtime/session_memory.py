@@ -60,9 +60,13 @@ class FileSessionMemoryStore(SessionMemoryStore):
         return (self._base_dir or get_workspace().sessions_dir).resolve()
 
     def _session_file(self, session_id: str) -> Path:
-        normalized = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in session_id).strip("._")
-        safe_session_id = normalized or "default_session"
-        return self._storage_dir() / f"{safe_session_id}.json"
+        normalized_session_id = (session_id or "").strip()
+        if not normalized_session_id:
+            raise ValueError("session_id 不能为空")
+        normalized = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in normalized_session_id).strip("._")
+        if not normalized:
+            raise ValueError("session_id 缺少可用字符")
+        return self._storage_dir() / f"{normalized}.json"
 
     def load(self, session_id: str) -> list[Message]:
         file_path = self._session_file(session_id)

@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -41,13 +42,49 @@ def safe_path(path_str: str) -> Path:
 
 def run_read(path: str, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
     try:
-        text = safe_path(path).read_text()
+        target = safe_path(path)
+        if target.suffix.lower() == ".pdf":
+            pdf_bytes = target.read_bytes()
+            pdf_base64 = base64.b64encode(pdf_bytes).decode("ascii")
+            # OpenAI 官方文档当前说明：单个文件小于 50 MB。
+            if len(pdf_bytes) >= 50 * 1024 * 1024:
+                return build_tool_failure(
+                    "Error: PDF file is too large for OpenAI Responses inline file input.",
+                    error_code="pdf_file_too_large",
+                    file_type="pdf",
+                    filename=target.name,
+                    path=path,
+                    size_bytes=len(pdf_bytes),
+                    base64_size=len(pdf_base64),
+                )
+
+            return {
+                "output": "PDF read successfully",
+                "metadata": {
+                    "status": "completed",
+                    "path": path,
+                    "file_type": "pdf",
+                    "filename": target.name,
+                    "size_bytes": len(pdf_bytes),
+                    "encoding": "base64",
+                    "paging_ignored": limit is not None or offset != 0,
+                },
+                "attachments": [
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": f"data:application/pdf;base64,{pdf_base64}",
+                    }
+                ],
+            }
+
+        text = target.read_text()
         lines = text.splitlines()
         start = max(offset, 0)
         selected = lines[start:]
         if limit is not None and limit < len(selected):
             selected = selected[:limit] + [f"... ({len(lines) - start - limit} more lines)"]
-        return build_tool_success("\n".join(selected)[:50000])
+        return build_tool_success("\n".join(selected)[:50000], path=path)
     except Exception as exc:
         return build_tool_failure(f"Error: {exc}", error_code="read_failed", error_type=type(exc).__name__)
 

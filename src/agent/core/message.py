@@ -388,9 +388,10 @@ def extract_tool_calls(message: Message) -> list[ToolFunctionCall]:
     return tool_calls
 
 
-def _tool_result_for_provider(message: Message) -> tuple[str, str]:
+def _tool_result_for_provider(message: Message) -> tuple[str, str, list[dict[str, Any]]]:
     tool_call_id = ""
     content = ""
+    attachments: list[dict[str, Any]] = []
     for part in message["parts"]:
         if part.get("type") != "tool":
             continue
@@ -400,11 +401,14 @@ def _tool_result_for_provider(message: Message) -> tuple[str, str]:
         tool_call_id = str(state.get("tool_call_id", ""))
         output = state.get("output") if isinstance(state.get("output"), dict) else {}
         content = str(output.get("output", ""))
+        raw_attachments = output.get("attachments")
+        if isinstance(raw_attachments, list):
+            attachments = [item for item in raw_attachments if isinstance(item, dict)]
         if content:
             break
     if not content:
         content = get_message_text(message)
-    return tool_call_id, content
+    return tool_call_id, content, attachments
 
 
 def _collect_reasoning_text(value: Any) -> list[str]:
@@ -456,13 +460,15 @@ def to_provider_messages(messages: list[Message]) -> list[dict[str, Any]]:
         role = get_role(message)
 
         if role == "tool":
-            tool_call_id, content = _tool_result_for_provider(message)
+            tool_call_id, content, attachments = _tool_result_for_provider(message)
             provider_message: dict[str, Any] = {
                 "role": "tool",
                 "content": content,
             }
             if tool_call_id:
                 provider_message["tool_call_id"] = tool_call_id
+            if attachments:
+                provider_message["attachments"] = attachments
             provider_messages.append(provider_message)
             continue
 
@@ -550,7 +556,11 @@ def normalize_error(exc: Exception) -> NormalizedError:
     text = str(exc)
     code = "api_error"
     lowered = text.lower()
-    if "401" in lowered or "auth" in lowered or "unauthorized" in lowered:
+    if "kimi_file_extract_failed" in lowered:
+        code = "kimi_file_extract_failed"
+    elif "unsupported_file_input" in lowered:
+        code = "unsupported_file_input"
+    elif "401" in lowered or "auth" in lowered or "unauthorized" in lowered:
         code = "auth_error"
     elif "timeout" in lowered:
         code = "timeout"

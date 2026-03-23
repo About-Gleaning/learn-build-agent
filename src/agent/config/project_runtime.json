@@ -19,5 +19,18 @@
     },
     // 按模型厂商 vendor 做局部覆盖。只需要填写和 default 不同的字段，未填写字段会继承 default。
     "vendors": {}
+  },
+  "file_extraction": {
+    // 文件抽取能力的默认配置。当前仅 Kimi 会消费该配置，后续可按 vendor 渐进扩展。
+    "default": {
+      // 允许走“上传文件 -> 抽取内容 -> 注入上下文”链路的文件扩展名。
+      "allowed_extensions": [".pdf"],
+      // 抽取完成后的远端清理策略。当前仅支持异步删除，且删除失败不影响主流程。
+      "cleanup_mode": "async_delete"
+    },
+    // 按模型厂商 vendor 做局部覆盖。只需要填写和 default 不同的字段。
+    "vendors": {
+      "kimi": {}
+    }
   }
 }

@@ -1,5 +1,6 @@
 import pytest
 
+from agent.core.context import get_session_id
 from agent.config.settings import clear_runtime_settings_cache
 from agent.runtime.compaction import TOOL_OUTPUT_MAX_BYTES
 from agent.runtime.session import run_session
@@ -344,6 +345,30 @@ def test_tool_logging_hook_should_log_truncation_write_error(caplog, monkeypatch
 
     assert "tool.output_truncated tool=demo_tool session_id=s_truncated_error_log tool_call_id=call_truncated_error_log" in caplog.text
     assert "write_error=OSError: disk full" in caplog.text
+
+
+def test_tool_executor_should_inject_session_id_into_contextvar(tmp_path):
+    configure_workspace(tmp_path)
+    seen: dict[str, str] = {}
+
+    def _handler() -> str:
+        seen["session_id"] = get_session_id()
+        return "ok"
+
+    executor = ToolExecutor({"demo_tool": _handler})
+    result = executor.execute(
+        "demo_tool",
+        "{}",
+        session_id="s_ctx_injected",
+        tool_call_id="call_ctx",
+        round_no=1,
+        hooks=[],
+        task_available=False,
+        workdir=str(tmp_path),
+    )
+
+    assert result["output"] == "ok"
+    assert seen["session_id"] == "s_ctx_injected"
 
 
 def test_tool_executor_should_write_full_file_to_workspace_runtime_when_cwd_differs(tmp_path):

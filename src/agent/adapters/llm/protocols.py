@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from openai import OpenAI
+
 from ...config.settings import ResolvedLLMConfig
 from ...core.message import (
     Message,
@@ -167,7 +169,12 @@ def normalize_qwen_responses_tools(tools: list[dict[str, Any]]) -> list[dict[str
     return normalized_tools
 
 
-def build_responses_input(messages: list[Message]) -> list[dict[str, Any]]:
+def build_responses_input(
+    messages: list[Message],
+    *,
+    allow_file_attachments: bool = True,
+    unsupported_vendor: str = "",
+) -> list[dict[str, Any]]:
     responses_input: list[dict[str, Any]] = []
     provider_messages = to_provider_messages(messages)
     for provider_message in provider_messages:
@@ -177,11 +184,50 @@ def build_responses_input(messages: list[Message]) -> list[dict[str, Any]]:
             tool_call_id = stringify_text(provider_message.get("tool_call_id"))
             if not tool_call_id:
                 continue
+            attachments = provider_message.get("attachments")
+            response_output: str | list[dict[str, Any]] = content
+            if isinstance(attachments, list):
+                attachment_parts: list[dict[str, Any]] = []
+                for attachment in attachments:
+                    if not isinstance(attachment, dict):
+                        continue
+                    if stringify_text(attachment.get("type")) != "file":
+                        continue
+                    if not allow_file_attachments:
+                        vendor_name = unsupported_vendor or "当前 provider"
+                        filename = stringify_text(attachment.get("filename")) or "unknown"
+                        mime = stringify_text(attachment.get("mime")) or "unknown"
+                        raise ValueError(
+                            f"unsupported_file_input: {vendor_name} 暂不支持文件附件输入，"
+                            f"请勿在消息中传递文件。filename={filename} mime={mime}"
+                        )
+                    if stringify_text(attachment.get("mime")) != "application/pdf":
+                        continue
+                    raw_url = stringify_text(attachment.get("url"))
+                    data_prefix = "data:application/pdf;base64,"
+                    if not raw_url.startswith(data_prefix):
+                        continue
+                    file_data = raw_url[len(data_prefix):]
+                    if not file_data:
+                        continue
+                    filename = stringify_text(attachment.get("filename")) or "attachment.pdf"
+                    attachment_parts.append(
+                        {
+                            "type": "input_file",
+                            "file_data": file_data,
+                            "filename": filename,
+                        }
+                    )
+                if attachment_parts:
+                    response_output = []
+                    if content:
+                        response_output.append({"type": "input_text", "text": content})
+                    response_output.extend(attachment_parts)
             responses_input.append(
                 {
                     "type": "function_call_output",
                     "call_id": tool_call_id,
-                    "output": content,
+                    "output": response_output,
                 }
             )
             continue
@@ -330,7 +376,13 @@ class ProviderAdapter:
     def uses_responses_api(self) -> bool:
         return False
 
-    def build_request(self, messages: list[Message], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    def build_request(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        *,
+        client: OpenAI | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     def parse_response(self, response: Any, *, session_id: str, parent_id: str = "") -> Message:
@@ -389,10 +441,19 @@ class ChatCompletionsAdapter(ProviderAdapter):
     def request_token_key(self) -> str:
         return "max_tokens"
 
-    def build_request(self, messages: list[Message], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    def build_messages(self, messages: list[Message], *, client: OpenAI | None = None) -> list[dict[str, Any]]:
+        return to_provider_messages(messages)
+
+    def build_request(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        *,
+        client: OpenAI | None = None,
+    ) -> dict[str, Any]:
         return {
             "model": self.model,
-            "messages": to_provider_messages(messages),
+            "messages": self.build_messages(messages, client=client),
             "tools": tools,
         }
 
@@ -468,10 +529,19 @@ class ResponsesAdapter(ProviderAdapter):
     def normalize_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return normalize_responses_tools(tools)
 
-    def build_request(self, messages: list[Message], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    def build_input(self, messages: list[Message]) -> list[dict[str, Any]]:
+        return build_responses_input(messages)
+
+    def build_request(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        *,
+        client: OpenAI | None = None,
+    ) -> dict[str, Any]:
         return {
             "model": self.model,
-            "input": build_responses_input(messages),
+            "input": self.build_input(messages),
             "tools": self.normalize_tools(tools),
             # 当前仓库自行维护会话历史，这里显式关闭平台侧存储，避免引入隐式状态。
             "store": False,

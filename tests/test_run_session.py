@@ -2,7 +2,13 @@ import pytest
 
 import agent.runtime.session as session_module
 import agent.runtime.compaction as compaction_module
-from agent.config.settings import clear_runtime_settings_cache, get_project_runtime_settings, resolve_compaction_settings, resolve_llm_config
+from agent.config.settings import (
+    clear_runtime_settings_cache,
+    get_project_runtime_settings,
+    resolve_compaction_settings,
+    resolve_file_extraction_settings,
+    resolve_llm_config,
+)
 from agent.runtime.workspace import build_plan_storage_path, configure_workspace, get_workspace
 from agent.tools.handlers import build_plan_placeholder_path, run_read
 from agent.tools.specs import build_base_tools, build_task_tool
@@ -10,6 +16,7 @@ from agent.runtime.session import (
     build_system_prompt,
     clear_session_memory,
     configure_session_memory_store,
+    generate_session_id,
     request_session_stop,
     run_session,
     run_mode_switch_stream_events,
@@ -826,6 +833,41 @@ def test_run_read_should_support_offset_and_limit(monkeypatch, tmp_path):
     assert result["output"] == "b\nc\n... (1 more lines)"
 
 
+def test_build_tool_message_should_backfill_attachment_runtime_fields():
+    result = {
+        "output": "PDF read successfully",
+        "metadata": {"status": "completed", "filename": "demo.pdf"},
+        "attachments": [
+            {
+                "type": "file",
+                "mime": "application/pdf",
+                "url": "data:application/pdf;base64,QUJDRA==",
+            }
+        ],
+    }
+
+    message = session_module._build_tool_message(
+        "s_pdf",
+        tool_call_id="call_pdf",
+        tool_name="read_file",
+        arguments='{"path":"demo.pdf"}',
+        result=result,
+        agent="build",
+        turn_started_at="2026-03-20T00:00:00+00:00",
+    )
+
+    tool_part = message["parts"][0]
+    output = tool_part["state"]["output"]
+    attachment = output["attachments"][0]
+
+    assert attachment["type"] == "file"
+    assert attachment["mime"] == "application/pdf"
+    assert attachment["sessionID"] == "s_pdf"
+    assert attachment["messageID"] == message["info"]["message_id"]
+    assert attachment["filename"] == "demo.pdf"
+    assert str(attachment["id"]).startswith("att_")
+
+
 def test_run_session_should_use_memory_between_calls(monkeypatch):
     configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
     clear_session_memory("s_memory")
@@ -1384,7 +1426,13 @@ def test_run_session_should_use_provider_default_model_when_model_is_omitted(mon
 
 def test_build_system_prompt_should_use_model_specific_prompt(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
-    prompt = build_system_prompt(agent="build", model="qwen3-max", provider="qwen", vendor="qwen")
+    prompt = build_system_prompt(
+        agent="build",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id=generate_session_id("test_prompt"),
+    )
 
     assert "你是 **爪爪**" in prompt
     assert "- vendor: qwen" in prompt
@@ -1393,7 +1441,13 @@ def test_build_system_prompt_should_use_model_specific_prompt(monkeypatch):
 
 def test_build_system_prompt_should_fallback_to_default_prompt(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
-    prompt = build_system_prompt(agent="build", model="gpt-4.1", provider="gpt", vendor="openai")
+    prompt = build_system_prompt(
+        agent="build",
+        model="gpt-4.1",
+        provider="gpt",
+        vendor="openai",
+        session_id=generate_session_id("test_prompt"),
+    )
 
     assert "Qwen 系列模型" not in prompt
     assert "你是 **爪爪**" in prompt
@@ -1403,7 +1457,13 @@ def test_build_system_prompt_should_fallback_to_default_prompt(monkeypatch):
 
 def test_build_system_prompt_should_share_vendor_prompt_for_qwen_coder(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
-    prompt = build_system_prompt(agent="build", model="qwen3-coder-next", provider="qwen-coder", vendor="qwen")
+    prompt = build_system_prompt(
+        agent="build",
+        model="qwen3-coder-next",
+        provider="qwen-coder",
+        vendor="qwen",
+        session_id=generate_session_id("test_prompt"),
+    )
 
     assert "你是 **爪爪**" in prompt
     assert "- provider: qwen-coder" in prompt
@@ -1434,7 +1494,13 @@ def test_build_system_prompt_should_append_agents_md(monkeypatch, tmp_path):
 
 def test_build_system_prompt_should_include_git_environment(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (True, "/tmp/repo"))
-    prompt = build_system_prompt(agent="explore", model="gemini-2.0-flash", provider="gemini", vendor="google")
+    prompt = build_system_prompt(
+        agent="explore",
+        model="gemini-2.0-flash",
+        provider="gemini",
+        vendor="google",
+        session_id=generate_session_id("test_prompt"),
+    )
 
     assert "- is_git_repo: true" in prompt
     assert "- git_root: /tmp/repo" in prompt
@@ -1517,6 +1583,109 @@ def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
 
     assert events[-1]["type"] == "done"
     assert seen_system_prompts == ["STREAM::build::qwen::qwen::qwen3-max"]
+
+
+def test_run_session_should_fail_when_session_id_missing():
+    with pytest.raises(ValueError, match="session_id 不能为空"):
+        run_session("缺少会话", session_id="")
+
+
+def test_generate_session_id_should_return_random_cli_style_value():
+    first = generate_session_id("cli")
+    second = generate_session_id("cli")
+
+    assert first.startswith("cli_")
+    assert second.startswith("cli_")
+    assert first != second
+
+
+def test_run_session_should_report_type_error_for_stringified_todo_list(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_todo_stringified")
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_todo_write",
+                name="todo_write",
+                arguments=(
+                    '{"todo_list":"[{\\"id\\":\\"task1\\",\\"text\\":\\"搜索 hello.py 文件位置\\",'
+                    '\\"priority\\":\\"high\\",\\"status\\":\\"completed\\"}]"}'
+                ),
+            )
+        else:
+            append_text_part(assistant, "done")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("测试 todo_write 类型错误", session_id="s_todo_stringified")
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_todo_stringified")
+    tool_outputs = [
+        str(
+            (
+                part.get("state", {}).get("output", {}).get("output", "")
+                if isinstance(part.get("state"), dict)
+                else ""
+            )
+        )
+        for message in history_messages
+        for part in message["parts"]
+        if part.get("type") == "tool"
+    ]
+
+    assert get_message_text(result) == "done"
+    assert any("todo_list 必须是 JSON array，不能是字符串" in output for output in tool_outputs)
+
+
+def test_run_session_should_allow_read_file_with_initialized_tool_session(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_read_file_session")
+    target_file = tmp_path / "notes.txt"
+    target_file.write_text("hello", encoding="utf-8")
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_read",
+                name="read_file",
+                arguments=f'{{"path":"{target_file}"}}',
+            )
+        else:
+            append_text_part(assistant, "done")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("测试 read_file session", session_id="s_read_file_session")
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_read_file_session")
+    tool_outputs = [
+        str(
+            (
+                part.get("state", {}).get("output", {}).get("output", "")
+                if isinstance(part.get("state"), dict)
+                else ""
+            )
+        )
+        for message in history_messages
+        for part in message["parts"]
+        if part.get("type") == "tool"
+    ]
+
+    assert get_message_text(result) == "done"
+    assert any("hello" in output for output in tool_outputs)
+    assert all("session_id 尚未初始化" not in output for output in tool_outputs)
 
 
 def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
@@ -1714,6 +1883,9 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.compaction_default.tool_output_max_lines == 2000
         assert settings.compaction_default.tool_output_max_bytes == 50 * 1024
         assert settings.compaction_vendors == {}
+        assert settings.file_extraction_default.allowed_extensions == (".pdf",)
+        assert settings.file_extraction_default.cleanup_mode == "async_delete"
+        assert settings.file_extraction_vendors == {}
     finally:
         clear_runtime_settings_cache()
 
@@ -1778,6 +1950,73 @@ def test_get_project_runtime_settings_should_support_json_comments(tmp_path, mon
         settings = get_project_runtime_settings()
         assert settings.compaction_default.tool_result_keep_recent == 6
         assert settings.compaction_default.summary_max_tokens == 789
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_read_file_extraction_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "file_extraction": {
+            "default": {
+              "allowed_extensions": [".pdf", ".md"],
+              "cleanup_mode": "async_delete"
+            },
+            "vendors": {
+              "kimi": {
+                "allowed_extensions": [".pdf"]
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.file_extraction_default.allowed_extensions == (".pdf", ".md")
+        assert settings.file_extraction_default.cleanup_mode == "async_delete"
+        assert settings.file_extraction_vendors["kimi"].allowed_extensions == (".pdf",)
+        assert settings.file_extraction_vendors["kimi"].cleanup_mode == "async_delete"
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_resolve_file_extraction_settings_should_merge_vendor_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "file_extraction": {
+            "default": {
+              "allowed_extensions": [".pdf", ".md"],
+              "cleanup_mode": "async_delete"
+            },
+            "vendors": {
+              "kimi": {
+                "allowed_extensions": [".pdf"]
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        kimi_settings = resolve_file_extraction_settings("kimi")
+        fallback_settings = resolve_file_extraction_settings("openai")
+        assert kimi_settings.allowed_extensions == (".pdf",)
+        assert kimi_settings.cleanup_mode == "async_delete"
+        assert fallback_settings.allowed_extensions == (".pdf", ".md")
+        assert fallback_settings.cleanup_mode == "async_delete"
     finally:
         clear_runtime_settings_cache()
 

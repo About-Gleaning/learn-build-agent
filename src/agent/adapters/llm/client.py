@@ -15,6 +15,7 @@ from ...core.message import (
     extract_tool_calls,
     get_role,
     normalize_error,
+    to_provider_messages,
 )
 from .protocols import ProviderAdapter, normalize_responses_tools
 from .vendors import build_provider_adapter
@@ -66,16 +67,14 @@ class LoggingHook(LLMHook):
 
     def before_call(self, ctx: HookContext) -> None:
         latest_message = _build_latest_message_preview(ctx.get("source_messages", []))
+        attachments_preview = _build_request_attachments_preview(ctx.get("source_messages", []))
         log_extra = build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", ""))
-        if latest_message is None:
-            logger.info("llm.request api_mode=%s", ctx.get("api_mode", "unknown"), extra=log_extra)
-            return
-        logger.info(
-            "llm.request api_mode=%s latest_message=%s",
-            ctx.get("api_mode", "unknown"),
-            latest_message,
-            extra=log_extra,
-        )
+        fields = [f"api_mode={ctx.get('api_mode', 'unknown')}"]
+        if latest_message is not None:
+            fields.append(f"latest_message={latest_message}")
+        if attachments_preview:
+            fields.append(f"attachments={attachments_preview}")
+        logger.info("llm.request %s", " ".join(fields), extra=log_extra)
 
     def after_call(self, ctx: HookContext, message: Message) -> None:
         tool_names = [tool_call["name"] for tool_call in extract_tool_calls(message) if tool_call.get("name")]
@@ -115,6 +114,28 @@ def _build_latest_message_preview(messages: list[Message]) -> str | None:
         if content:
             return sanitize_log_text(content)
     return ""
+
+
+def _build_request_attachments_preview(messages: list[Message]) -> str:
+    summaries: list[str] = []
+    for provider_message in to_provider_messages(messages):
+        role = sanitize_log_text(str(provider_message.get("role", "")).strip() or "unknown", limit=30)
+        raw_attachments = provider_message.get("attachments")
+        if not isinstance(raw_attachments, list):
+            continue
+        for attachment in raw_attachments:
+            if not isinstance(attachment, dict):
+                continue
+            attachment_type = sanitize_log_text(str(attachment.get("type", "")).strip() or "unknown", limit=30)
+            mime = sanitize_log_text(str(attachment.get("mime", "")).strip() or attachment_type, limit=60)
+            filename = sanitize_log_text(str(attachment.get("filename", "")).strip() or "unnamed", limit=80)
+            summaries.append(f"{role}:{mime}:{filename}")
+
+    if not summaries:
+        return ""
+    if len(summaries) <= 3:
+        return ",".join(summaries)
+    return ",".join(summaries[:3]) + f",+{len(summaries) - 3} more"
 
 
 def _build_response_preview(message: Message) -> str:
@@ -206,14 +227,15 @@ def create_chat_completion(
     agent: str = "",
 ) -> Message:
     """统一封装大模型调用入口，返回内部 Message 结构。"""
-    session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
+    if not messages:
+        raise ValueError("messages 不能为空，无法解析 session_id")
+    session_id = str(messages[-1]["info"].get("session_id", "")).strip()
+    if not session_id:
+        raise ValueError("messages[-1] 缺少 session_id")
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
     effective_config = _resolve_effective_config(llm_config)
     adapter = build_provider_adapter(effective_config)
     client = _build_openai_client(effective_config)
-
-    request_payload = adapter.build_request(messages, tools)
-    request_payload[adapter.request_token_key] = max_tokens
 
     ctx: HookContext = {
         "session_id": session_id,
@@ -226,16 +248,33 @@ def create_chat_completion(
         "message_count": len(messages),
         "tools_count": len(tools),
         "request_size": sum(estimate_message_size(msg) for msg in messages),
-        "request_payload": request_payload,
         "source_messages": messages,
     }
 
     effective_hooks = get_global_hooks() + (hooks or [])
-    for hook in effective_hooks:
-        _invoke_hook(hook, "before", ctx=ctx)
-
     start = time.perf_counter()
     ctx["start_time"] = start
+
+    try:
+        request_payload = adapter.build_request(messages, tools, client=client)
+        request_payload[adapter.request_token_key] = max_tokens
+        ctx["request_payload"] = request_payload
+    except Exception as exc:
+        ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
+        normalized = normalize_error(exc)
+        for hook in effective_hooks:
+            _invoke_hook(hook, "error", ctx=ctx, error=exc, normalized_error=normalized)
+
+        return create_error_message(
+            session_id=session_id,
+            model=adapter.model,
+            provider=adapter.provider,
+            error=normalized,
+            parent_id=parent_id,
+        )
+
+    for hook in effective_hooks:
+        _invoke_hook(hook, "before", ctx=ctx)
 
     try:
         response = _create_provider_completion(client, request_payload, adapter)
@@ -270,15 +309,15 @@ def create_chat_completion_stream(
     agent: str = "",
 ) -> Generator[dict[str, Any], None, Message]:
     """流式调用大模型，逐步产出文本增量并在结束时返回完整 Message。"""
-    session_id = messages[-1]["info"].get("session_id", "default_session") if messages else "default_session"
+    if not messages:
+        raise ValueError("messages 不能为空，无法解析 session_id")
+    session_id = str(messages[-1]["info"].get("session_id", "")).strip()
+    if not session_id:
+        raise ValueError("messages[-1] 缺少 session_id")
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
     effective_config = _resolve_effective_config(llm_config)
     adapter = build_provider_adapter(effective_config)
     client = _build_openai_client(effective_config)
-
-    request_payload = adapter.build_request(messages, tools)
-    request_payload[adapter.request_token_key] = max_tokens
-    request_payload["stream"] = True
 
     ctx: HookContext = {
         "session_id": session_id,
@@ -291,18 +330,35 @@ def create_chat_completion_stream(
         "message_count": len(messages),
         "tools_count": len(tools),
         "request_size": sum(estimate_message_size(msg) for msg in messages),
-        "request_payload": request_payload,
         "source_messages": messages,
     }
 
     effective_hooks = get_global_hooks() + (hooks or [])
-    for hook in effective_hooks:
-        _invoke_hook(hook, "before", ctx=ctx)
-
     start = time.perf_counter()
     ctx["start_time"] = start
 
     stream_state = adapter.new_stream_state()
+
+    try:
+        request_payload = adapter.build_request(messages, tools, client=client)
+        request_payload[adapter.request_token_key] = max_tokens
+        request_payload["stream"] = True
+        ctx["request_payload"] = request_payload
+    except Exception as exc:
+        ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
+        normalized = normalize_error(exc)
+        for hook in effective_hooks:
+            _invoke_hook(hook, "error", ctx=ctx, error=exc, normalized_error=normalized)
+        return create_error_message(
+            session_id=session_id,
+            model=adapter.model,
+            provider=adapter.provider,
+            error=normalized,
+            parent_id=parent_id,
+        )
+
+    for hook in effective_hooks:
+        _invoke_hook(hook, "before", ctx=ctx)
 
     try:
         stream = _create_provider_completion_stream(client, request_payload, adapter)

@@ -7,14 +7,14 @@ import uvicorn
 
 from .config.logging_setup import init_logging
 from .core.message import get_message_text
-from .runtime.session import clear_session_memory, run_session
+from .runtime.session import clear_session_memory, generate_session_id, run_session
 from .runtime.workspace import configure_workspace, get_workspace
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="my-agent", description="在当前目录启动编码代理。")
     parser.add_argument("--workdir", default=".", help="工作区目录，默认使用当前目录。")
-    parser.add_argument("--session", default="default", help="会话 ID，默认 default。")
+    parser.add_argument("--session", help="会话 ID；未传时自动生成随机会话号。")
     parser.add_argument("--mode", choices=("build", "plan"), default="build", help="启动模式，默认 build。")
 
     subparsers = parser.add_subparsers(dest="command")
@@ -72,4 +72,5 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "web":
         run_web_server(host=args.host, port=args.port)
         return
-    run_cli_session(session_id=args.session, mode=args.mode)
+    session_id = (args.session or "").strip() or generate_session_id("cli")
+    run_cli_session(session_id=session_id, mode=args.mode)

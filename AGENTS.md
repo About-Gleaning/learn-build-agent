@@ -63,8 +63,10 @@
 - `kimi` provider 统一走 Moonshot OpenAI 兼容接口，`base_url` 固定为 `https://api.moonshot.cn/v1`，API Key 环境变量统一使用 `KIMI_API_KEY`。
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
 - `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
+- `project_runtime.json` 中的 `file_extraction` 也必须采用 `default + vendors` 结构；当前默认仅开放 `.pdf`，并统一使用 `cleanup_mode=async_delete` 做远端异步清理。
 - `compaction.tool_result_keep_recent` 的计数口径统一按 `role=tool` 消息数量计算，默认保留最近 `3` 条不压缩。
 - 当前可配置的压缩关键参数包括：`tool_result_prune_enabled`、`tool_result_keep_recent`、`tool_result_prune_min_chars`、`summary_trigger_threshold`、`summary_max_tokens`、`tool_output_max_lines`、`tool_output_max_bytes`。
+- `kimi` 命中 PDF 附件时，必须按 Moonshot 官方文件抽取链路处理：先上传 `/v1/files`，再读取 `/v1/files/{file_id}/content`，最后把抽取文本包装为“仅供参考”的合成 `user` message 注入 `chat.completions`；远端删除失败仅记日志，不得阻塞主流程。
 
 ## 开发与验证命令
 
@@ -111,6 +113,13 @@
 
 ## 变更记录
 
+- 2026-03-20：移除运行时内部对 `default_session` 的隐式兜底；Web / 运行时正式入口缺少 `session_id` 时直接报错，CLI 与测试入口改为在最外层自动生成随机 `session_id` 后再进入会话链路。
+- 2026-03-20：修复 `kimi` PDF 抽取在多轮会话中的重复上传与提示词乱序问题；同一 PDF 在首次抽取后会把结果缓存到原 `tool` 输出元数据，后续轮次直接复用，并将“仅供参考”的合成 `user` message 固定插入到对应 `tool` 消息之后，不再整体前置到对话最前面。
+- 2026-03-20：为 `kimi` provider 新增 PDF 支持；命中 PDF 附件时改为走 Moonshot 文件抽取链路（上传文件、拉取抽取文本、注入“仅供参考”的合成 `user` message），并在抽取完成后异步删除远端文件，删除失败不影响主流程。
+- 2026-03-20：`project_runtime.json` 新增 `file_extraction` 配置，统一管理可抽取文件扩展名与清理策略，当前默认仅开放 `.pdf`。
+- 2026-03-20：`llm.request` 日志新增文件附件摘要输出；当请求历史中包含 tool result 附件时，日志会打印精简的 `role:mime:filename` 摘要，避免继续只显示文本请求且不输出 base64 正文。
+- 2026-03-20：`qwen` 在 `api_mode=responses` 下命中文件附件输入时改为本地直接返回 `unsupported_file_input` 错误，不再继续把 PDF 等文件按 OpenAI `input_file` 结构发送到 DashScope，避免无效外呼与 500 校验错误。
+- 2026-03-20：`read_file` 新增 PDF 支持；读取 PDF 时返回固定文本 `PDF read successfully`，并将 PDF 内容以内联 base64 data URL 的 `attachments` 结构挂到 tool result。OpenAI `responses` 组装阶段会将该 PDF 附件翻译为 `function_call_output` 中的 `input_file`，`chat_completions` 暂保留文本回退。
 - 2026-03-20：修复 `qwen` 在 `api_mode=responses` 下的无参 function tool schema 兼容问题；无参工具不再下发 `parameters: {}`，避免 DashScope 返回 `InternalError.Algo.InvalidParameter`。
 - 2026-03-20：为 `qwen` 的 `responses` 独立收敛 function tool 参数 schema，避免继续复用 OpenAI 更严格的 `additionalProperties/default/strict` 规范化结果导致 DashScope 兼容层报 `InternalError.Algo.InvalidParameter`。
 - 2026-03-20：将 LLM 适配层重构为“统一入口 + 协议层 + 厂商方言层”，新增 `adapters/llm/protocols.py` 与 `adapters/llm/vendors.py`，在不改变 `Message` 结构的前提下为 `qwen` / `kimi` 保留独立转换扩展点。

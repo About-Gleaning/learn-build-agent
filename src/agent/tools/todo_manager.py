@@ -38,6 +38,10 @@ class TodoManager:
 
     def update(self, todo_list: list[dict[str, Any]]) -> str:
         """更新并持久化 todo 列表。"""
+        if isinstance(todo_list, str):
+            raise ValueError("todo_list 必须是 JSON array，不能是字符串。")
+        if not isinstance(todo_list, list):
+            raise ValueError("todo_list 必须是 JSON array。")
         if len(todo_list) > 20:
             raise ValueError("Todo list cannot exceed 20 items")
 
@@ -45,6 +49,8 @@ class TodoManager:
         in_progress_count = 0
 
         for i, todo in enumerate(todo_list):
+            if not isinstance(todo, dict):
+                raise ValueError(f"Todo item {i+1} must be an object")
             if todo.get("id") is None or todo["id"] == "":
                 todo_id = i + 1
             else:
