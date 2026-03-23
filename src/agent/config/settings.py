@@ -40,6 +40,7 @@ DEFAULT_TOOL_OUTPUT_MAX_BYTES = 50 * 1024
 DEFAULT_FILE_EXTRACTION_ALLOWED_EXTENSIONS = (".pdf",)
 DEFAULT_FILE_EXTRACTION_CLEANUP_MODE = "async_delete"
 DEFAULT_AGENT_LOOP_MAX_ROUNDS = 8
+DEFAULT_SUBAGENT_LOOP_MAX_ROUNDS = 15
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class ProjectRuntimeSettings:
     file_extraction_default: "FileExtractionSettings"
     file_extraction_vendors: dict[str, "FileExtractionSettings"]
     agent_loop: "AgentLoopSettings"
+    subagent_loop: "SubagentLoopSettings"
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,11 @@ class FileExtractionSettings:
 @dataclass(frozen=True)
 class AgentLoopSettings:
     max_rounds: int = DEFAULT_AGENT_LOOP_MAX_ROUNDS
+
+
+@dataclass(frozen=True)
+class SubagentLoopSettings:
+    max_rounds: int = DEFAULT_SUBAGENT_LOOP_MAX_ROUNDS
 
 
 @dataclass(frozen=True)
@@ -397,6 +404,16 @@ def _load_project_agent_loop_settings(raw_agent_loop: Any) -> AgentLoopSettings:
     return AgentLoopSettings(max_rounds=max_rounds)
 
 
+def _load_project_subagent_loop_settings(raw_subagent_loop: Any) -> SubagentLoopSettings:
+    if raw_subagent_loop is None:
+        return SubagentLoopSettings()
+    if not isinstance(raw_subagent_loop, dict):
+        raise ValueError("project_runtime.subagent_loop 必须是对象。")
+    raw_max_rounds = raw_subagent_loop.get("max_rounds", DEFAULT_SUBAGENT_LOOP_MAX_ROUNDS)
+    max_rounds = _parse_positive_int(raw_max_rounds, field_name="subagent_loop.max_rounds")
+    return SubagentLoopSettings(max_rounds=max_rounds)
+
+
 def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
     if not isinstance(raw_providers, dict) or not raw_providers:
         raise ValueError("LLM 配置缺少 providers，且至少要配置一个厂商。")
@@ -489,12 +506,14 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
     compaction_default, compaction_vendors = _load_project_compaction_settings(payload.get("compaction"))
     file_extraction_default, file_extraction_vendors = _load_project_file_extraction_settings(payload.get("file_extraction"))
     agent_loop = _load_project_agent_loop_settings(payload.get("agent_loop"))
+    subagent_loop = _load_project_subagent_loop_settings(payload.get("subagent_loop"))
     return ProjectRuntimeSettings(
         compaction_default=compaction_default,
         compaction_vendors=compaction_vendors,
         file_extraction_default=file_extraction_default,
         file_extraction_vendors=file_extraction_vendors,
         agent_loop=agent_loop,
+        subagent_loop=subagent_loop,
     )
 
 
@@ -516,6 +535,10 @@ def resolve_file_extraction_settings(vendor: str | None = None) -> FileExtractio
 
 def resolve_agent_loop_settings() -> AgentLoopSettings:
     return get_project_runtime_settings().agent_loop
+
+
+def resolve_subagent_loop_settings() -> SubagentLoopSettings:
+    return get_project_runtime_settings().subagent_loop
 
 
 def clear_runtime_settings_cache() -> None:

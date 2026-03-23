@@ -9,9 +9,9 @@
       // 只有旧 tool result 的字符数大于这个阈值时，才会被替换成占位符。
       "tool_result_prune_min_chars": 100,
       // 触发摘要压缩的近似 token 阈值。上下文估算值超过它后，会生成 summary checkpoint。
-      "summary_trigger_threshold": 50000,
+      "summary_trigger_threshold": 170000,
       // 生成摘要压缩时，发给大模型的 max_tokens 上限。
-      "summary_max_tokens": 4000,
+      "summary_max_tokens": 12000,
       // 单次 tool 输出写回上下文前，允许保留的最大行数。
       "tool_output_max_lines": 2000,
       // 单次 tool 输出写回上下文前，允许保留的最大字节数。
@@ -35,6 +35,10 @@
   },
   "agent_loop": {
     // 单次 agent loop 允许执行的最大轮次。命中上限后会以 error 收口，避免 unknown 持续空转。
-    "max_rounds": 8
+    "max_rounds": 50
+  },
+  "subagent_loop": {
+    // 单次 subagent loop 允许执行的最大轮次。subagent 通常需要更多轮次来完成复杂探索任务。
+    "max_rounds": 50
   }
 }

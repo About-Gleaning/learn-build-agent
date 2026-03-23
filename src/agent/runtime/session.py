@@ -12,7 +12,7 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..config.logging_setup import build_log_extra, sanitize_log_text
-from ..config.settings import ResolvedLLMConfig, resolve_agent_loop_settings, resolve_llm_config
+from ..config.settings import ResolvedLLMConfig, resolve_agent_loop_settings, resolve_llm_config, resolve_subagent_loop_settings
 from ..core.context import set_session_id
 from ..core.message import (
     DisplayPart,
@@ -1217,6 +1217,9 @@ def subagent_loop(
     if agent_definition.model != "subagent":
         return f"Error: Agent '{agent_name}' 不是 subagent，不能通过 task 调用。"
 
+    # 使用独立的 subagent loop 配置
+    subagent_max_rounds = resolve_subagent_loop_settings().max_rounds
+
     result = run_session(
         user_input=prompt,
         session_id=session_id,
@@ -1231,6 +1234,7 @@ def subagent_loop(
         runtime_agent=agent_name,
         todo_tool_names={"todo_write", "todo_read"},
         llm_config=llm_config,
+        max_rounds=subagent_max_rounds,
     )
     return get_message_text(result)
 
@@ -1255,8 +1259,13 @@ def _run_session_stream(
     parent_tool_call_id: str | None = None,
     process_items: list[ProcessItem] | None = None,
     display_parts: list[DisplayPart] | None = None,
+    max_rounds: int | None = None,
 ) -> Generator[dict[str, Any], None, Message]:
-    """内部流式会话入口：支持递归转发 subagent 事件，并返回最终助手消息。"""
+    """内部流式会话入口：支持递归转发 subagent 事件，并返回最终助手消息。
+    
+    Args:
+        max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
+    """
     bootstrap = _bootstrap_session(
         user_input,
         session_id=session_id,
@@ -1394,11 +1403,11 @@ def _run_session_stream(
             started_at=turn_started_at,
         )
 
-        max_rounds = resolve_agent_loop_settings().max_rounds
+        effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
         round_no = 0
         while True:
             round_no += 1
-            if round_no > max_rounds:
+            if round_no > effective_max_rounds:
                 active_agent = current_mode if mode_enabled else (runtime_agent or "build")
                 agent_kind = _resolve_agent_kind(active_agent)
                 limit_message = _build_max_rounds_exceeded_message(
@@ -1406,7 +1415,7 @@ def _run_session_stream(
                     active_agent=active_agent,
                     current_runtime=current_runtime,
                     turn_started_at=turn_started_at,
-                    max_rounds=max_rounds,
+                    max_rounds=effective_max_rounds,
                 )
                 completed_at = str(limit_message["info"].get("turn_completed_at", ""))
                 messages.append(limit_message)
@@ -2007,8 +2016,13 @@ def run_session(
     tool_hooks: list[ToolHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
+    max_rounds: int | None = None,
 ) -> Message:
-    """新会话入口：返回最终助手 Message（含结构化 parts）。"""
+    """新会话入口：返回最终助手 Message（含结构化 parts）。
+    
+    Args:
+        max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
+    """
     bootstrap = _bootstrap_session(
         user_input,
         session_id=session_id,
@@ -2041,18 +2055,18 @@ def run_session(
         )
     )
 
-    max_rounds = resolve_agent_loop_settings().max_rounds
+    effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     round_no = 0
     while True:
         round_no += 1
-        if round_no > max_rounds:
+        if round_no > effective_max_rounds:
             active_agent = current_mode if mode_enabled else (runtime_agent or "build")
             limit_message = _build_max_rounds_exceeded_message(
                 session_id=active_session_id,
                 active_agent=active_agent,
                 current_runtime=current_runtime,
                 turn_started_at=turn_started_at,
-                max_rounds=max_rounds,
+                max_rounds=effective_max_rounds,
             )
             messages.append(limit_message)
             if mode_enabled:
@@ -2202,8 +2216,13 @@ def run_session_stream_events(
     tool_hooks: list[ToolHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
+    max_rounds: int | None = None,
 ) -> Generator[dict[str, Any], None, None]:
-    """流式会话入口：逐步产出轮次/文本/工具事件。"""
+    """流式会话入口：逐步产出轮次/文本/工具事件。
+    
+    Args:
+        max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
+    """
     yield from _run_session_stream(
         user_input,
         session_id=session_id,
@@ -2218,6 +2237,7 @@ def run_session_stream_events(
         tool_hooks=tool_hooks,
         llm_config=llm_config,
         runtime_agent=runtime_agent,
+        max_rounds=max_rounds,
     )
 
 
