@@ -115,6 +115,7 @@
 
 ## 变更记录
 
+- 2026-03-23：新增 `src/skills/api-pdf-md-first/` skill，用于“PDF 接口文档先转同目录 `.api.md`，后续多轮开发优先复用 Markdown”场景，降低长会话重复读取 PDF 的 token 消耗，并补充接口 Markdown 模板与提炼规则。
 - 2026-03-23：Web 前端新增 LLM reasoning 展示；后端流式链路增加 `reasoning_delta` 事件并将 `display_parts.kind=reasoning` 显式透传，前端按时间线顺序内联展示 reasoning，支持单条折叠与全局默认展开/收起控制，同时保持 reasoning 与最终回答分离存储和渲染。
 - 2026-03-23：增强 `llm.response` 日志，统一打印标准化 `finish_reason`、响应文本、思考内容与工具调用摘要，避免模型仅返回 thinking 或 tool call 时日志只剩空 `message=`，提升排障可观测性。
 - 2026-03-23：重构 assistant message 的标准化 `finish_reason` 与 agent loop 终止规则；`chat_completions` / `responses` 统一映射为 `stop`、`length`、`content-filter`、`tool-calls`、`unknown`、`error`，session loop 改为仅基于该字段推进，并新增 `project_runtime.json -> agent_loop.max_rounds` 兜底未知态空转。
