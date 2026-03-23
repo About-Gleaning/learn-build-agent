@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, TypedDict
 
 from ..config.logging_setup import build_log_extra, sanitize_log_text
+from ..core.context import set_session_id
 from ..core.hooks import HookDispatcher
 from .compaction import apply_tool_output_truncation
 
@@ -33,9 +34,12 @@ class ToolNormalizedError(TypedDict, total=False):
 
 
 class FilePart(TypedDict):
-    name: str
-    path: str
-    mime_type: str
+    id: str
+    sessionID: str
+    messageID: str
+    type: str
+    mime: str
+    url: str
 
 
 class ToolResult(TypedDict, total=False):
@@ -208,7 +212,7 @@ def default_tool_output_processor(
     metadata = dict(result.get("metadata", {}))
     truncated = apply_tool_output_truncation(
         text=result.get("output", ""),
-        session_id=ctx.get("session_id", "default_session"),
+        session_id=str(ctx["session_id"]),
         tool_name=ctx.get("tool_name", "tool"),
         tool_call_id=ctx.get("tool_call_id", "call"),
         workdir=Path(options.get("workdir", Path.cwd())),
@@ -323,6 +327,8 @@ class ToolExecutor:
             }
 
         try:
+            # 工具层仍有部分逻辑通过 contextvar 读取 session_id，这里在调用前显式同步。
+            set_session_id(session_id)
             result = normalize_tool_result(handler(**args))
         except Exception as exc:
             ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)

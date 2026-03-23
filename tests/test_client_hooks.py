@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 import agent.adapters.llm.client as client_module
+import agent.adapters.llm.vendors as vendors_module
 from agent.adapters.llm.client import (
     LLMHook,
     LoggingHook,
@@ -15,6 +16,7 @@ from agent.adapters.llm.client import (
 )
 from agent.adapters.llm.protocols import normalize_qwen_responses_tools
 from agent.adapters.llm.vendors import (
+    KIMI_EXTRACTED_FILE_CONTEXT_PREFIX,
     KimiChatCompletionsAdapter,
     OpenAIResponsesAdapter,
     QwenResponsesAdapter,
@@ -137,6 +139,32 @@ def _build_chat_config() -> ResolvedLLMConfig:
     )
 
 
+def _build_qwen_responses_config() -> ResolvedLLMConfig:
+    return ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        api_mode="responses",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+
+def _build_kimi_config() -> ResolvedLLMConfig:
+    return ResolvedLLMConfig(
+        agent="build",
+        provider="kimi",
+        vendor="kimi",
+        model="kimi-k2.5",
+        api_mode="chat_completions",
+        base_url="https://api.moonshot.cn/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+
 def _build_tool_followup_messages(session_id: str = "s_hook"):
     user_msg = create_message("user", session_id)
     append_text_part(user_msg, "plan_enter工具的描述怎么写的")
@@ -154,6 +182,44 @@ def _build_tool_followup_messages(session_id: str = "s_hook"):
         output={"output": "使用这个工具来建议用户切换到 plan agent"},
     )
     return [user_msg, assistant_msg, tool_msg]
+
+
+def _build_pdf_tool_followup_messages(session_id: str = "s_hook"):
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "读取这个 PDF")
+
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"path":"docs/demo.pdf"}',
+        output={
+            "output": "PDF read successfully",
+            "metadata": {"filename": "demo.pdf", "status": "completed"},
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": session_id,
+                    "messageID": tool_msg["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+    )
+    return [user_msg, tool_msg]
+
+
+def _build_system_and_pdf_tool_followup_messages(session_id: str = "s_hook"):
+    system_msg = create_message("system", session_id)
+    append_text_part(system_msg, "你是一个严格遵守指令的助手")
+
+    messages = _build_pdf_tool_followup_messages(session_id)
+    return [system_msg, *messages]
 
 
 def _patch_openai_client(monkeypatch, create_fn, responses_create_fn=None):
@@ -401,6 +467,304 @@ def test_create_chat_completion_should_convert_tool_history_for_responses_input(
         {"role": "assistant", "content": "我来读取工具描述"},
         {"type": "function_call_output", "call_id": "call_1", "output": "使用这个工具来建议用户切换到 plan agent"},
     ]
+
+
+def test_create_chat_completion_should_convert_pdf_attachment_for_responses_input(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_responses_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_responses_text_response("done")
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_capture_responses_create)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    create_chat_completion(_build_pdf_tool_followup_messages(), tools=[], llm_config=config)
+
+    assert captured_payload["input"] == [
+        {"role": "user", "content": "读取这个 PDF"},
+        {
+            "type": "function_call_output",
+            "call_id": "call_pdf",
+            "output": [
+                {"type": "input_text", "text": "PDF read successfully"},
+                {"type": "input_file", "file_data": "QUJDRA==", "filename": "demo.pdf"},
+            ],
+        },
+    ]
+
+
+def test_create_chat_completion_should_reject_file_attachment_for_qwen_responses(monkeypatch):
+    called = False
+
+    def _capture_responses_create(**kwargs):
+        nonlocal called
+        called = True
+        return _build_responses_text_response("unexpected")
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_capture_responses_create)
+
+    result = create_chat_completion(_build_pdf_tool_followup_messages(), tools=[], llm_config=_build_qwen_responses_config())
+
+    assert called is False
+    assert result["info"]["status"] == "failed"
+    assert result["parts"][0]["type"] == "error"
+    assert result["parts"][0]["meta"]["code"] == "unsupported_file_input"
+    assert result["info"]["error"]["code"] == "unsupported_file_input"
+    assert "qwen responses 暂不支持文件附件输入" in result["parts"][0]["content"]
+
+
+def test_create_chat_completion_should_inject_kimi_pdf_context_before_chat_request(monkeypatch):
+    captured_payload: dict[str, object] = {}
+    cleanup_calls: list[dict[str, str]] = []
+    messages = _build_pdf_tool_followup_messages()
+
+    def _capture_chat_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=_capture_chat_create),
+        ),
+        responses=SimpleNamespace(create=lambda **kwargs: _build_responses_text_response("unused")),
+        files=SimpleNamespace(
+            create=lambda **kwargs: SimpleNamespace(id="file_pdf_1"),
+            content=lambda **kwargs: SimpleNamespace(text="这是从 PDF 抽取出来的内容"),
+            delete=lambda **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
+    monkeypatch.setattr(
+        vendors_module,
+        "_spawn_kimi_cleanup",
+        lambda client, *, file_id, filename, cleanup_mode: cleanup_calls.append(
+            {"file_id": file_id, "filename": filename, "cleanup_mode": cleanup_mode}
+        ),
+    )
+
+    message = create_chat_completion(messages, tools=[], llm_config=_build_kimi_config())
+
+    assert message["info"]["status"] == "completed"
+    assert captured_payload["messages"] == [
+        {"role": "user", "content": "读取这个 PDF"},
+        {
+            "role": "tool",
+            "content": "PDF read successfully",
+            "tool_call_id": "call_pdf",
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": "s_hook",
+                    "messageID": messages[1]["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "这是从 PDF 抽取出来的内容",
+        },
+    ]
+    metadata = messages[1]["parts"][0]["state"]["output"]["metadata"]
+    assert metadata["extracted_file_contexts"] == [
+        {
+            "attachment_key": "att_1",
+            "vendor": "kimi",
+            "mime": "application/pdf",
+            "filename": "demo.pdf",
+            "content": "这是从 PDF 抽取出来的内容",
+        }
+    ]
+    assert cleanup_calls == [
+        {
+            "file_id": "file_pdf_1",
+            "filename": "demo.pdf",
+            "cleanup_mode": "async_delete",
+        }
+    ]
+
+
+def test_create_chat_completion_should_preserve_system_message_order_when_injecting_kimi_pdf_context(monkeypatch):
+    captured_payload: dict[str, object] = {}
+    messages = _build_system_and_pdf_tool_followup_messages()
+
+    def _capture_chat_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=_capture_chat_create),
+        ),
+        responses=SimpleNamespace(create=lambda **kwargs: _build_responses_text_response("unused")),
+        files=SimpleNamespace(
+            create=lambda **kwargs: SimpleNamespace(id="file_pdf_1"),
+            content=lambda **kwargs: SimpleNamespace(text="这是从 PDF 抽取出来的内容"),
+            delete=lambda **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
+    monkeypatch.setattr(vendors_module, "_spawn_kimi_cleanup", lambda *args, **kwargs: None)
+
+    message = create_chat_completion(messages, tools=[], llm_config=_build_kimi_config())
+
+    assert message["info"]["status"] == "completed"
+    assert captured_payload["messages"] == [
+        {"role": "system", "content": "你是一个严格遵守指令的助手"},
+        {"role": "user", "content": "读取这个 PDF"},
+        {
+            "role": "tool",
+            "content": "PDF read successfully",
+            "tool_call_id": "call_pdf",
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": "s_hook",
+                    "messageID": messages[2]["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "这是从 PDF 抽取出来的内容",
+        },
+    ]
+
+
+def test_create_chat_completion_should_reuse_cached_kimi_pdf_context_without_reupload(monkeypatch):
+    captured_payloads: list[list[dict[str, object]]] = []
+    upload_calls: list[str] = []
+    content_calls: list[str] = []
+    cleanup_calls: list[dict[str, str]] = []
+    messages = _build_pdf_tool_followup_messages()
+
+    def _capture_chat_create(**kwargs):
+        captured_payloads.append(kwargs["messages"])
+        return _build_success_response("done")
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=_capture_chat_create),
+        ),
+        responses=SimpleNamespace(create=lambda **kwargs: _build_responses_text_response("unused")),
+        files=SimpleNamespace(
+            create=lambda **kwargs: upload_calls.append(kwargs["file"].name) or SimpleNamespace(id="file_pdf_1"),
+            content=lambda **kwargs: content_calls.append(kwargs["file_id"]) or SimpleNamespace(text="这是从 PDF 抽取出来的内容"),
+            delete=lambda **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
+    monkeypatch.setattr(
+        vendors_module,
+        "_spawn_kimi_cleanup",
+        lambda client, *, file_id, filename, cleanup_mode: cleanup_calls.append(
+            {"file_id": file_id, "filename": filename, "cleanup_mode": cleanup_mode}
+        ),
+    )
+
+    first_message = create_chat_completion(messages, tools=[], llm_config=_build_kimi_config())
+
+    followup_user = create_message("user", "s_hook")
+    append_text_part(followup_user, "继续总结这个 PDF")
+    second_message = create_chat_completion([*messages, followup_user], tools=[], llm_config=_build_kimi_config())
+
+    assert first_message["info"]["status"] == "completed"
+    assert second_message["info"]["status"] == "completed"
+    assert upload_calls == ["demo.pdf"]
+    assert content_calls == ["file_pdf_1"]
+    assert cleanup_calls == [
+        {
+            "file_id": "file_pdf_1",
+            "filename": "demo.pdf",
+            "cleanup_mode": "async_delete",
+        }
+    ]
+    assert captured_payloads[0] == [
+        {"role": "user", "content": "读取这个 PDF"},
+        {
+            "role": "tool",
+            "content": "PDF read successfully",
+            "tool_call_id": "call_pdf",
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": "s_hook",
+                    "messageID": messages[1]["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "这是从 PDF 抽取出来的内容",
+        },
+    ]
+    assert captured_payloads[1] == [
+        {"role": "user", "content": "读取这个 PDF"},
+        {
+            "role": "tool",
+            "content": "PDF read successfully",
+            "tool_call_id": "call_pdf",
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": "s_hook",
+                    "messageID": messages[1]["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "这是从 PDF 抽取出来的内容",
+        },
+        {"role": "user", "content": "继续总结这个 PDF"},
+    ]
+
+
+def test_create_chat_completion_should_fail_when_kimi_file_extract_fails(monkeypatch):
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kwargs: _build_success_response("unexpected"),
+            )
+        ),
+        responses=SimpleNamespace(create=lambda **kwargs: _build_responses_text_response("unused")),
+        files=SimpleNamespace(
+            create=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("upload failed")),
+        ),
+    )
+    monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
+
+    result = create_chat_completion(_build_pdf_tool_followup_messages(), tools=[], llm_config=_build_kimi_config())
+
+    assert result["info"]["status"] == "failed"
+    assert result["parts"][0]["type"] == "error"
+    assert result["parts"][0]["meta"]["code"] == "kimi_file_extract_failed"
+    assert "Moonshot PDF 抽取失败" in result["parts"][0]["content"]
 
 
 def test_create_chat_completion_should_flatten_function_tools_for_responses(monkeypatch):
@@ -920,6 +1284,32 @@ def test_responses_stream_should_yield_delta_and_return_message(monkeypatch):
     assert extract_reasoning_content(final_message) == "先分析"
 
 
+def test_create_chat_completion_stream_should_reject_file_attachment_for_qwen_responses(monkeypatch):
+    called = False
+
+    def _capture_responses_create(**kwargs):
+        nonlocal called
+        called = True
+        return iter(())
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("unused"), responses_create_fn=_capture_responses_create)
+
+    stream = create_chat_completion_stream(
+        _build_pdf_tool_followup_messages(),
+        tools=[],
+        llm_config=_build_qwen_responses_config(),
+    )
+    with pytest.raises(StopIteration) as stop:
+        next(stream)
+
+    final_message = stop.value.value
+    assert called is False
+    assert final_message["info"]["status"] == "failed"
+    assert final_message["parts"][0]["meta"]["code"] == "unsupported_file_input"
+    assert final_message["info"]["error"]["code"] == "unsupported_file_input"
+    assert "qwen responses 暂不支持文件附件输入" in final_message["parts"][0]["content"]
+
+
 def test_responses_stream_should_aggregate_function_call_arguments(monkeypatch):
     def _fake_responses_stream(**kwargs):
         yield SimpleNamespace(
@@ -1147,3 +1537,24 @@ def test_logging_hook_should_not_repeat_previous_user_message_on_tool_followup(m
 
     assert "latest_message=plan_enter工具的描述怎么写的" not in caplog.text
     assert "llm.request" in caplog.text
+
+
+def test_logging_hook_should_log_attachment_summary_on_tool_followup(monkeypatch, caplog):
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_responses_text_response("done"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_pdf_tool_followup_messages(), tools=[], agent="build", llm_config=config)
+
+    assert "llm.request api_mode=responses" in caplog.text
+    assert "attachments=tool:application/pdf:demo.pdf" in caplog.text
+    assert "data:application/pdf;base64" not in caplog.text

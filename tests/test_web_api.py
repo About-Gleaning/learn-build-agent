@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from agent.core.message import append_text_part, create_message
 from agent.runtime import session as session_runtime
-from agent.runtime.session import clear_session_memory, configure_session_memory_store
+from agent.runtime.session import clear_session_memory, configure_session_memory_store, generate_session_id
 from agent.runtime.session_memory import InMemorySessionMemoryStore
 from agent.web.app import create_app
 from agent.web.serializers import message_to_vo, split_stream_event
@@ -34,9 +34,11 @@ def _stream_events(body_text: str) -> list[tuple[str, dict]]:
 def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     app = create_app()
     client = TestClient(app)
+    session_id = generate_session_id("test_web")
 
-    def fake_stream_events(user_input: str, session_id: str | None = None, mode: str | None = None, **kwargs):
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
         assert user_input == "你好"
+        assert session_id
         assert kwargs["provider"] == "gpt"
         assert kwargs["model"] == "gpt-4.1"
         assert kwargs["provider_specified"] is True
@@ -44,7 +46,7 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
         yield {
             "type": "start",
             "event_id": "evt_1",
-            "session_id": session_id or "default",
+            "session_id": session_id,
             "agent": mode or "build",
             "agent_kind": "primary",
             "depth": 0,
@@ -80,7 +82,7 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
         yield {
             "type": "done",
             "event_id": "evt_6",
-            "session_id": session_id or "default",
+            "session_id": session_id,
             "agent": "build",
             "agent_kind": "primary",
             "depth": 0,
@@ -141,7 +143,7 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     with client.stream(
         "POST",
         "/api/chat/stream",
-        json={"session_id": "s_web", "user_input": "你好", "mode": "build", "provider": "gpt", "model": "gpt-4.1"},
+        json={"session_id": session_id, "user_input": "你好", "mode": "build", "provider": "gpt", "model": "gpt-4.1"},
     ) as resp:
         assert resp.status_code == 200
         body = "".join(resp.iter_text())
@@ -174,7 +176,7 @@ def test_runtime_options_should_return_backend_config():
     assert any(item["vendor"] == "qwen" for item in payload["providers"])
     assert any("qwen3-max" in item["models"] for item in payload["providers"] if item["name"] == "qwen")
     assert any(item["api_mode"] == "responses" for item in payload["providers"] if item["name"] == "gpt")
-    assert any(item["api_mode"] == "chat_completions" for item in payload["agents"] if item["name"] == "build")
+    assert any(item["api_mode"] == "responses" for item in payload["agents"] if item["name"] == "build")
     assert payload["workspace_root"]
     assert payload["workspace_name"]
     assert payload["launch_mode"] == "web"

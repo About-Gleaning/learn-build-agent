@@ -4,7 +4,7 @@
       "vendor": "qwen",
       "base_url": "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
       "api_key_env": "QWEN_API_KEY",
-      "api_mode": "responses",
+      "api_mode": "chat_completions",
       "default_model": "qwen3.5-flash",
       "models": {
         "qwen3-max": {},

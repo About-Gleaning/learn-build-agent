@@ -14,6 +14,7 @@ def _env_enabled(name: str) -> bool:
 
 RUN_QWEN_LIVE_TESTS = _env_enabled("RUN_QWEN_LIVE_TESTS")
 QWEN_LIVE_STRICT = _env_enabled("QWEN_LIVE_STRICT")
+PDF_PROBE_BASE64 = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyA+PgplbmRvYmoKdHJhaWxlcgo8PCAvUm9vdCAxIDAgUiA+PgolJUVPRgo="
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,20 @@ def _build_tool_payload(case: ToolSchemaCase) -> dict[str, Any]:
     return tool_payload
 
 
+def _extract_response_text(response: Any) -> str:
+    text_parts: list[str] = []
+    for output_item in _read_value(response, "output", []) or []:
+        if _read_value(output_item, "type") != "message":
+            continue
+        for content_item in _read_value(output_item, "content", []) or []:
+            if _read_value(content_item, "type") != "output_text":
+                continue
+            text = str(_read_value(content_item, "text", "") or "").strip()
+            if text:
+                text_parts.append(text)
+    return "\n".join(text_parts).strip()
+
+
 def _call_qwen_with_schema(case: ToolSchemaCase) -> dict[str, Any]:
     client, model = _build_client()
     tool_payload = _build_tool_payload(case)
@@ -252,6 +267,86 @@ def _call_qwen_with_schema(case: ToolSchemaCase) -> dict[str, Any]:
     }
 
 
+def _call_qwen_with_openai_pdf_input_file() -> dict[str, Any]:
+    client, model = _build_client()
+    request_payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": "请读取这个 PDF，并简要说明你看到了什么内容。",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_pdf",
+                "output": [
+                    {"type": "input_text", "text": "PDF read successfully"},
+                    {
+                        "type": "input_file",
+                        "file_data": PDF_PROBE_BASE64,
+                        "filename": "demo.pdf",
+                    },
+                ],
+            },
+        ],
+        "store": False,
+        "max_output_tokens": 256,
+    }
+
+    try:
+        response = client.responses.create(**request_payload)
+    except Exception as exc:  # noqa: BLE001 - 这里需要原样采集真实 provider 行为
+        error_message = _truncate(exc, limit=400)
+        return {
+            "case": "openai_input_file_pdf_probe",
+            "ok": False,
+            "classification": "rejected",
+            "error_type": "request_error",
+            "exception_type": type(exc).__name__,
+            "detail": error_message,
+            "assistant_text_preview": "",
+        }
+
+    response_status = str(_read_value(response, "status", "unknown") or "unknown").strip()
+    response_error = _read_value(response, "error")
+    response_text = _extract_response_text(response)
+    if response_status.lower() != "completed":
+        detail = _truncate(_read_value(response_error, "message", response_error), limit=400)
+        return {
+            "case": "openai_input_file_pdf_probe",
+            "ok": False,
+            "classification": "rejected",
+            "error_type": "response_failed",
+            "exception_type": "ResponseError",
+            "detail": detail,
+            "error_code": _read_value(response_error, "code", ""),
+            "status": response_status,
+            "assistant_text_preview": _truncate(response_text, limit=160),
+        }
+
+    if not response_text:
+        return {
+            "case": "openai_input_file_pdf_probe",
+            "ok": False,
+            "classification": "accepted_but_empty",
+            "error_type": "empty_message",
+            "exception_type": "",
+            "detail": "Qwen accepted the request but returned an empty assistant message.",
+            "status": response_status,
+            "response_id": _read_value(response, "id", ""),
+            "assistant_text_preview": "",
+        }
+
+    return {
+        "case": "openai_input_file_pdf_probe",
+        "ok": True,
+        "classification": "accepted_with_text",
+        "status": response_status,
+        "response_id": _read_value(response, "id", ""),
+        "assistant_text_preview": _truncate(response_text, limit=160),
+    }
+
+
 def _format_case_result(result: dict[str, Any]) -> str:
     schema = result.get("schema")
     schema_summary = "None" if schema is None else _truncate(schema, limit=180)
@@ -265,6 +360,18 @@ def _format_case_result(result: dict[str, Any]) -> str:
         f"error_type={result.get('error_type', 'unknown')} "
         f"exception_type={result.get('exception_type', 'unknown')} detail={result.get('detail', '')} "
         f"schema={schema_summary}"
+    )
+
+
+def _format_pdf_probe_result(result: dict[str, Any]) -> str:
+    return (
+        f"[{'OK' if result.get('ok') else 'FAIL'}] case={result.get('case', 'unknown')} "
+        f"classification={result.get('classification', 'unknown')} "
+        f"status={result.get('status', 'unknown')} "
+        f"error_type={result.get('error_type', 'none')} "
+        f"exception_type={result.get('exception_type', 'none')} "
+        f"detail={result.get('detail', '')} "
+        f"assistant_text_preview={result.get('assistant_text_preview', '')}"
     )
 
 
@@ -289,3 +396,20 @@ def test_qwen_responses_live_tool_schema_matrix():
         if schema_failures:
             formatted = "\n".join(_format_case_result(item) for item in schema_failures)
             pytest.fail(f"QWEN_LIVE_STRICT=1，以下 schema case 被 qwen 拒绝：\n{formatted}")
+
+
+@pytest.mark.skipif(
+    not RUN_QWEN_LIVE_TESTS,
+    reason="未开启 qwen 真实接口测试。请设置 RUN_QWEN_LIVE_TESTS=1，并确保 QWEN_API_KEY 可用。",
+)
+def test_qwen_responses_live_openai_input_file_pdf_probe():
+    result = _call_qwen_with_openai_pdf_input_file()
+    print(_format_pdf_probe_result(result))
+
+    if result.get("classification") == "accepted_with_text":
+        return
+
+    pytest.fail(
+        "Qwen 未能稳定消费 OpenAI 风格 input_file PDF 输入：\n"
+        f"{_format_pdf_probe_result(result)}"
+    )

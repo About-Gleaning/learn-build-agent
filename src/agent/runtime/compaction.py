@@ -304,7 +304,9 @@ def compaction_summary(
 """
 
     summary_messages: list[Message] = []
-    session_id = messages[-1]["info"].get("session_id", "default_session")
+    session_id = str(messages[-1]["info"].get("session_id", "")).strip()
+    if not session_id:
+        raise ValueError("压缩上下文时缺少 session_id")
 
     system_message = create_message("system", session_id=session_id)
     append_text_part(system_message, "你是一个擅长上下文压缩的助手，请输出简洁、结构化的中文摘要。")

@@ -61,7 +61,7 @@ frontend/
 1. 准备环境变量：在 `.env` 中配置所需密钥；如果使用 `websearch`，还要配置 `EXA_API_KEY`。当前内置 provider 支持 `QWEN_API_KEY`、`GEMINI_API_KEY`、`OPENAI_API_KEY` 与 `KIMI_API_KEY`。
 2. 安装依赖：`pip install -r requirements.txt`。
 3. 安装当前项目为命令行工具：`pip install -e .`。
-4. 进入任意项目目录后启动 CLI：`my-agent`。
+4. 进入任意项目目录后启动 CLI：`my-agent`；可选传 `--session <session_id>`，未传时 CLI 会自动生成随机会话号。
 5. 在当前目录启动 Web 后端：`my-agent web --host 127.0.0.1 --port 8000`。
 6. 兼容入口仍可使用：`python3 src/main.py`。
 7. 启动前端：
@@ -80,6 +80,7 @@ pnpm dev
 
 - `my-agent` 与 `my-agent web` 默认都以启动命令时的当前目录作为唯一工作区。
 - 可通过 `--workdir /path/to/project` 显式指定工作区；第一版不会自动上跳到 Git 根目录。
+- Web / 运行时正式入口必须显式携带 `session_id`；CLI 与测试辅助入口会在最外层自动生成随机 `session_id`，运行时内部不再回退到默认会话。
 - 工作区内的 `AGENTS.md` 会自动追加到系统提示词中。
 - 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
 - 运行态数据默认落到 `~/.my-agent/`：
@@ -149,13 +150,15 @@ pnpm dev
 
 - `kimi` 通过 Moonshot 的 OpenAI 兼容接口接入，`base_url` 固定配置为 `https://api.moonshot.cn/v1`。
 - `api_key_env` 使用 `KIMI_API_KEY`，代码中禁止硬编码真实密钥。
-- 默认模型名先保留为占位值 `REPLACE_WITH_KIMI_MODEL_ID`，需要你根据实际账号可用模型在 `.env` 或运行时配置配套调整。
+- 当前默认模型配置为 `kimi-k2.5`，如需切换具体可用模型，必须同步调整 `llm_runtime.json`。
+- 当 `kimi` 命中 PDF 附件时，必须按 Moonshot 官方文件抽取链路执行：先上传到 `/v1/files`，再读取 `/v1/files/{file_id}/content`，最后把抽取文本包装为“仅供参考的用户文档上下文”并以合成 `user` message 注入 `chat.completions`。
 - 本次仅新增可选 provider，不修改 `build` / `plan` 的默认 provider，避免影响现有运行链路。
 
 ### 额外约定：项目级运行时配置
 
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止在业务代码里继续扩散硬编码常量。
 - 当前 `compaction` 采用 `default + vendors` 结构：优先读取当前模型厂商 `vendor` 的局部覆盖配置，未命中时回退 `default`。
+- 当前 `file_extraction` 也采用 `default + vendors` 结构；本次默认仅开放 `.pdf`，并使用 `cleanup_mode=async_delete` 做远端异步清理。
 - 当前支持的压缩参数包括：
   - `tool_result_prune_enabled`
   - `tool_result_keep_recent`
@@ -206,6 +209,8 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-20：为 `kimi` provider 新增 PDF 支持；命中 PDF 附件时改为走 Moonshot 文件抽取链路（上传文件、拉取抽取文本、注入“仅供参考”的合成 `user` message），并在抽取完成后异步删除远端文件，删除失败不影响主流程。
+- 2026-03-20：`project_runtime.json` 新增 `file_extraction` 配置，统一管理可抽取文件扩展名与清理策略，当前默认仅开放 `.pdf`。
 - 2026-03-20：修复 qwen `responses` 自定义 function tool 的无参 schema 兼容问题；无参工具不再下发 `parameters: {}`，避免 DashScope 返回 `InternalError.Algo.InvalidParameter`。
 - 2026-03-20：将 LLM 适配层重构为“统一入口 + 协议层 + 厂商方言层”，新增 `adapters/llm/protocols.py` 与 `adapters/llm/vendors.py`，在不改变 `Message` 结构的前提下为 `qwen` / `kimi` 保留独立转换扩展点。
 - 2026-03-12：同步文档结构与当前代码，补充 `session_memory.py`、Web/测试说明、分层职责约束。

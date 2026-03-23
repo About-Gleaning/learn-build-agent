@@ -37,6 +37,8 @@ DEFAULT_SUMMARY_TRIGGER_THRESHOLD = 50000
 DEFAULT_SUMMARY_MAX_TOKENS = 2000
 DEFAULT_TOOL_OUTPUT_MAX_LINES = 2000
 DEFAULT_TOOL_OUTPUT_MAX_BYTES = 50 * 1024
+DEFAULT_FILE_EXTRACTION_ALLOWED_EXTENSIONS = (".pdf",)
+DEFAULT_FILE_EXTRACTION_CLEANUP_MODE = "async_delete"
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,14 @@ class CompactionSettings:
 class ProjectRuntimeSettings:
     compaction_default: CompactionSettings
     compaction_vendors: dict[str, CompactionSettings]
+    file_extraction_default: "FileExtractionSettings"
+    file_extraction_vendors: dict[str, "FileExtractionSettings"]
+
+
+@dataclass(frozen=True)
+class FileExtractionSettings:
+    allowed_extensions: tuple[str, ...] = DEFAULT_FILE_EXTRACTION_ALLOWED_EXTENSIONS
+    cleanup_mode: str = DEFAULT_FILE_EXTRACTION_CLEANUP_MODE
 
 
 @dataclass(frozen=True)
@@ -285,6 +295,83 @@ def _load_project_compaction_settings(raw_compaction: Any) -> tuple[CompactionSe
     return default_settings, vendor_settings
 
 
+def _normalize_file_extension(value: Any, *, field_name: str) -> str:
+    text = str(value).strip().lower()
+    if not text:
+        raise ValueError(f"{field_name} 不能为空。")
+    if not text.startswith("."):
+        raise ValueError(f"{field_name} 必须以 '.' 开头。")
+    return text
+
+
+def _parse_file_extraction_patch(raw_value: Any, *, field_prefix: str) -> dict[str, Any]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{field_prefix} 必须是对象。")
+
+    patch: dict[str, Any] = {}
+    raw_extensions = raw_value.get("allowed_extensions")
+    if raw_extensions is not None:
+        if not isinstance(raw_extensions, list) or not raw_extensions:
+            raise ValueError(f"{field_prefix}.allowed_extensions 必须是非空数组。")
+        patch["allowed_extensions"] = tuple(
+            _normalize_file_extension(item, field_name=f"{field_prefix}.allowed_extensions[{index}]")
+            for index, item in enumerate(raw_extensions)
+        )
+
+    cleanup_mode = raw_value.get("cleanup_mode")
+    if cleanup_mode is not None:
+        normalized_cleanup_mode = str(cleanup_mode).strip().lower()
+        if normalized_cleanup_mode != "async_delete":
+            raise ValueError(f"{field_prefix}.cleanup_mode 目前仅支持 async_delete。")
+        patch["cleanup_mode"] = normalized_cleanup_mode
+    return patch
+
+
+def _merge_file_extraction_settings(base: FileExtractionSettings, patch: dict[str, Any]) -> FileExtractionSettings:
+    return FileExtractionSettings(
+        allowed_extensions=tuple(patch.get("allowed_extensions", base.allowed_extensions)),
+        cleanup_mode=str(patch.get("cleanup_mode", base.cleanup_mode)),
+    )
+
+
+def _load_project_file_extraction_settings(raw_file_extraction: Any) -> tuple[FileExtractionSettings, dict[str, FileExtractionSettings]]:
+    if raw_file_extraction is None:
+        return FileExtractionSettings(), {}
+    if not isinstance(raw_file_extraction, dict):
+        raise ValueError("project_runtime.file_extraction 必须是对象。")
+
+    has_nested_structure = "default" in raw_file_extraction or "vendors" in raw_file_extraction
+    if not has_nested_structure:
+        default_settings = _merge_file_extraction_settings(
+            FileExtractionSettings(),
+            _parse_file_extraction_patch(raw_file_extraction, field_prefix="file_extraction"),
+        )
+        return default_settings, {}
+
+    default_raw = raw_file_extraction.get("default")
+    vendors_raw = raw_file_extraction.get("vendors", {})
+    default_settings = _merge_file_extraction_settings(
+        FileExtractionSettings(),
+        _parse_file_extraction_patch(default_raw, field_prefix="file_extraction.default"),
+    )
+
+    if not isinstance(vendors_raw, dict):
+        raise ValueError("file_extraction.vendors 必须是对象。")
+
+    vendor_settings: dict[str, FileExtractionSettings] = {}
+    for raw_vendor, raw_value in vendors_raw.items():
+        vendor = str(raw_vendor).strip().lower()
+        if not vendor:
+            raise ValueError("file_extraction.vendors 中的厂商名称不能为空。")
+        vendor_settings[vendor] = _merge_file_extraction_settings(
+            default_settings,
+            _parse_file_extraction_patch(raw_value, field_prefix=f"file_extraction.vendors.{vendor}"),
+        )
+    return default_settings, vendor_settings
+
+
 def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
     if not isinstance(raw_providers, dict) or not raw_providers:
         raise ValueError("LLM 配置缺少 providers，且至少要配置一个厂商。")
@@ -375,7 +462,13 @@ def get_runtime_settings() -> RuntimeSettings:
 def get_project_runtime_settings() -> ProjectRuntimeSettings:
     payload = _load_project_runtime_payload()
     compaction_default, compaction_vendors = _load_project_compaction_settings(payload.get("compaction"))
-    return ProjectRuntimeSettings(compaction_default=compaction_default, compaction_vendors=compaction_vendors)
+    file_extraction_default, file_extraction_vendors = _load_project_file_extraction_settings(payload.get("file_extraction"))
+    return ProjectRuntimeSettings(
+        compaction_default=compaction_default,
+        compaction_vendors=compaction_vendors,
+        file_extraction_default=file_extraction_default,
+        file_extraction_vendors=file_extraction_vendors,
+    )
 
 
 def resolve_compaction_settings(vendor: str | None = None) -> CompactionSettings:
@@ -384,6 +477,14 @@ def resolve_compaction_settings(vendor: str | None = None) -> CompactionSettings
     if normalized_vendor and normalized_vendor in settings.compaction_vendors:
         return settings.compaction_vendors[normalized_vendor]
     return settings.compaction_default
+
+
+def resolve_file_extraction_settings(vendor: str | None = None) -> FileExtractionSettings:
+    settings = get_project_runtime_settings()
+    normalized_vendor = (vendor or "").strip().lower()
+    if normalized_vendor and normalized_vendor in settings.file_extraction_vendors:
+        return settings.file_extraction_vendors[normalized_vendor]
+    return settings.file_extraction_default
 
 
 def clear_runtime_settings_cache() -> None:

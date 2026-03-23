@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from agent.core.message import (
     append_reasoning_part,
     append_text_part,
+    append_tool_part,
     append_tool_call_part,
     create_message,
     extract_reasoning_content,
@@ -100,3 +101,34 @@ def test_to_provider_messages_should_keep_old_assistant_message_shape_without_re
 
     assert "reasoning_content" not in provider_messages[0]
     assert provider_messages[0]["content"] == "我来读取文件。"
+
+
+def test_to_provider_messages_should_include_tool_attachments_without_changing_content():
+    session_id = "s_tool_attachment"
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"path":"demo.pdf"}',
+        output={
+            "output": "PDF read successfully",
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": session_id,
+                    "messageID": tool_msg["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+    )
+
+    provider_messages = to_provider_messages([tool_msg])
+
+    assert provider_messages[0]["role"] == "tool"
+    assert provider_messages[0]["content"] == "PDF read successfully"
+    assert provider_messages[0]["attachments"][0]["mime"] == "application/pdf"

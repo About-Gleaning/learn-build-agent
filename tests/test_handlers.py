@@ -1,3 +1,7 @@
+import base64
+import pytest
+
+from agent.core.context import set_session_id
 from agent.tools.bash_tool import validate_readonly_bash
 from agent.tools.handlers import (
     build_plan_placeholder_path,
@@ -12,6 +16,10 @@ from agent.tools.handlers import (
 )
 from agent.tools.todo_manager import TodoManager
 from agent.runtime.workspace import build_plan_storage_path, build_todo_storage_path, configure_workspace, get_workspace
+
+
+def _set_test_session(session_id: str = "test_handler_session") -> str:
+    return set_session_id(session_id)
 
 
 def test_build_plan_placeholder_path_should_be_absolute():
@@ -108,7 +116,8 @@ def test_validate_readonly_bash_should_block_non_whitelisted_pipe_command():
 
 def test_is_allowed_plan_write_path():
     configure_workspace()
-    expected_path = build_plan_storage_path("default_session")
+    session_id = _set_test_session("test_plan_session")
+    expected_path = build_plan_storage_path(session_id)
     assert is_allowed_plan_write_path(str(expected_path))
     assert not is_allowed_plan_write_path(str(expected_path.parent / "other.md"))
     assert not is_allowed_plan_write_path("src/main.py")
@@ -135,15 +144,52 @@ def test_run_read_should_return_structured_success(monkeypatch, tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
     configure_workspace(tmp_path)
+    _set_test_session()
 
     result = run_read("sample.txt", limit=2, offset=1)
 
     assert result["metadata"]["status"] == "completed"
     assert result["output"] == "b\nc\n... (1 more lines)"
+    assert result["metadata"]["path"] == "sample.txt"
+
+
+def test_run_read_should_return_pdf_attachment(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "demo.pdf"
+    pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n"
+    pdf_path.write_bytes(pdf_bytes)
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_read("demo.pdf", limit=2, offset=1)
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "PDF read successfully"
+    assert result["metadata"]["paging_ignored"] is True
+    assert result["attachments"][0]["type"] == "file"
+    assert result["attachments"][0]["mime"] == "application/pdf"
+    assert result["attachments"][0]["url"] == (
+        "data:application/pdf;base64," + base64.b64encode(pdf_bytes).decode("ascii")
+    )
+
+
+def test_run_read_should_fail_when_pdf_file_is_too_large(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "too-large.pdf"
+    pdf_path.write_bytes(b"pdf")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    monkeypatch.setattr("agent.tools.handlers.base64.b64encode", lambda data: b"x" * 10)
+    monkeypatch.setattr("pathlib.Path.read_bytes", lambda self: b"x" * (50 * 1024 * 1024))
+
+    result = run_read("too-large.pdf")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "pdf_file_too_large"
 
 
 def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
+    _set_test_session()
 
     result = run_write("notes.txt", "hello")
 
@@ -156,6 +202,7 @@ def test_run_edit_should_return_text_not_found_failure(monkeypatch, tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello", encoding="utf-8")
     configure_workspace(tmp_path)
+    _set_test_session()
 
     result = run_edit("sample.txt", "missing", "world")
 
@@ -191,3 +238,33 @@ def test_todo_manager_should_build_session_scoped_storage_path(tmp_path):
     manager = TodoManager()
 
     assert manager._session_file("session:todo") == build_todo_storage_path("session:todo")
+
+
+def test_todo_manager_should_reject_stringified_todo_list(tmp_path):
+    project_root = tmp_path / "project-root"
+    project_root.mkdir()
+    configure_workspace(project_root)
+    _set_test_session("test_todo_string")
+    manager = TodoManager()
+
+    with pytest.raises(ValueError, match="todo_list 必须是 JSON array，不能是字符串"):
+        manager.update('[{"id":"task1","text":"a","status":"pending","priority":"high"}]')  # type: ignore[arg-type]
+
+
+def test_todo_manager_should_accept_single_todo_item(tmp_path):
+    project_root = tmp_path / "project-root"
+    project_root.mkdir()
+    configure_workspace(project_root)
+    _set_test_session("test_todo_single")
+    manager = TodoManager()
+
+    result = manager.update([
+        {
+            "id": "task1",
+            "text": "搜索 hello.py 文件位置",
+            "status": "completed",
+            "priority": "high",
+        }
+    ])
+
+    assert "[x] #task1: 搜索 hello.py 文件位置 (priority=high)" in result

@@ -138,6 +138,19 @@ def _get_workdir() -> Path:
     return get_workspace().root
 
 
+def normalize_required_session_id(session_id: str | None) -> str:
+    normalized = (session_id or "").strip()
+    if not normalized:
+        raise ValueError("session_id 不能为空")
+    return normalized
+
+
+def generate_session_id(prefix: str = "session") -> str:
+    normalized_prefix = re.sub(r"[^A-Za-z0-9_-]+", "_", (prefix or "").strip()).strip("_")
+    safe_prefix = normalized_prefix or "session"
+    return f"{safe_prefix}_{uuid.uuid4().hex[:12]}"
+
+
 def _resolve_build_prompt_path(vendor: str) -> Path:
     normalized_vendor = _normalize_prompt_key(vendor)
     candidate = PROMPTS_DIR / f"build.{normalized_vendor}.txt"
@@ -212,10 +225,10 @@ def _build_environment_appendix(*, agent: str, model: str, provider: str, vendor
     return "\n".join(lines)
 
 
-def _apply_prompt_context(base_prompt: str, *, agent: str, session_id: str | None = None) -> str:
+def _apply_prompt_context(base_prompt: str, *, agent: str, session_id: str) -> str:
     if agent.strip().lower() != "plan":
         return base_prompt
-    plan_path = str(build_plan_placeholder_path(session_id or "default"))
+    plan_path = str(build_plan_placeholder_path(session_id))
     return base_prompt.replace("{plan_path}", plan_path)
 
 
@@ -225,7 +238,7 @@ def _call_build_system_prompt(
     model: str,
     provider: str,
     vendor: str,
-    session_id: str | None = None,
+    session_id: str,
 ) -> str:
     prompt_kwargs = {
         "agent": agent,
@@ -244,7 +257,7 @@ def build_system_prompt(
     model: str,
     provider: str,
     vendor: str,
-    session_id: str | None = None,
+    session_id: str,
 ) -> str:
     base_prompt = _read_prompt_file(_resolve_prompt_path(agent, vendor))
     rendered_prompt = _apply_prompt_context(base_prompt, agent=agent, session_id=session_id)
@@ -262,7 +275,7 @@ def _get_system_prompt_for_mode(
     model: str,
     provider: str,
     vendor: str,
-    session_id: str | None = None,
+    session_id: str,
 ) -> str:
     return _call_build_system_prompt(
         agent=mode,
@@ -461,7 +474,7 @@ def _build_session_messages(
 
 def _bootstrap_session(
     user_input: str,
-    session_id: str | None = None,
+    session_id: str,
     *,
     mode: MainAgentMode | None = None,
     provider: str | None = None,
@@ -473,7 +486,7 @@ def _bootstrap_session(
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
 ) -> SessionBootstrap:
-    active_session_id = set_session_id(session_id)
+    active_session_id = set_session_id(normalize_required_session_id(session_id))
     turn_started_at = utc_now_iso()
     mode_enabled = tools is None and system_prompt is None
 
@@ -797,6 +810,25 @@ def _build_tool_message(
     turn_started_at: str,
 ) -> Message:
     message = create_message(role="tool", session_id=session_id)
+    message_id = str(message["info"].get("message_id", ""))
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    attachments = result.get("attachments")
+    if isinstance(attachments, list):
+        normalized_attachments: list[dict[str, Any]] = []
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            normalized_attachment = dict(attachment)
+            normalized_attachment.setdefault("id", f"att_{uuid.uuid4().hex[:12]}")
+            normalized_attachment.setdefault("sessionID", session_id)
+            normalized_attachment.setdefault("messageID", message_id)
+            filename = str(metadata.get("filename", "")).strip()
+            if filename:
+                normalized_attachment.setdefault("filename", filename)
+            normalized_attachments.append(normalized_attachment)
+        if normalized_attachments:
+            result = dict(result)
+            result["attachments"] = normalized_attachments
     status = str((result.get("metadata") or {}).get("status", "completed")).strip().lower()
     if status not in {"completed", "failed"}:
         status = "completed"
@@ -1125,8 +1157,8 @@ def run_mode_switch_stream_events(
 
 def subagent_loop(
     prompt: str,
+    session_id: str,
     agent: str = "explore",
-    session_id: str | None = None,
     *,
     llm_config: ResolvedLLMConfig | None = None,
 ) -> str:
@@ -1157,7 +1189,7 @@ def subagent_loop(
 
 def _run_session_stream(
     user_input: str,
-    session_id: str | None = None,
+    session_id: str,
     *,
     mode: MainAgentMode | None = None,
     provider: str | None = None,
@@ -1799,7 +1831,7 @@ def _build_tool_handlers(
 
 def run_session(
     user_input: str,
-    session_id: str | None = None,
+    session_id: str,
     *,
     mode: MainAgentMode | None = None,
     provider: str | None = None,
@@ -1976,7 +2008,7 @@ def run_session(
 
 def run_session_stream_events(
     user_input: str,
-    session_id: str | None = None,
+    session_id: str,
     *,
     mode: MainAgentMode | None = None,
     provider: str | None = None,
@@ -2008,6 +2040,6 @@ def run_session_stream_events(
     )
 
 
-def agent_loop(user_input: str, session_id: str | None = None) -> Message:
+def agent_loop(user_input: str, session_id: str) -> Message:
     """兼容入口：内部转发到新接口。"""
     return run_session(user_input=user_input, session_id=session_id)

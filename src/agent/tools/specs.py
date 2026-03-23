@@ -83,7 +83,7 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read file contents. Supports offset and limit for chunked reading.",
+                "description": "Read file contents. Supports offset and limit for chunked reading. Reading a PDF returns a PDF attachment for Responses-compatible providers.",
                 "parameters": {
                     "type": "object",
                     "properties": {
