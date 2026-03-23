@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 
+from ..config.settings import get_project_runtime_settings
 from ..runtime.agents import get_subagents
 
 TODO_DESC_FILE = Path(__file__).with_name("todo_write.txt")
@@ -14,6 +15,7 @@ WEBFETCH_DESC_FILE = Path(__file__).with_name("webfetch.txt")
 WEBFETCH_TOOL_DESCRIPTION = WEBFETCH_DESC_FILE.read_text().strip()
 WEBSEARCH_DESC_FILE = Path(__file__).with_name("websearch.txt")
 WEBSEARCH_TOOL_DESCRIPTION = WEBSEARCH_DESC_FILE.read_text().strip()
+BASH_DESC_FILE = Path(__file__).with_name("bash.txt")
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -65,17 +67,58 @@ def _build_task_tool_description() -> str:
     return template.replace("{agents}", _build_subagent_listing())
 
 
+def _build_bash_tool_description() -> str:
+    template = BASH_DESC_FILE.read_text(encoding="utf-8").strip()
+    compaction_settings = get_project_runtime_settings().compaction_default
+    return (
+        template.replace("${directory}", "当前工作区根目录")
+        .replace("${maxLines}", str(compaction_settings.tool_output_max_lines))
+        .replace("${maxBytes}", str(compaction_settings.tool_output_max_bytes))
+    )
+
+
 def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Run a shell command.",
+                "description": _build_bash_tool_description(),
                 "parameters": {
                     "type": "object",
-                    "properties": {"command": {"type": "string"}},
-                    "required": ["command"],
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The command to execute",
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": "Optional timeout in milliseconds",
+                        },
+                        "workdir": {
+                            "type": "string",
+                            "description": (
+                                "The working directory to run the command in. "
+                                "Defaults to ${当前工作目录}. Use this instead of 'cd' commands."
+                            ),
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": (
+                                "Clear, concise description of what this command does in 5-10 words. "
+                                "Examples:\n"
+                                "Input: ls\n"
+                                "Output: Lists files in current directory\n\n"
+                                "Input: git status\n"
+                                "Output: Shows working tree status\n\n"
+                                "Input: npm install\n"
+                                "Output: Installs package dependencies\n\n"
+                                "Input: mkdir foo\n"
+                                "Output: Creates directory 'foo'"
+                            ),
+                        },
+                    },
+                    "required": ["command", "description"],
                 },
             },
         },

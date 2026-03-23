@@ -29,7 +29,7 @@ from ..core.message import (
     utc_now_iso,
 )
 from ..runtime.agents import get_agent
-from ..tools.bash_tool import run_bash, validate_readonly_bash
+from ..tools.bash_tool import _normalize_timeout, resolve_bash_workdir, run_bash, validate_readonly_bash
 from ..skills.runtime import SkillRegistry
 from ..tools.handlers import (
     build_plan_placeholder_path,
@@ -1937,12 +1937,28 @@ def _build_tool_handlers(
     get_latest_model: Callable[[], str],
     get_current_runtime: Callable[[], ResolvedLLMConfig],
 ) -> dict[str, Callable[..., object]]:
-    def _run_mode_aware_bash(command: str) -> dict[str, Any]:
+    def _run_mode_aware_bash(
+        command: str,
+        timeout: int | float | None = None,
+        workdir: str | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
         if get_mode() == "plan":
             validation_error = validate_readonly_bash(command)
             if validation_error is not None:
                 return build_tool_failure(validation_error, error_code="readonly_violation")
-        return build_tool_success(run_bash(command))
+        try:
+            _normalize_timeout(timeout)
+            resolve_bash_workdir(workdir)
+        except FileNotFoundError as exc:
+            return build_tool_failure(f"Error: {exc}", error_code="bash_workdir_not_found")
+        except NotADirectoryError as exc:
+            return build_tool_failure(f"Error: {exc}", error_code="bash_workdir_not_directory")
+        except ValueError as exc:
+            if "timeout" in str(exc):
+                return build_tool_failure(f"Error: {exc}", error_code="bash_timeout_invalid")
+            return build_tool_failure(f"Error: {exc}", error_code="bash_workdir_forbidden")
+        return build_tool_success(run_bash(command, timeout, workdir))
 
     def _run_mode_aware_write(path: str, content: str) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(path):
@@ -1981,7 +1997,7 @@ def _build_tool_handlers(
         )
 
     return {
-        "bash": lambda **kw: _run_mode_aware_bash(kw["command"]),
+        "bash": lambda **kw: _run_mode_aware_bash(**kw),
         "read_file": lambda **kw: run_read(kw["path"], kw.get("limit"), kw.get("offset", 0)),
         "write_file": lambda **kw: _run_mode_aware_write(kw["path"], kw["content"]),
         "edit_file": lambda **kw: _run_mode_aware_edit(kw["path"], kw["old_text"], kw["new_text"]),

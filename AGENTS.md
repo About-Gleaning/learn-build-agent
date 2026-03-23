@@ -48,6 +48,7 @@
 - 主 Agent 模式状态统一收敛在 `runtime/main_agent_mode.py`（若启用该模块），禁止散落存储。
 - 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
 - `task` 工具中的 subagent 名单与说明，必须从 `runtime/agents.py` 动态生成，禁止在 `specs.py` 或 `session.py` 中手写支持列表。
+- `bash` 工具描述模板统一放在 `src/agent/tools/bash.txt`；当工具说明较长时，必须优先拆到独立 `.txt` 模板文件中，禁止继续在 `specs.py` 内联大段说明。
 - Web 时间线必须按 `session` 维度累计展示，禁止在前端新一轮提交时覆盖上一轮执行轨迹。
 - `task` 委派 subagent 时，流式事件必须透传 subagent 内部进度，并使用后端生成的 `delegation_id` 作为稳定关联键。
 - Web 助手消息展示必须优先基于后端返回的 `display_parts` 顺序片段流，确保 `assistant_text` 与 `tool_call`/`tool_result` 按真实发生顺序穿插；仅在旧消息缺少该字段时才回退到 `process_items + text` 的兼容渲染。
@@ -115,7 +116,10 @@
 
 ## 变更记录
 
+- 2026-03-23：修复 `bash` 工具链路的 3 个问题：`PersistentBashSession` 读取输出时改为增量查找 marker，避免大输出场景反复拼接全量缓冲区导致性能退化；`specs.py` 在构建 bash 工具描述时补齐 `bash.txt` 中 `${directory}`、`${maxLines}`、`${maxBytes}` 的实际替换；`session.py` 对非法 `timeout` 参数新增结构化失败返回 `bash_timeout_invalid`，不再落成泛化 `execution_error`。
+- 2026-03-23：`bash` 工具改为“单次调用内持久、调用结束即销毁”的持久 bash shell；同一次调用中的多步命令共享目录与环境变量状态，不再跨调用复用 shell，同时移除工具层固定字符截断，改为复用运行时统一长输出落盘链路，保持与 `src/agent/tools/bash.txt` 文档一致。
 - 2026-03-23：新增 `src/skills/api-pdf-md-first/` skill，用于“PDF 接口文档先转同目录 `.api.md`，后续多轮开发优先复用 Markdown”场景，降低长会话重复读取 PDF 的 token 消耗，并补充接口 Markdown 模板与提炼规则。
+- 2026-03-23：重构 `bash` 工具协议，新增必填 `description` 与可选 `timeout`、`workdir` 入参，默认超时收敛为 `DEFAULT_TIMEOUT=120000ms`，默认执行目录固定为当前工作区根目录，并将工具 description 拆分到独立 `src/agent/tools/bash.txt` 模板文件。
 - 2026-03-23：Web 前端新增 LLM reasoning 展示；后端流式链路增加 `reasoning_delta` 事件并将 `display_parts.kind=reasoning` 显式透传，前端按时间线顺序内联展示 reasoning，支持单条折叠与全局默认展开/收起控制，同时保持 reasoning 与最终回答分离存储和渲染。
 - 2026-03-23：增强 `llm.response` 日志，统一打印标准化 `finish_reason`、响应文本、思考内容与工具调用摘要，避免模型仅返回 thinking 或 tool call 时日志只剩空 `message=`，提升排障可观测性。
 - 2026-03-23：重构 assistant message 的标准化 `finish_reason` 与 agent loop 终止规则；`chat_completions` / `responses` 统一映射为 `stop`、`length`、`content-filter`、`tool-calls`、`unknown`、`error`，session loop 改为仅基于该字段推进，并新增 `project_runtime.json -> agent_loop.max_rounds` 兜底未知态空转。

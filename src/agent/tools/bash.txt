@@ -1,0 +1,283 @@
+# Bash 工具说明
+
+在一个持久的 bash shell 会话中执行给定命令，并支持可选超时，同时确保正确处理输出与安全边界。
+
+默认情况下，每次 `bash` 工具调用都会在 `${directory}` 目录下启动一个独立的持久 shell，并在本次调用结束后立即销毁。如果需要在其他目录执行，请使用 `workdir` 参数。  
+**避免使用 `cd <directory> && <command>` 的写法，应使用 `workdir`。**
+
+---
+
+## 重要说明
+
+该工具用于执行终端操作，例如：
+
+- git
+- npm
+- docker
+
+**不要用于文件操作（读取、写入、编辑、搜索、查找文件）**，这些应使用专用工具。
+
+---
+
+## 执行命令前的步骤
+
+### 1. 目录验证
+
+如果命令会创建目录或文件：
+
+- 先使用 `ls` 确认父目录存在且正确
+- 示例：
+
+```bash
+ls foo
+mkdir foo/bar
+````
+
+---
+
+### 2. 命令执行
+
+* 路径中包含空格时，必须使用双引号：
+
+正确：
+
+```bash
+mkdir "/Users/name/My Documents"
+python "/path/with spaces/script.py"
+```
+
+错误：
+
+```bash
+mkdir /Users/name/My Documents
+python /path/with spaces/script.py
+```
+
+* 确保路径正确后再执行命令
+* 需要捕获命令输出
+
+---
+
+## 使用说明
+
+* `command` 参数是必填
+* 可选 `timeout`（毫秒），默认 120000ms（2 分钟）
+* 可选 `workdir`，默认当前工作区根目录；需要切换目录时优先使用它，不要写 `cd xxx && ...`
+* 建议写一句 **5-10 个词的简短描述**说明命令作用
+
+---
+
+## 输出处理
+
+* 如果输出超过 `${maxLines}` 行或 `${maxBytes}` 字节：
+
+  * 会被截断
+  * 完整内容会由运行时自动写入 `tool-output` 文件
+
+你可以使用：
+
+* `Read`（带 offset/limit）读取部分内容
+* `Grep` 搜索完整内容
+
+不需要使用 `head` / `tail` 控制输出
+* 同一次 `bash` 调用中的多步命令会共享环境变量、当前目录与 shell 状态；不同 `bash` 调用之间不会共享这些状态
+* 如果命令超时，本次调用对应的 shell 会被直接销毁，避免脏状态泄漏到后续调用
+
+---
+
+## 工具使用限制（非常重要）
+
+避免使用以下 bash 命令（除非明确需要）：
+
+* `find`
+* `grep`
+* `cat`
+* `head`
+* `tail`
+* `sed`
+* `awk`
+* `echo`
+
+应使用专用工具替代：
+
+| 功能   | 工具    |
+| ---- | ----- |
+| 文件查找 | Glob  |
+| 内容搜索 | Grep  |
+| 读取文件 | Read  |
+| 编辑文件 | Edit  |
+| 写入文件 | Write |
+| 输出文本 | 直接输出  |
+
+---
+
+## 多命令执行规则
+
+### 并行执行（推荐）
+
+如果命令互不依赖：
+
+* 在同一条消息中发多个 Bash 调用
+
+示例：
+
+```bash
+git status
+git diff
+```
+
+---
+
+### 串行执行
+
+如果命令有依赖：
+
+使用 `&&`：
+
+```bash
+git add . && git commit -m "msg" && git push
+```
+
+---
+
+### 容错串行
+
+使用 `;`：
+
+```bash
+cmd1 ; cmd2
+```
+
+---
+
+### 禁止
+
+不要用换行分隔命令
+（引号内除外）
+
+---
+
+## 工作目录规则
+
+正确：
+
+```text
+workdir="/foo/bar"
+command: pytest tests
+```
+
+错误：
+
+```bash
+cd /foo/bar && pytest tests
+```
+
+---
+
+# Git 提交规则
+
+只有在用户明确要求时才允许 commit。
+
+---
+
+## Git 安全规范
+
+禁止：
+
+* 修改 git config
+* 使用破坏性命令（如 `reset --hard`）
+* 跳过 hooks（如 `--no-verify`）
+* 强制 push 主分支
+
+---
+
+## amend 规则（极重要）
+
+仅在以下条件全部满足时允许：
+
+1. 用户明确要求，或 pre-commit 修改文件
+2. 当前 commit 是你创建的
+3. 尚未 push
+
+否则禁止使用 `--amend`
+
+---
+
+## 提交流程
+
+1. 并行执行：
+
+```bash
+git status
+git diff
+git log
+```
+
+2. 分析改动并生成 commit message：
+
+* 类型：
+
+  * add / update / fix / refactor / test / docs
+* 不要提交敏感文件（如 `.env`）
+
+3. 执行：
+
+```bash
+git add .
+git commit -m "message"
+git status
+```
+
+---
+
+## 失败处理
+
+如果 commit 被 hook 拒绝：
+
+* 修复问题
+* 创建新 commit（不要 amend）
+
+---
+
+## 重要限制
+
+* 不要额外执行代码探索命令
+* 不要使用 TodoWrite / Task
+* 不要 push（除非用户要求）
+* 不要使用交互式 git（如 `-i`）
+
+---
+
+# Pull Request
+
+使用 `gh` 命令创建 PR。
+
+流程：
+
+1. 并行执行：
+
+```bash
+git status
+git diff
+git log
+git diff base...HEAD
+```
+
+2. 分析所有 commit（不是只看最后一个）
+
+3. 创建 PR：
+
+```bash
+gh pr create --title "title" --body "$(cat <<'EOF'
+## Summary
+- ...
+EOF
+)"
+```
+
+---
+
+## 注意
+
+* 不使用 TodoWrite / Task
+* 返回 PR URL

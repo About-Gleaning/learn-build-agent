@@ -1,8 +1,16 @@
 import base64
+from pathlib import Path
+
 import pytest
 
 from agent.core.context import set_session_id
-from agent.tools.bash_tool import validate_readonly_bash
+from agent.tools.bash_tool import (
+    DEFAULT_TIMEOUT,
+    PersistentBashSession,
+    resolve_bash_workdir,
+    run_bash,
+    validate_readonly_bash,
+)
 from agent.tools.handlers import (
     build_plan_placeholder_path,
     build_tool_failure,
@@ -112,6 +120,138 @@ def test_validate_readonly_bash_should_block_non_whitelisted_pipe_command():
     result = validate_readonly_bash("cat README.md | xargs echo")
     assert result is not None
     assert "不允许执行命令 `xargs`" in result
+
+
+def test_run_bash_should_use_default_timeout_and_workspace_root(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    result = run_bash("pwd")
+
+    assert Path(result).resolve() == tmp_path.resolve()
+    assert DEFAULT_TIMEOUT == 120000
+
+
+def test_run_bash_should_support_custom_timeout(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    result = run_bash("sleep 0.2", timeout=50)
+
+    assert result == "Error: Timeout (50ms)"
+
+
+def test_run_bash_should_support_relative_workdir(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    nested_dir = tmp_path / "nested"
+    nested_dir.mkdir()
+
+    result = run_bash("pwd", workdir="nested")
+
+    assert Path(result).resolve() == nested_dir.resolve()
+
+
+def test_run_bash_should_not_keep_shell_state_between_calls(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    nested_dir = tmp_path / "nested"
+    nested_dir.mkdir()
+
+    assert run_bash("cd nested") == "(no output)"
+    assert Path(run_bash("pwd")).resolve() == tmp_path.resolve()
+
+
+def test_run_bash_should_not_keep_env_between_calls(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    assert run_bash("export DEMO_VAR=kept") == "(no output)"
+    assert run_bash("printf '%s' \"$DEMO_VAR\"") == "(no output)"
+
+
+def test_run_bash_should_share_shell_state_within_single_call(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    nested_dir = tmp_path / "nested"
+    nested_dir.mkdir()
+
+    result = run_bash("cd nested && pwd")
+
+    assert Path(result).resolve() == nested_dir.resolve()
+
+
+def test_run_bash_should_close_shell_after_timeout(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_bash("sleep 0.2", timeout=50)
+
+    assert result == "Error: Timeout (50ms)"
+
+
+def test_read_until_marker_should_detect_marker_across_chunks(tmp_path):
+    session = PersistentBashSession(workdir=tmp_path)
+    marker = "MARKER123"
+    chunks = iter(["hello\nMARK", "ER123:0\n"])
+
+    class FakeStdout:
+        def fileno(self) -> int:
+            return 1
+
+    session.process = type("FakeProcess", (), {"stdout": FakeStdout()})()
+
+    def fake_select(read_fds, write_fds, error_fds, timeout):
+        del read_fds, write_fds, error_fds, timeout
+        return ([1], [], [])
+
+    def fake_read(fd, size):
+        del fd, size
+        try:
+            return next(chunks).encode("utf-8")
+        except StopIteration:
+            return b""
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("agent.tools.bash_tool.select.select", fake_select)
+    monkeypatch.setattr("agent.tools.bash_tool.os.read", fake_read)
+    try:
+        assert session._read_until_marker(marker, timeout_ms=1000) == "hello"
+    finally:
+        monkeypatch.undo()
+
+
+def test_resolve_bash_workdir_should_allow_absolute_path_inside_workspace(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    nested_dir = tmp_path / "nested"
+    nested_dir.mkdir()
+
+    assert resolve_bash_workdir(str(nested_dir)) == nested_dir
+
+
+def test_resolve_bash_workdir_should_reject_outside_workspace(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    with pytest.raises(ValueError, match="超出工作区范围"):
+        resolve_bash_workdir("/tmp")
+
+
+def test_resolve_bash_workdir_should_reject_missing_directory(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    with pytest.raises(FileNotFoundError, match="workdir 不存在"):
+        resolve_bash_workdir("missing")
+
+
+def test_resolve_bash_workdir_should_reject_file_path(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+
+    with pytest.raises(NotADirectoryError, match="workdir 不是目录"):
+        resolve_bash_workdir("sample.txt")
 
 
 def test_is_allowed_plan_write_path():

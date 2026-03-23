@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import pytest
 
 import agent.runtime.session as session_module
 import agent.runtime.compaction as compaction_module
 from agent.config.settings import (
+    ResolvedLLMConfig,
     clear_runtime_settings_cache,
     get_project_runtime_settings,
     resolve_agent_loop_settings,
@@ -401,7 +404,7 @@ def test_plan_mode_bash_should_block_redirection(monkeypatch):
                 assistant,
                 tool_call_id="call_bash",
                 name="bash",
-                arguments='{"command":"echo hello > /tmp/a.txt"}',
+                arguments='{"command":"echo hello > /tmp/a.txt","description":"Writes hello to temp file"}',
             )
         else:
             append_text_part(assistant, _last_tool_result_content(messages))
@@ -424,7 +427,10 @@ def test_plan_mode_bash_should_allow_readonly_pipe(monkeypatch):
                 assistant,
                 tool_call_id="call_bash_pipe",
                 name="bash",
-                arguments='{"command":"grep -n \\"build.default.txt\\" README.md | head -5"}',
+                arguments=(
+                    '{"command":"grep -n \\"build.default.txt\\" README.md | head -5",'
+                    '"description":"Finds build prompt references"}'
+                ),
             )
         else:
             append_text_part(assistant, _last_tool_result_content(messages))
@@ -433,6 +439,147 @@ def test_plan_mode_bash_should_allow_readonly_pipe(monkeypatch):
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     result = run_session("在 plan 模式执行只读管道 bash", session_id="s_plan_bash_pipe", mode="plan")
     assert "build.default.txt" in get_message_text(result)
+
+
+def test_bash_tool_description_should_use_external_template():
+    tools = build_base_tools([])
+    bash_tool = next(tool for tool in tools if tool["function"]["name"] == "bash")
+    function_spec = bash_tool["function"]
+    runtime_settings = get_project_runtime_settings()
+
+    assert "# Bash 工具说明" in function_spec["description"]
+    assert "持久的 bash shell 会话" in function_spec["description"]
+    assert "本次调用结束后立即销毁" in function_spec["description"]
+    assert "不同 `bash` 调用之间不会共享这些状态" in function_spec["description"]
+    assert "${directory}" not in function_spec["description"]
+    assert "${maxLines}" not in function_spec["description"]
+    assert "${maxBytes}" not in function_spec["description"]
+    assert "当前工作区根目录" in function_spec["description"]
+    assert str(runtime_settings.compaction_default.tool_output_max_lines) in function_spec["description"]
+    assert str(runtime_settings.compaction_default.tool_output_max_bytes) in function_spec["description"]
+    assert function_spec["parameters"]["required"] == ["command", "description"]
+    assert function_spec["parameters"]["properties"]["timeout"]["description"] == "Optional timeout in milliseconds"
+    assert "working directory" in function_spec["parameters"]["properties"]["workdir"]["description"]
+
+
+def test_run_session_should_pass_timeout_to_bash_handler(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run_bash(command, timeout=None, workdir=None):
+        captured["command"] = command
+        captured["timeout"] = timeout
+        captured["workdir"] = workdir
+        return "bash output"
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        if not any(part.get("type") == "tool" for part in messages[-1]["parts"]):
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_bash_timeout",
+                name="bash",
+                arguments=(
+                    '{"command":"pwd","timeout":2500,'
+                    '"description":"Shows current working directory"}'
+                ),
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "run_bash", fake_run_bash)
+
+    result = run_session("执行带超时的 bash", session_id="s_bash_timeout")
+
+    assert get_message_text(result) == "bash output"
+    assert captured == {"command": "pwd", "timeout": 2500, "workdir": None}
+
+
+def test_run_session_should_pass_workdir_to_bash_handler(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run_bash(command, timeout=None, workdir=None):
+        captured["command"] = command
+        captured["timeout"] = timeout
+        captured["workdir"] = workdir
+        return "bash output"
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        if not any(part.get("type") == "tool" for part in messages[-1]["parts"]):
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_bash_workdir",
+                name="bash",
+                arguments=(
+                    '{"command":"pwd","workdir":"src",'
+                    '"description":"Shows source directory path"}'
+                ),
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "run_bash", fake_run_bash)
+    monkeypatch.setattr(session_module, "resolve_bash_workdir", lambda workdir: Path("/tmp"))
+
+    result = run_session("执行带目录的 bash", session_id="s_bash_workdir")
+
+    assert get_message_text(result) == "bash output"
+    assert captured == {"command": "pwd", "timeout": None, "workdir": "src"}
+
+
+def test_run_session_should_fail_when_bash_workdir_is_outside_workspace(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        if not any(part.get("type") == "tool" for part in messages[-1]["parts"]):
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_bash_bad_workdir",
+                name="bash",
+                arguments=(
+                    '{"command":"pwd","workdir":"../outside",'
+                    '"description":"Attempts to escape workspace"}'
+                ),
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("执行非法目录 bash", session_id="s_bash_bad_workdir")
+
+    assert "超出工作区范围" in get_message_text(result)
+
+
+def test_run_session_should_fail_when_bash_timeout_is_non_positive():
+    handlers = session_module._build_tool_handlers(
+        session_id="s_bash_bad_timeout",
+        get_mode=lambda: "build",
+        get_latest_model=lambda: "qwen-plus",
+        get_current_runtime=lambda: ResolvedLLMConfig(
+            agent="build",
+            provider="qwen",
+            vendor="qwen",
+            model="qwen3-coder-next",
+            api_mode="responses",
+            base_url="https://example.com",
+            api_key="test",
+            timeout_seconds=60,
+        ),
+    )
+
+    result = handlers["bash"](command="pwd", timeout=0, description="Attempts invalid timeout")
+
+    assert result["output"] == "Error: timeout 必须大于 0"
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "bash_timeout_invalid"
 
 
 def test_task_with_unknown_subagent_should_return_error(monkeypatch):

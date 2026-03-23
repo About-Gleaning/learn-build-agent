@@ -112,6 +112,7 @@ pnpm dev
 - `explore` 等可委托代理属于 `subagent`，由 `task` 工具进行路由。
 - 新增 agent 时，必须先在 `src/agent/runtime/agents.py` 注册名称、类型和场景描述。
 - `task` 工具描述模板放在 `src/agent/tools/task.txt`，通过 `{agents}` 占位动态注入所有 subagent 的名称和说明。
+- `bash` 工具描述模板放在 `src/agent/tools/bash.txt`；当工具描述较长时，优先拆到独立 `.txt` 模板文件，避免继续内联在 `specs.py` 中。
 - skills 的可用目录通过 `load_skill` 工具描述动态暴露，不再通过 `explore` prompt 注入 `skills_catalog`。
 
 ## 扩展指南
@@ -210,7 +211,9 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-23：`bash` 工具改为“单次调用内持久、调用结束即销毁”的持久 bash shell；同一次调用中的多步命令共享目录与环境变量状态，不再跨调用复用 shell，同时移除工具层固定字符截断，改为复用运行时统一长输出落盘链路。
 - 2026-03-23：增强 `llm.response` 日志，统一输出 `finish_reason`、响应文本、思考内容与工具调用摘要，避免仅有思考或仅有工具调用时日志出现空 `message=` 导致无法排查。
+- 2026-03-23：重构 `bash` 工具协议，新增必填 `description` 与可选 `timeout`、`workdir` 入参，默认超时收敛为 `DEFAULT_TIMEOUT=120000ms`，默认执行目录固定为当前工作区根目录，并将工具 description 拆分到独立 `src/agent/tools/bash.txt` 模板文件。
 - 2026-03-20：为 `kimi` provider 新增 PDF 支持；命中 PDF 附件时改为走 Moonshot 文件抽取链路（上传文件、拉取抽取文本、注入“仅供参考”的合成 `user` message），并在抽取完成后异步删除远端文件，删除失败不影响主流程。
 - 2026-03-20：`project_runtime.json` 新增 `file_extraction` 配置，统一管理可抽取文件扩展名与清理策略，当前默认仅开放 `.pdf`。
 - 2026-03-20：修复 qwen `responses` 自定义 function tool 的无参 schema 兼容问题；无参工具不再下发 `parameters: {}`，避免 DashScope 返回 `InternalError.Algo.InvalidParameter`。
