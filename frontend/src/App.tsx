@@ -90,6 +90,8 @@ type ProgressEntry = {
   toolCallId?: string;
   meta: string[];
   isFinal?: boolean;
+  isReasoning?: boolean;
+  reasoningKey?: string;
 };
 
 type AgentName = "build" | "plan";
@@ -421,14 +423,14 @@ function mapDisplayPartPayload(item: Record<string, unknown>): DisplayPart {
 }
 
 function buildLiveProcessItem(eventName: string, payload: Record<string, unknown>): ProcessItem | null {
-  if (eventName === "text_delta") {
+  if (eventName === "text_delta" || eventName === "reasoning_delta") {
     return null;
   }
   return buildTimelineItem(eventName, payload);
 }
 
 function buildLiveDisplayPart(eventName: string, payload: Record<string, unknown>): DisplayPart | null {
-  if (eventName === "text_delta" || shouldHideFrontendEvent(eventName) || eventName === "done") {
+  if (eventName === "text_delta" || eventName === "reasoning_delta" || shouldHideFrontendEvent(eventName) || eventName === "done") {
     return null;
   }
   const processItem = buildTimelineItem(eventName, payload);
@@ -526,6 +528,63 @@ function appendDisplayTextDelta(message: UiMessage, delta: string, payload?: Rec
     status: "running",
     displayParts: nextParts,
     displayTextMergeOpen: true,
+  };
+}
+
+function appendDisplayReasoningDelta(message: UiMessage, delta: string, payload?: Record<string, unknown>): UiMessage {
+  if (!delta) {
+    return message;
+  }
+
+  const agent = readString(payload || {}, "agent", message.agent);
+  const agentKind = readString(payload || {}, "agent_kind", "primary");
+  const depth = readNumber(payload || {}, "depth", 0);
+  const round = readNumber(payload || {}, "round", 0);
+  const delegationId = readString(payload || {}, "delegation_id");
+  const parentToolCallId = readString(payload || {}, "parent_tool_call_id");
+  const createdAt = readString(payload || {}, "timestamp", new Date().toISOString());
+  const nextParts = [...message.displayParts];
+  const lastPart = nextParts[nextParts.length - 1];
+
+  if (
+    lastPart &&
+    lastPart.kind === "reasoning" &&
+    lastPart.agent === agent &&
+    lastPart.agentKind === agentKind &&
+    lastPart.depth === depth &&
+    lastPart.round === round &&
+    lastPart.delegationId === delegationId &&
+    lastPart.parentToolCallId === parentToolCallId
+  ) {
+    nextParts[nextParts.length - 1] = {
+      ...lastPart,
+      text: `${lastPart.text}${delta}`,
+    };
+  } else {
+    nextParts.push({
+      id: buildId("display"),
+      kind: "reasoning",
+      title: `${agent || "assistant"} 思考`,
+      detail: "",
+      text: delta,
+      createdAt,
+      agent,
+      agentKind,
+      depth,
+      round,
+      status: "completed",
+      delegationId,
+      parentToolCallId,
+      toolName: "",
+      toolCallId: "",
+    });
+  }
+
+  return {
+    ...message,
+    status: "running",
+    displayParts: nextParts,
+    displayTextMergeOpen: false,
   };
 }
 
@@ -1044,6 +1103,27 @@ function buildProgressMeta(item: ProcessItem): string[] {
 }
 
 function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: string): ProgressEntry {
+  if (part.kind === "reasoning") {
+    const meta = [part.agentKind === "subagent" ? "子代理" : "主代理", part.agent].filter(Boolean);
+    if (part.round > 0) {
+      meta.push(`第 ${part.round} 轮`);
+    }
+    return {
+      id: `display_entry_${part.id}`,
+      kind: part.kind,
+      title: part.agentKind === "subagent" ? `子代理思考 · ${part.agent}` : "推理过程",
+      agent: part.agent,
+      agentKind: part.agentKind,
+      status: part.status || messageStatus,
+      createdAt: part.createdAt,
+      updatedAt: part.createdAt,
+      result: part.text,
+      meta,
+      isReasoning: true,
+      reasoningKey: part.id,
+    };
+  }
+
   if (part.kind === "assistant_text") {
     const meta = [part.agentKind === "subagent" ? "子代理" : "主代理", part.agent].filter(Boolean);
     if (part.round > 0) {
@@ -1192,7 +1272,13 @@ function shouldRenderEntryHeadline(entry: ProgressEntry): boolean {
   return !entry.isFinal && entry.kind !== "assistant_text";
 }
 
-function renderAssistantTimeline(message: UiMessage) {
+function renderAssistantTimeline(params: {
+  message: UiMessage;
+  reasoningDefaultCollapsed: boolean;
+  reasoningCollapsedState: Record<string, boolean>;
+  onToggleReasoning: (entryKey: string) => void;
+}) {
+  const { message, reasoningDefaultCollapsed, reasoningCollapsedState, onToggleReasoning } = params;
   const entries = buildAssistantTimelineEntries(message);
   const hasTimeline = entries.length > 0;
 
@@ -1204,6 +1290,10 @@ function renderAssistantTimeline(message: UiMessage) {
     <div className="assistant-timeline">
       {entries.map((entry) => {
         const showHeadline = shouldRenderEntryHeadline(entry);
+        const reasoningEntryKey = entry.reasoningKey ? `${message.id}:${entry.reasoningKey}` : "";
+        const isReasoningCollapsed = entry.isReasoning
+          ? reasoningCollapsedState[reasoningEntryKey] ?? reasoningDefaultCollapsed
+          : false;
 
         return (
           <section
@@ -1216,6 +1306,15 @@ function renderAssistantTimeline(message: UiMessage) {
               <div className="assistant-timeline-entry-head">
                 <strong>{getCompactTimelineEntryTitle(entry)}</strong>
                 {getEntryAgentName(entry) ? <span className="assistant-timeline-entry-agent">{getEntryAgentName(entry)}</span> : null}
+                {entry.isReasoning && reasoningEntryKey ? (
+                  <button
+                    type="button"
+                    className="assistant-timeline-toggle"
+                    onClick={() => onToggleReasoning(reasoningEntryKey)}
+                  >
+                    {isReasoningCollapsed ? "展开" : "收起"}
+                  </button>
+                ) : null}
               </div>
             ) : null}
             {entry.request ? (
@@ -1230,6 +1329,12 @@ function renderAssistantTimeline(message: UiMessage) {
             {entry.isFinal ? (
               <div className="assistant-timeline-entry-block final-body">
                 <div className="assistant-timeline-entry-markdown">{renderMarkdownContent(entry.result || "")}</div>
+              </div>
+            ) : entry.isReasoning ? (
+              <div className={`assistant-timeline-entry-block reasoning-body ${isReasoningCollapsed ? "is-collapsed" : ""}`}>
+                <div className="assistant-timeline-entry-text reasoning-text">
+                  {isReasoningCollapsed ? "已收起推理过程" : entry.result}
+                </div>
               </div>
             ) : entry.result ? (
               <div
@@ -1296,6 +1401,8 @@ export function App() {
   const [providerModelKey, setProviderModelKey] = useState("");
   const [activeProvider, setActiveProvider] = useState("");
   const [activeModel, setActiveModel] = useState("");
+  const [reasoningDefaultCollapsed, setReasoningDefaultCollapsed] = useState(false);
+  const [reasoningCollapsedState, setReasoningCollapsedState] = useState<Record<string, boolean>>({});
 
   const messageListRef = useRef<HTMLDivElement>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
@@ -1573,6 +1680,15 @@ export function App() {
                   : msg,
               ),
             );
+          } else if (eventName === "reasoning_delta") {
+            const delta = readString(payload, "delta");
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantId
+                  ? appendDisplayReasoningDelta(msg, delta, payload)
+                  : msg,
+              ),
+            );
           }
           const processItem = buildLiveProcessItem(eventName, payload);
           if (processItem) {
@@ -1591,7 +1707,7 @@ export function App() {
                   : msg,
               ),
             );
-          } else if (eventName !== "text_delta") {
+          } else if (eventName !== "text_delta" && eventName !== "reasoning_delta") {
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantId
@@ -1728,6 +1844,15 @@ export function App() {
                       : msg,
                   ),
                 );
+              } else if (eventName === "reasoning_delta") {
+                const delta = readString(payload, "delta");
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? appendDisplayReasoningDelta(msg, delta, payload)
+                      : msg,
+                  ),
+                );
               }
               const processItem = buildLiveProcessItem(eventName, payload);
               if (processItem) {
@@ -1746,7 +1871,7 @@ export function App() {
                       : msg,
                   ),
                 );
-              } else if (eventName !== "text_delta") {
+              } else if (eventName !== "text_delta" && eventName !== "reasoning_delta") {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantId
@@ -1888,6 +2013,13 @@ export function App() {
     }
   };
 
+  const handleToggleReasoning = (entryKey: string) => {
+    setReasoningCollapsedState((prev) => ({
+      ...prev,
+      [entryKey]: !(prev[entryKey] ?? reasoningDefaultCollapsed),
+    }));
+  };
+
   return (
     <div className="app-shell">
       <main className="workspace" aria-label="Agent 对话工作台">
@@ -1941,7 +2073,14 @@ export function App() {
                       </div>
                     </div>
                     <div className="terminal-record-body">
-                      {msg.role === "assistant" ? renderAssistantTimeline(msg) : renderMessageBody(msg)}
+                      {msg.role === "assistant"
+                        ? renderAssistantTimeline({
+                            message: msg,
+                            reasoningDefaultCollapsed,
+                            reasoningCollapsedState,
+                            onToggleReasoning: handleToggleReasoning,
+                          })
+                        : renderMessageBody(msg)}
                       {renderModeSwitchActions({
                         message: msg,
                         isLatest: latestAssistantMessage?.id === msg.id,
@@ -1995,6 +2134,14 @@ export function App() {
                 <span>{followText}</span>
                 <span>最近消息 {latestMessageTime}</span>
               </div>
+              <button
+                type="button"
+                onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
+                disabled={isApplyingModeSwitch || isStopping}
+                className="plain-btn terminal-inline-btn"
+              >
+                {reasoningDefaultCollapsed ? "思考默认收起" : "思考默认展开"}
+              </button>
               <button
                 type="button"
                 onClick={() => void refreshRuntimeOptions()}

@@ -83,6 +83,8 @@ class MessageInfo(TypedDict, total=False):
     provider: str
     status: MessageStatus
     finish_reason: str
+    provider_finish_reason: str
+    provider_status: str
     parent_id: str
     trace_id: str
     token_usage: TokenUsage
@@ -447,6 +449,32 @@ def extract_reasoning_content(message: Message) -> str:
     return "\n".join(texts).strip()
 
 
+def normalize_chat_finish_reason(
+    *,
+    raw_finish_reason: Any,
+    content: str,
+    reasoning_content: str,
+    has_tool_calls: bool,
+) -> str:
+    if has_tool_calls:
+        return "tool-calls"
+
+    normalized_raw = str(raw_finish_reason or "").strip().lower().replace("_", "-")
+    if normalized_raw == "length":
+        return "length"
+    if normalized_raw == "content-filter":
+        return "content-filter"
+    if normalized_raw == "stop":
+        if content.strip():
+            return "stop"
+        if reasoning_content.strip():
+            return "unknown"
+        return "unknown"
+    if normalized_raw in {"", "none", "null"}:
+        return "stop" if content.strip() else "unknown"
+    return "unknown"
+
+
 def extract_provider_reasoning_content(provider_message: Any) -> str:
     texts = _collect_reasoning_text(getattr(provider_message, "reasoning_content", None))
     if not texts and isinstance(provider_message, dict):
@@ -478,6 +506,9 @@ def to_provider_messages(messages: list[Message]) -> list[dict[str, Any]]:
         }
 
         if role == "assistant":
+            reasoning_content = extract_reasoning_content(message)
+            if reasoning_content:
+                provider_message["reasoning_content"] = reasoning_content
             tool_calls = extract_tool_calls(message)
             if tool_calls:
                 provider_message["tool_calls"] = [
@@ -491,9 +522,6 @@ def to_provider_messages(messages: list[Message]) -> list[dict[str, Any]]:
                     }
                     for tc in tool_calls
                 ]
-                reasoning_content = extract_reasoning_content(message)
-                if reasoning_content:
-                    provider_message["reasoning_content"] = reasoning_content
 
         provider_messages.append(provider_message)
 
@@ -517,20 +545,24 @@ def parse_provider_response(
         model=model,
         provider=provider,
         status="running",
-        finish_reason=str(getattr(choice, "finish_reason", "") or ""),
+        finish_reason="unknown",
         parent_id=parent_id,
         trace_id=trace_id,
     )
 
     content = getattr(provider_msg, "content", None)
+    content_text = str(content or "")
     if content:
-        append_text_part(assistant, str(content))
+        append_text_part(assistant, content_text)
 
     reasoning_content = extract_provider_reasoning_content(provider_msg)
     if reasoning_content:
         # 保留 provider thinking 原文，供后续多轮 tool call 历史回放使用。
         append_reasoning_part(assistant, reasoning_content)
 
+    tool_calls = list(getattr(provider_msg, "tool_calls", None) or [])
+    raw_finish_reason = str(getattr(choice, "finish_reason", "") or "")
+    assistant["info"]["provider_finish_reason"] = raw_finish_reason
     for tool_call in getattr(provider_msg, "tool_calls", None) or []:
         append_tool_part(
             assistant,
@@ -539,6 +571,12 @@ def parse_provider_response(
             status="requested",
             arguments=str(tool_call.function.arguments),
         )
+    assistant["info"]["finish_reason"] = normalize_chat_finish_reason(
+        raw_finish_reason=raw_finish_reason,
+        content=content_text,
+        reasoning_content=reasoning_content,
+        has_tool_calls=bool(tool_calls),
+    )
 
     usage = getattr(response, "usage", None)
     if usage is not None:

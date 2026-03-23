@@ -13,6 +13,7 @@ from ...core.message import (
     append_tool_part,
     create_message,
     extract_provider_reasoning_content,
+    normalize_chat_finish_reason,
     mark_message_completed,
     parse_provider_response,
     to_provider_messages,
@@ -180,6 +181,7 @@ def build_responses_input(
     for provider_message in provider_messages:
         role = str(provider_message.get("role", "")).strip()
         content = stringify_text(provider_message.get("content"))
+        reasoning_content = stringify_text(provider_message.get("reasoning_content"))
         if role == "tool":
             tool_call_id = stringify_text(provider_message.get("tool_call_id"))
             if not tool_call_id:
@@ -232,6 +234,11 @@ def build_responses_input(
             )
             continue
 
+        if role == "assistant" and reasoning_content:
+            # Responses 输入链路当前没有独立的 reasoning 字段，这里退化为文本回灌，
+            # 避免 reasoning-only assistant 在下一轮请求中被完全丢失。
+            content = f"{reasoning_content}\n\n{content}".strip() if content else reasoning_content
+
         if role:
             responses_input.append({"role": role, "content": content})
 
@@ -275,11 +282,41 @@ def collect_responses_reasoning_text(output_item: Any) -> str:
 def build_responses_finish_reason(response: Any) -> str:
     for output_item in read_value(response, "output", []) or []:
         if stringify_text(read_value(output_item, "type")) == "function_call":
-            return "tool_calls"
+            return "tool-calls"
+    has_text_output = False
+    has_reasoning_output = False
+    for output_item in read_value(response, "output", []) or []:
+        output_type = stringify_text(read_value(output_item, "type"))
+        if output_type == "message":
+            for content_part in read_value(output_item, "content", []) or []:
+                if stringify_text(read_value(content_part, "type")) != "output_text":
+                    continue
+                if stringify_text(read_value(content_part, "text")):
+                    has_text_output = True
+                    break
+        elif output_type == "reasoning":
+            if collect_responses_reasoning_text(output_item):
+                has_reasoning_output = True
     status = stringify_text(read_value(response, "status"))
-    if status in {"failed", "cancelled", "incomplete"}:
+    if status in {"failed", "cancelled"}:
         return "error"
-    return "stop"
+    if status == "incomplete":
+        incomplete_details = read_value(response, "incomplete_details", {})
+        incomplete_reason = first_non_empty(
+            read_value(incomplete_details, "reason"),
+            read_value(incomplete_details, "type"),
+            read_value(response, "incomplete_reason"),
+        ).lower()
+        if "content" in incomplete_reason and "filter" in incomplete_reason:
+            return "content-filter"
+        if any(keyword in incomplete_reason for keyword in ("length", "token", "max_output", "max output", "context")):
+            return "length"
+        return "error"
+    if has_text_output:
+        return "stop"
+    if has_reasoning_output:
+        return "unknown"
+    return "unknown"
 
 
 def apply_responses_usage(message: Message, response: Any) -> None:
@@ -314,6 +351,10 @@ def parse_responses_response(
         status="running",
         finish_reason=build_responses_finish_reason(response),
         parent_id=parent_id,
+    )
+    assistant["info"]["provider_status"] = stringify_text(read_value(response, "status"))
+    assistant["info"]["provider_finish_reason"] = stringify_text(
+        read_value(read_value(response, "incomplete_details", {}), "reason")
     )
 
     for output_item in read_value(response, "output", []) or []:
@@ -357,6 +398,8 @@ class StreamState:
     tool_call_map: dict[int, dict[str, str]] = field(default_factory=dict)
     usage_payload: dict[str, int] | None = None
     final_response: Any | None = None
+    provider_finish_reason: str = ""
+    provider_status: str = ""
 
 
 class ProviderAdapter:
@@ -399,7 +442,7 @@ class ProviderAdapter:
             return self.parse_response(state.final_response, session_id=session_id, parent_id=parent_id)
 
         if self.uses_responses_api and state.tool_call_map:
-            state.finish_reason = "tool_calls"
+            state.finish_reason = "tool-calls"
 
         assistant = create_message(
             "assistant",
@@ -431,6 +474,10 @@ class ProviderAdapter:
 
         if state.usage_payload is not None:
             assistant["info"]["token_usage"] = state.usage_payload
+        if state.provider_finish_reason:
+            assistant["info"]["provider_finish_reason"] = state.provider_finish_reason
+        if state.provider_status:
+            assistant["info"]["provider_status"] = state.provider_status
 
         mark_message_completed(assistant, finish_reason=assistant["info"].get("finish_reason", "stop") or "stop")
         return assistant
@@ -482,7 +529,7 @@ class ChatCompletionsAdapter(ProviderAdapter):
         choice = choices[0]
         chunk_finish_reason = str(getattr(choice, "finish_reason", "") or "").strip()
         if chunk_finish_reason:
-            state.finish_reason = chunk_finish_reason
+            state.provider_finish_reason = chunk_finish_reason
 
         delta = getattr(choice, "delta", None)
         if delta is None:
@@ -497,6 +544,7 @@ class ChatCompletionsAdapter(ProviderAdapter):
         delta_reasoning = extract_provider_reasoning_content(delta)
         if delta_reasoning:
             state.reasoning_buffer.append(delta_reasoning)
+            events.append({"type": "reasoning_delta", "delta": delta_reasoning})
 
         for tool_call in getattr(delta, "tool_calls", None) or []:
             index = int(getattr(tool_call, "index", 0) or 0)
@@ -513,6 +561,13 @@ class ChatCompletionsAdapter(ProviderAdapter):
             tc_arguments = str(getattr(function_obj, "arguments", "") or "")
             if tc_arguments:
                 tool_state["arguments"] += tc_arguments
+
+        state.finish_reason = normalize_chat_finish_reason(
+            raw_finish_reason=state.provider_finish_reason,
+            content="".join(state.text_buffer),
+            reasoning_content="".join(state.reasoning_buffer),
+            has_tool_calls=bool(state.tool_call_map),
+        )
 
         return events
 
@@ -650,6 +705,7 @@ class ResponsesAdapter(ProviderAdapter):
                 reasoning_text = collect_responses_reasoning_text(item)
                 if reasoning_text:
                     state.reasoning_buffer.append(reasoning_text)
+                    events.append({"type": "reasoning_delta", "delta": reasoning_text})
             if stringify_text(read_value(item, "type")) != "function_call":
                 return events
             output_index = int(read_value(chunk, "output_index", 0) or 0)

@@ -46,6 +46,8 @@ def test_parse_provider_response_extract_tool_calls():
     assert calls[0]["id"] == "call_1"
     assert calls[0]["name"] == "read_file"
     assert calls[0]["arguments"] == '{"path":"a.txt"}'
+    assert message["info"]["finish_reason"] == "tool-calls"
+    assert message["info"]["provider_finish_reason"] == "tool_calls"
     assert message["info"]["token_usage"]["total_tokens"] == 15
 
 
@@ -65,6 +67,22 @@ def test_parse_provider_response_should_extract_reasoning_content():
     message = parse_provider_response(response, session_id="s1", model="m1")
 
     assert extract_reasoning_content(message) == "先确认路径，再读取文件。"
+    assert message["info"]["finish_reason"] == "tool-calls"
+
+
+def test_parse_provider_response_should_map_reasoning_only_to_unknown():
+    provider_message = SimpleNamespace(
+        content="",
+        reasoning_content="先确认当前工作目录。",
+        tool_calls=[],
+    )
+    choice = SimpleNamespace(message=provider_message, finish_reason="stop")
+    response = SimpleNamespace(choices=[choice], usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15))
+
+    message = parse_provider_response(response, session_id="s1", model="m1")
+
+    assert extract_reasoning_content(message) == "先确认当前工作目录。"
+    assert message["info"]["finish_reason"] == "unknown"
 
 
 def test_to_provider_messages_should_include_reasoning_content_for_assistant_tool_call():
@@ -101,6 +119,18 @@ def test_to_provider_messages_should_keep_old_assistant_message_shape_without_re
 
     assert "reasoning_content" not in provider_messages[0]
     assert provider_messages[0]["content"] == "我来读取文件。"
+
+
+def test_to_provider_messages_should_include_reasoning_content_without_tool_call():
+    session_id = "s_reasoning_only"
+    assistant_msg = create_message("assistant", session_id)
+    append_reasoning_part(assistant_msg, "先确认环境。")
+
+    provider_messages = to_provider_messages([assistant_msg])
+
+    assert provider_messages[0]["role"] == "assistant"
+    assert provider_messages[0]["content"] == ""
+    assert provider_messages[0]["reasoning_content"] == "先确认环境。"
 
 
 def test_to_provider_messages_should_include_tool_attachments_without_changing_content():

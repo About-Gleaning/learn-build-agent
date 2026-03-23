@@ -87,6 +87,34 @@ def _build_tool_call_response(name: str = "todo_read"):
     return SimpleNamespace(choices=[choice], usage=usage)
 
 
+def _build_reasoning_tool_call_response(
+    *,
+    name: str = "todo_read",
+    arguments: str = '{"path":"todo.md"}',
+    content: str = "我先读取待办。",
+    reasoning_content: str = "先确认有哪些待办项。",
+):
+    tool_call = SimpleNamespace(
+        id="call_1",
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+    provider_message = SimpleNamespace(
+        content=content,
+        reasoning_content=reasoning_content,
+        tool_calls=[tool_call],
+    )
+    choice = SimpleNamespace(message=provider_message, finish_reason="tool_calls")
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def _build_reasoning_only_response(reasoning_content: str = "先确认当前工作目录。"):
+    provider_message = SimpleNamespace(content="", reasoning_content=reasoning_content, tool_calls=[])
+    choice = SimpleNamespace(message=provider_message, finish_reason="stop")
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
 def _build_user_message(session_id: str = "s_hook"):
     msg = create_message("user", session_id)
     append_text_part(msg, "hello")
@@ -1248,6 +1276,62 @@ def test_stream_should_persist_reasoning_content(monkeypatch):
     assert final_message["parts"][0]["content"] == "结果"
 
 
+def test_logging_hook_should_log_stream_response_with_reasoning_and_tool_calls(monkeypatch, caplog):
+    class Delta:
+        def __init__(self, content="", reasoning_content="", tool_calls=None):
+            self.content = content
+            self.reasoning_content = reasoning_content
+            self.tool_calls = tool_calls or []
+
+    class ToolFunction:
+        def __init__(self, name="", arguments=""):
+            self.name = name
+            self.arguments = arguments
+
+    class ToolCall:
+        def __init__(self, index=0, tool_call_id="", name="", arguments=""):
+            self.index = index
+            self.id = tool_call_id
+            self.function = ToolFunction(name=name, arguments=arguments)
+
+    class Choice:
+        def __init__(self, delta, finish_reason=""):
+            self.delta = delta
+            self.finish_reason = finish_reason
+
+    class Chunk:
+        def __init__(self, delta, finish_reason=""):
+            self.choices = [Choice(delta, finish_reason=finish_reason)]
+            self.usage = None
+
+    def _fake_stream(**kwargs):
+        yield Chunk(Delta(reasoning_content="先分析"), "")
+        yield Chunk(Delta(content="我来处理"), "")
+        yield Chunk(Delta(tool_calls=[ToolCall(index=0, tool_call_id="call_1", name="todo_read", arguments='{"path":"todo.md"}')]), "")
+        yield Chunk(Delta(), "tool_calls")
+
+    _patch_openai_client(monkeypatch, _fake_stream)
+
+    with caplog.at_level("INFO"):
+        stream = create_chat_completion_stream(
+            _build_user_message(),
+            tools=[{"type": "function"}],
+            agent="build",
+            llm_config=_build_chat_config(),
+        )
+        while True:
+            try:
+                next(stream)
+            except StopIteration:
+                break
+
+    assert "llm.response finish_reason=tool-calls" in caplog.text
+    assert "message=我来处理" in caplog.text
+    assert "reasoning=先分析" in caplog.text
+    assert "tool_names=todo_read" in caplog.text
+    assert 'tool_calls=todo_read[call_1] args={"path":"todo.md"}' in caplog.text
+
+
 def test_responses_stream_should_yield_delta_and_return_message(monkeypatch):
     def _fake_responses_stream(**kwargs):
         yield SimpleNamespace(type="response.output_text.delta", delta="流")
@@ -1494,6 +1578,29 @@ def test_create_chat_completion_should_replay_reasoning_content_in_request(monke
     assert provider_messages[1]["tool_calls"][0]["function"]["name"] == "read_file"
 
 
+def test_create_chat_completion_should_replay_reasoning_only_assistant_in_request(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    _patch_openai_client(monkeypatch, _capture_create)
+
+    session_id = "s_reasoning_only_replay"
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "当前工作目录是多少")
+
+    assistant_msg = create_message("assistant", session_id)
+    append_reasoning_part(assistant_msg, "先确认当前工作目录。")
+
+    create_chat_completion([user_msg, assistant_msg], tools=[], llm_config=_build_chat_config())
+
+    provider_messages = captured_payload["messages"]
+    assert provider_messages[1]["role"] == "assistant"
+    assert provider_messages[1]["reasoning_content"] == "先确认当前工作目录。"
+
+
 def test_logging_hook_should_log_latest_message(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
@@ -1511,7 +1618,8 @@ def test_logging_hook_should_log_response_text(monkeypatch, caplog):
     with caplog.at_level("INFO"):
         create_chat_completion(_build_user_message(), tools=[], agent="plan", llm_config=_build_chat_config())
 
-    assert "llm.response message=done" in caplog.text
+    assert "llm.response finish_reason=stop" in caplog.text
+    assert "message=done" in caplog.text
     assert any(record.agent == "plan" for record in caplog.records)
 
 
@@ -1526,7 +1634,37 @@ def test_logging_hook_should_log_tool_name_when_model_requests_tool(monkeypatch,
             llm_config=_build_chat_config(),
         )
 
-    assert "llm.response tool_names=todo_read" in caplog.text
+    assert "llm.response finish_reason=tool-calls" in caplog.text
+    assert "tool_names=todo_read" in caplog.text
+    assert "tool_calls=todo_read[call_1] args={}" in caplog.text
+
+
+def test_logging_hook_should_log_text_reasoning_and_tool_calls_together(monkeypatch, caplog):
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_reasoning_tool_call_response())
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(
+            _build_user_message(),
+            tools=[{"type": "function"}],
+            agent="build",
+            llm_config=_build_chat_config(),
+        )
+
+    assert "message=我先读取待办。" in caplog.text
+    assert "reasoning=先确认有哪些待办项。" in caplog.text
+    assert "tool_names=todo_read" in caplog.text
+    assert 'tool_calls=todo_read[call_1] args={"path":"todo.md"}' in caplog.text
+
+
+def test_logging_hook_should_log_reasoning_only_response(monkeypatch, caplog):
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_reasoning_only_response("先确认当前工作目录。"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_user_message(), tools=[], agent="build", llm_config=_build_chat_config())
+
+    assert "finish_reason=unknown" in caplog.text
+    assert "message=" in caplog.text
+    assert "reasoning=先确认当前工作目录。" in caplog.text
 
 
 def test_logging_hook_should_not_repeat_previous_user_message_on_tool_followup(monkeypatch, caplog):

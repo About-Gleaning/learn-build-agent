@@ -3,7 +3,7 @@ import re
 
 from fastapi.testclient import TestClient
 
-from agent.core.message import append_text_part, create_message
+from agent.core.message import append_reasoning_part, append_text_part, create_message
 from agent.runtime import session as session_runtime
 from agent.runtime.session import clear_session_memory, configure_session_memory_store, generate_session_id
 from agent.runtime.session_memory import InMemorySessionMemoryStore
@@ -193,6 +193,35 @@ def test_message_to_vo_should_normalize_missing_optional_fields():
     assert message_vo.process_items == []
     assert message_vo.display_parts == []
     assert message_vo.confirmation is None
+
+
+def test_message_to_vo_should_keep_reasoning_display_part_kind():
+    assistant = create_message("assistant", "s_reasoning_vo", status="completed")
+    append_reasoning_part(assistant, "先确认上下文。")
+    assistant["info"]["display_parts"] = [
+        {
+            "id": "disp_reasoning_1",
+            "kind": "reasoning",
+            "title": "build 思考",
+            "detail": "",
+            "text": "先确认上下文。",
+            "created_at": "2026-03-23T00:00:00+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "",
+            "tool_call_id": "",
+        }
+    ]
+
+    message_vo = message_to_vo(assistant)
+
+    assert message_vo.display_parts[0].kind == "reasoning"
+    assert message_vo.display_parts[0].text == "先确认上下文。"
 
 
 def test_split_stream_event_should_remove_type_field():

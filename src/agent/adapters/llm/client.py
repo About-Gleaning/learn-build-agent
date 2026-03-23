@@ -12,6 +12,7 @@ from ...core.message import (
     Message,
     create_error_message,
     estimate_message_size,
+    extract_reasoning_content,
     extract_tool_calls,
     get_role,
     normalize_error,
@@ -77,11 +78,7 @@ class LoggingHook(LLMHook):
         logger.info("llm.request %s", " ".join(fields), extra=log_extra)
 
     def after_call(self, ctx: HookContext, message: Message) -> None:
-        tool_names = [tool_call["name"] for tool_call in extract_tool_calls(message) if tool_call.get("name")]
-        if tool_names:
-            info_text = f"tool_names={','.join(tool_names)}"
-        else:
-            info_text = f"message={_build_response_preview(message)}"
+        info_text = " ".join(_build_response_log_fields(ctx, message))
 
         logger.info(
             "llm.response %s",
@@ -145,6 +142,49 @@ def _build_response_preview(message: Message) -> str:
         if part.get("type") in {"text", "error"} and str(part.get("content", "")).strip()
     ]
     return sanitize_log_text("\n".join(text_parts))
+
+
+def _build_reasoning_preview(message: Message) -> str:
+    return sanitize_log_text(extract_reasoning_content(message))
+
+
+def _build_tool_names_preview(message: Message) -> str:
+    tool_names = [tool_call["name"] for tool_call in extract_tool_calls(message) if tool_call.get("name")]
+    return sanitize_log_text(",".join(tool_names))
+
+
+def _build_tool_calls_preview(message: Message) -> str:
+    previews: list[str] = []
+    for tool_call in extract_tool_calls(message):
+        name = str(tool_call.get("name", "")).strip() or "unknown"
+        tool_call_id = str(tool_call.get("id", "")).strip() or "unknown"
+        arguments = str(tool_call.get("arguments", "")).strip() or "{}"
+        previews.append(f"{name}[{tool_call_id}] args={arguments}")
+    return sanitize_log_text("; ".join(previews), limit=1000)
+
+
+def _build_response_log_fields(ctx: HookContext, message: Message) -> list[str]:
+    finish_reason = sanitize_log_text(message.get("info", {}).get("finish_reason", "unknown"), limit=80)
+    latency_ms = int(ctx.get("latency_ms", 0) or 0)
+    fields = [
+        f"finish_reason={finish_reason}",
+        f"latency_ms={latency_ms}",
+        f"message={_build_response_preview(message)}",
+    ]
+
+    reasoning_preview = _build_reasoning_preview(message)
+    if reasoning_preview:
+        fields.append(f"reasoning={reasoning_preview}")
+
+    tool_names_preview = _build_tool_names_preview(message)
+    if tool_names_preview:
+        fields.append(f"tool_names={tool_names_preview}")
+
+    tool_calls_preview = _build_tool_calls_preview(message)
+    if tool_calls_preview:
+        fields.append(f"tool_calls={tool_calls_preview}")
+
+    return fields
 
 
 _GLOBAL_HOOKS: list[LLMHook] = []

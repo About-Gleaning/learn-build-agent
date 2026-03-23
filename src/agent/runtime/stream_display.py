@@ -159,6 +159,8 @@ def _build_display_part_from_event(event: dict[str, Any]) -> DisplayPart | None:
 def _append_display_text_part(
     display_parts: list[DisplayPart],
     *,
+    kind: str,
+    title: str,
     delta: str,
     created_at: str,
     agent: str,
@@ -175,7 +177,7 @@ def _append_display_text_part(
     if merge_allowed and display_parts:
         last_part = display_parts[-1]
         if (
-            str(last_part.get("kind", "")) == "assistant_text"
+            str(last_part.get("kind", "")) == kind
             and str(last_part.get("agent", "")) == agent
             and str(last_part.get("agent_kind", "")) == agent_kind
             and int(last_part.get("depth", 0) or 0) == depth
@@ -189,8 +191,8 @@ def _append_display_text_part(
     display_parts.append(
         {
             "id": _new_stream_event_id(),
-            "kind": "assistant_text",
-            "title": f"{agent} 回复",
+            "kind": kind,
+            "title": title,
             "detail": "",
             "text": delta,
             "created_at": created_at,
@@ -204,6 +206,35 @@ def _append_display_text_part(
             "tool_name": "",
             "tool_call_id": "",
         }
+    )
+
+
+def _append_display_reasoning_part(
+    display_parts: list[DisplayPart],
+    *,
+    delta: str,
+    created_at: str,
+    agent: str,
+    agent_kind: str,
+    depth: int,
+    round_no: int,
+    delegation_id: str | None,
+    parent_tool_call_id: str | None,
+    merge_allowed: bool,
+) -> None:
+    _append_display_text_part(
+        display_parts,
+        kind="reasoning",
+        title=f"{agent} 思考",
+        delta=delta,
+        created_at=created_at,
+        agent=agent,
+        agent_kind=agent_kind,
+        depth=depth,
+        round_no=round_no,
+        delegation_id=delegation_id,
+        parent_tool_call_id=parent_tool_call_id,
+        merge_allowed=merge_allowed,
     )
 
 
@@ -230,11 +261,19 @@ def _build_display_parts_from_message(message: Message) -> list[DisplayPart]:
         content = str(part.get("content", ""))
         if not content:
             continue
+        display_kind = "assistant_text"
+        title = f"{agent or 'assistant'} 回复"
+        if part_type == "reasoning":
+            display_kind = "reasoning"
+            title = f"{agent or 'assistant'} 思考"
+        elif part_type == "error":
+            display_kind = "error"
+            title = f"{agent or 'assistant'} 会话异常"
         parts.append(
             {
                 "id": str(part.get("part_id", "")) or _new_stream_event_id(),
-                "kind": "assistant_text" if part_type != "error" else "error",
-                "title": f"{agent or 'assistant'} 回复" if part_type != "error" else f"{agent or 'assistant'} 会话异常",
+                "kind": display_kind,
+                "title": title,
                 "detail": "" if part_type != "error" else content,
                 "text": content if part_type != "error" else "",
                 "created_at": str(part.get("created_at", "")) or created_at,
@@ -268,7 +307,7 @@ def _merge_display_parts_with_message(display_parts: list[DisplayPart], message:
             str(item.get("agent", "")),
         )
         for item in merged
-        if str(item.get("kind", "")) in {"assistant_text", "error"}
+        if str(item.get("kind", "")) in {"assistant_text", "reasoning", "error"}
     }
     for fallback_part in fallback_parts:
         fallback_key = (

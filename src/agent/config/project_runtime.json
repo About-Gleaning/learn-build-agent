@@ -32,5 +32,9 @@
     "vendors": {
       "kimi": {}
     }
+  },
+  "agent_loop": {
+    // 单次 agent loop 允许执行的最大轮次。命中上限后会以 error 收口，避免 unknown 持续空转。
+    "max_rounds": 8
   }
 }

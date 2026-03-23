@@ -64,8 +64,10 @@
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
 - `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
 - `project_runtime.json` 中的 `file_extraction` 也必须采用 `default + vendors` 结构；当前默认仅开放 `.pdf`，并统一使用 `cleanup_mode=async_delete` 做远端异步清理。
+- `project_runtime.json` 中的 `agent_loop.max_rounds` 是主 Agent 循环的统一兜底阈值；命中上限后必须以 `finish_reason=error` 收口，禁止继续无限空转。
 - `compaction.tool_result_keep_recent` 的计数口径统一按 `role=tool` 消息数量计算，默认保留最近 `3` 条不压缩。
 - 当前可配置的压缩关键参数包括：`tool_result_prune_enabled`、`tool_result_keep_recent`、`tool_result_prune_min_chars`、`summary_trigger_threshold`、`summary_max_tokens`、`tool_output_max_lines`、`tool_output_max_bytes`。
+- LLM 响应转换后的 assistant message 必须统一写入标准化 `finish_reason`；session loop 只允许基于该字段决定继续或停止，禁止继续直接用“是否存在 tool_call”充当终止规则。
 - `kimi` 命中 PDF 附件时，必须按 Moonshot 官方文件抽取链路处理：先上传 `/v1/files`，再读取 `/v1/files/{file_id}/content`，最后把抽取文本包装为“仅供参考”的合成 `user` message 注入 `chat.completions`；远端删除失败仅记日志，不得阻塞主流程。
 
 ## 开发与验证命令
@@ -113,6 +115,9 @@
 
 ## 变更记录
 
+- 2026-03-23：Web 前端新增 LLM reasoning 展示；后端流式链路增加 `reasoning_delta` 事件并将 `display_parts.kind=reasoning` 显式透传，前端按时间线顺序内联展示 reasoning，支持单条折叠与全局默认展开/收起控制，同时保持 reasoning 与最终回答分离存储和渲染。
+- 2026-03-23：增强 `llm.response` 日志，统一打印标准化 `finish_reason`、响应文本、思考内容与工具调用摘要，避免模型仅返回 thinking 或 tool call 时日志只剩空 `message=`，提升排障可观测性。
+- 2026-03-23：重构 assistant message 的标准化 `finish_reason` 与 agent loop 终止规则；`chat_completions` / `responses` 统一映射为 `stop`、`length`、`content-filter`、`tool-calls`、`unknown`、`error`，session loop 改为仅基于该字段推进，并新增 `project_runtime.json -> agent_loop.max_rounds` 兜底未知态空转。
 - 2026-03-20：移除运行时内部对 `default_session` 的隐式兜底；Web / 运行时正式入口缺少 `session_id` 时直接报错，CLI 与测试入口改为在最外层自动生成随机 `session_id` 后再进入会话链路。
 - 2026-03-20：修复 `kimi` PDF 抽取在多轮会话中的重复上传与提示词乱序问题；同一 PDF 在首次抽取后会把结果缓存到原 `tool` 输出元数据，后续轮次直接复用，并将“仅供参考”的合成 `user` message 固定插入到对应 `tool` 消息之后，不再整体前置到对话最前面。
 - 2026-03-20：为 `kimi` provider 新增 PDF 支持；命中 PDF 附件时改为走 Moonshot 文件抽取链路（上传文件、拉取抽取文本、注入“仅供参考”的合成 `user` message），并在抽取完成后异步删除远端文件，删除失败不影响主流程。

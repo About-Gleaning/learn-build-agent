@@ -12,7 +12,7 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..config.logging_setup import build_log_extra, sanitize_log_text
-from ..config.settings import ResolvedLLMConfig, resolve_llm_config
+from ..config.settings import ResolvedLLMConfig, resolve_agent_loop_settings, resolve_llm_config
 from ..core.context import set_session_id
 from ..core.message import (
     DisplayPart,
@@ -21,6 +21,7 @@ from ..core.message import (
     ResponseMeta,
     append_tool_part,
     append_text_part,
+    create_error_message,
     create_message,
     extract_tool_calls,
     get_role,
@@ -49,6 +50,7 @@ from .compaction import compact
 from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore
 from .stream_display import (
     _append_display_event_part,
+    _append_display_reasoning_part,
     _append_display_text_part,
     _attach_response_summary,
     _build_display_parts_from_message,
@@ -127,11 +129,57 @@ _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
     re.compile(r"(?i)bearer\s+[A-Za-z0-9._-]{12,}"),
 ]
+_CONTINUE_FINISH_REASONS = {"tool-calls", "unknown"}
+_TERMINAL_FINISH_REASONS = {"stop", "length", "content-filter", "error"}
 
 
 def _normalize_prompt_key(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip().lower()).strip("._-")
     return normalized or "default"
+
+
+def _assistant_finish_reason(message: Message) -> str:
+    raw_reason = str(message["info"].get("finish_reason", "")).strip().lower().replace("_", "-")
+    if raw_reason:
+        return raw_reason
+    if extract_tool_calls(message):
+        return "tool-calls"
+    if get_message_text(message):
+        return "stop"
+    return "unknown"
+
+
+def _should_continue_after_assistant(message: Message) -> bool:
+    return _assistant_finish_reason(message) in _CONTINUE_FINISH_REASONS
+
+
+def _build_max_rounds_exceeded_message(
+    *,
+    session_id: str,
+    active_agent: str,
+    current_runtime: ResolvedLLMConfig,
+    turn_started_at: str,
+    max_rounds: int,
+) -> Message:
+    message = create_error_message(
+        session_id=session_id,
+        model=current_runtime.model,
+        provider=current_runtime.provider,
+        error={
+            "code": "loop_round_limit_exceeded",
+            "message": f"当前流程已达到最大轮次限制（{max_rounds}），已停止继续推理。",
+            "details": "LoopRoundLimitExceeded",
+        },
+    )
+    _set_message_runtime_info(
+        message,
+        agent=active_agent,
+        model=current_runtime.model,
+        provider=current_runtime.provider,
+        turn_started_at=turn_started_at,
+        turn_completed_at=utc_now_iso(),
+    )
+    return message
 
 
 def _get_workdir() -> Path:
@@ -1230,6 +1278,7 @@ def _run_session_stream(
     active_process_items = process_items if process_items is not None else []
     active_display_parts = display_parts if display_parts is not None else []
     display_text_merge_open = False
+    display_reasoning_merge_open = False
     messages = list(bootstrap.messages)
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
@@ -1240,7 +1289,7 @@ def _run_session_stream(
     stop_message_saved = False
 
     def _emit_event(event_type: str, **payload: Any) -> dict[str, Any]:
-        nonlocal display_text_merge_open
+        nonlocal display_reasoning_merge_open, display_text_merge_open
         event = _build_stream_event(
             event_type,
             session_id=active_session_id,
@@ -1256,6 +1305,7 @@ def _run_session_stream(
             active_process_items.append(process_item)
         _append_display_event_part(active_display_parts, event=event)
         display_text_merge_open = False
+        display_reasoning_merge_open = False
         return event
 
     def _build_stop_result_message(active_agent: str, runtime_config: ResolvedLLMConfig) -> Message:
@@ -1344,9 +1394,68 @@ def _run_session_stream(
             started_at=turn_started_at,
         )
 
+        max_rounds = resolve_agent_loop_settings().max_rounds
         round_no = 0
         while True:
             round_no += 1
+            if round_no > max_rounds:
+                active_agent = current_mode if mode_enabled else (runtime_agent or "build")
+                agent_kind = _resolve_agent_kind(active_agent)
+                limit_message = _build_max_rounds_exceeded_message(
+                    session_id=active_session_id,
+                    active_agent=active_agent,
+                    current_runtime=current_runtime,
+                    turn_started_at=turn_started_at,
+                    max_rounds=max_rounds,
+                )
+                completed_at = str(limit_message["info"].get("turn_completed_at", ""))
+                messages.append(limit_message)
+                yield _emit_event(
+                    "round_end",
+                    agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    round=round_no,
+                    status=limit_message["info"].get("status", "failed"),
+                    finish_reason=limit_message["info"].get("finish_reason", "error"),
+                    provider=current_runtime.provider,
+                    model=current_runtime.model,
+                    completed_at=completed_at,
+                )
+                response_meta = _attach_response_summary(
+                    limit_message,
+                    process_items=active_process_items,
+                    display_parts=active_display_parts,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                )
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                if depth == 0:
+                    clear_session_stop(active_session_id)
+                yield _emit_event(
+                    "done",
+                    agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    message_id=str(limit_message["info"].get("message_id", "")),
+                    status=limit_message["info"].get("status", "failed"),
+                    finish_reason=limit_message["info"].get("finish_reason", "error"),
+                    provider=current_runtime.provider,
+                    model=current_runtime.model,
+                    completed_at=completed_at,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                    response_meta=response_meta,
+                    process_items=[dict(item) for item in active_process_items],
+                    display_parts=limit_message["info"].get("display_parts", []),
+                    confirmation=limit_message["info"].get("confirmation"),
+                )
+                return limit_message
             pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
             messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
 
@@ -1422,6 +1531,8 @@ def _run_session_stream(
                         )
                         _append_display_text_part(
                             active_display_parts,
+                            kind="assistant_text",
+                            title=f"{active_agent} 回复",
                             delta=delta,
                             created_at=str(delta_event.get("timestamp", "")) or utc_now_iso(),
                             agent=active_agent,
@@ -1433,7 +1544,40 @@ def _run_session_stream(
                             merge_allowed=display_text_merge_open,
                         )
                         display_text_merge_open = True
+                        display_reasoning_merge_open = False
                         yield delta_event
+                    continue
+
+                if stream_event.get("type") == "reasoning_delta":
+                    delta = str(stream_event.get("delta", ""))
+                    if delta:
+                        delta_event = _build_stream_event(
+                            "reasoning_delta",
+                            session_id=active_session_id,
+                            agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                            round=round_no,
+                            delta=delta,
+                        )
+                        _append_display_reasoning_part(
+                            active_display_parts,
+                            delta=delta,
+                            created_at=str(delta_event.get("timestamp", "")) or utc_now_iso(),
+                            agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            round_no=round_no,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                            merge_allowed=display_reasoning_merge_open,
+                        )
+                        display_reasoning_merge_open = True
+                        display_text_merge_open = False
+                        yield delta_event
+                    continue
 
             stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
             if stopped_message is not None:
@@ -1449,6 +1593,8 @@ def _run_session_stream(
             messages.append(assistant_message)
 
             tool_calls = extract_tool_calls(assistant_message)
+            finish_reason = _assistant_finish_reason(assistant_message)
+            should_continue = _should_continue_after_assistant(assistant_message)
             has_tool_calls = bool(tool_calls)
 
             if has_tool_calls:
@@ -1466,7 +1612,7 @@ def _run_session_stream(
                         arguments=tool_call["arguments"],
                     )
 
-            if not has_tool_calls:
+            if not should_continue:
                 completed_at = utc_now_iso()
                 assistant_message["info"]["turn_completed_at"] = completed_at
                 yield _emit_event(
@@ -1515,6 +1661,23 @@ def _run_session_stream(
                     confirmation=assistant_message["info"].get("confirmation"),
                 )
                 return assistant_message
+
+            if finish_reason == "unknown" and not has_tool_calls:
+                yield _emit_event(
+                    "round_end",
+                    agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    round=round_no,
+                    status=assistant_message["info"].get("status", "completed"),
+                    finish_reason=finish_reason,
+                    provider=current_runtime.provider,
+                    model=current_runtime.model,
+                    completed_at=utc_now_iso(),
+                )
+                continue
 
             should_interrupt = False
             task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
@@ -1730,7 +1893,7 @@ def _run_session_stream(
                 parent_tool_call_id=parent_tool_call_id,
                 round=round_no,
                 status="completed",
-                finish_reason="tool_call",
+                finish_reason="tool-calls",
                 provider=current_runtime.provider,
                 model=current_runtime.model,
                 completed_at=utc_now_iso(),
@@ -1878,9 +2041,23 @@ def run_session(
         )
     )
 
+    max_rounds = resolve_agent_loop_settings().max_rounds
     round_no = 0
     while True:
         round_no += 1
+        if round_no > max_rounds:
+            active_agent = current_mode if mode_enabled else (runtime_agent or "build")
+            limit_message = _build_max_rounds_exceeded_message(
+                session_id=active_session_id,
+                active_agent=active_agent,
+                current_runtime=current_runtime,
+                turn_started_at=turn_started_at,
+                max_rounds=max_rounds,
+            )
+            messages.append(limit_message)
+            if mode_enabled:
+                SESSION_MEMORY_STORE.save(active_session_id, messages)
+            return limit_message
         pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
         messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
 
@@ -1925,13 +2102,17 @@ def run_session(
         messages.append(assistant_message)
 
         tool_calls = extract_tool_calls(assistant_message)
+        should_continue = _should_continue_after_assistant(assistant_message)
         has_tool_calls = bool(tool_calls)
 
-        if not has_tool_calls:
+        if not should_continue:
             assistant_message["info"]["turn_completed_at"] = utc_now_iso()
             if mode_enabled:
                 SESSION_MEMORY_STORE.save(active_session_id, messages)
             return assistant_message
+
+        if _assistant_finish_reason(assistant_message) == "unknown" and not has_tool_calls:
+            continue
 
         should_interrupt = False
         task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)

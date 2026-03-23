@@ -201,6 +201,7 @@ pnpm dev
 - 日志统一通过 `src/agent/config/logging_setup.py` 初始化，禁止在业务模块内直接调用 `logging.basicConfig()`。
 - 日志文件写入 `logs/app-YYYY-MM-dd.log`，使用追加模式，重启不会覆盖历史内容。
 - 正常链路仅保留关键节点日志：LLM 调用前后、工具调用前后。
+- `llm.response` 必须尽量在单条日志内同时打印标准化后的 `finish_reason`、响应文本预览、思考内容预览与工具调用摘要；若某类内容不存在则可省略对应字段，但禁止再退化为只打印 `message=` 或只打印 `tool_names=`。
 - `task` 委派场景额外记录两条关键日志：子代理结果已回收、主代理即将基于该结果继续二轮推理。
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
@@ -209,6 +210,7 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-23：增强 `llm.response` 日志，统一输出 `finish_reason`、响应文本、思考内容与工具调用摘要，避免仅有思考或仅有工具调用时日志出现空 `message=` 导致无法排查。
 - 2026-03-20：为 `kimi` provider 新增 PDF 支持；命中 PDF 附件时改为走 Moonshot 文件抽取链路（上传文件、拉取抽取文本、注入“仅供参考”的合成 `user` message），并在抽取完成后异步删除远端文件，删除失败不影响主流程。
 - 2026-03-20：`project_runtime.json` 新增 `file_extraction` 配置，统一管理可抽取文件扩展名与清理策略，当前默认仅开放 `.pdf`。
 - 2026-03-20：修复 qwen `responses` 自定义 function tool 的无参 schema 兼容问题；无参工具不再下发 `parameters: {}`，避免 DashScope 返回 `InternalError.Algo.InvalidParameter`。

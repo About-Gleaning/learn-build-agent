@@ -39,6 +39,7 @@ DEFAULT_TOOL_OUTPUT_MAX_LINES = 2000
 DEFAULT_TOOL_OUTPUT_MAX_BYTES = 50 * 1024
 DEFAULT_FILE_EXTRACTION_ALLOWED_EXTENSIONS = (".pdf",)
 DEFAULT_FILE_EXTRACTION_CLEANUP_MODE = "async_delete"
+DEFAULT_AGENT_LOOP_MAX_ROUNDS = 8
 
 
 @dataclass(frozen=True)
@@ -82,12 +83,18 @@ class ProjectRuntimeSettings:
     compaction_vendors: dict[str, CompactionSettings]
     file_extraction_default: "FileExtractionSettings"
     file_extraction_vendors: dict[str, "FileExtractionSettings"]
+    agent_loop: "AgentLoopSettings"
 
 
 @dataclass(frozen=True)
 class FileExtractionSettings:
     allowed_extensions: tuple[str, ...] = DEFAULT_FILE_EXTRACTION_ALLOWED_EXTENSIONS
     cleanup_mode: str = DEFAULT_FILE_EXTRACTION_CLEANUP_MODE
+
+
+@dataclass(frozen=True)
+class AgentLoopSettings:
+    max_rounds: int = DEFAULT_AGENT_LOOP_MAX_ROUNDS
 
 
 @dataclass(frozen=True)
@@ -127,6 +134,14 @@ def _parse_non_negative_int(value: Any, *, field_name: str) -> int:
         raise ValueError(f"{field_name} 必须是大于等于 0 的整数。")
     if value < 0:
         raise ValueError(f"{field_name} 必须是大于等于 0 的整数。")
+    return value
+
+
+def _parse_positive_int(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} 必须是大于 0 的整数。")
+    if value <= 0:
+        raise ValueError(f"{field_name} 必须是大于 0 的整数。")
     return value
 
 
@@ -372,6 +387,16 @@ def _load_project_file_extraction_settings(raw_file_extraction: Any) -> tuple[Fi
     return default_settings, vendor_settings
 
 
+def _load_project_agent_loop_settings(raw_agent_loop: Any) -> AgentLoopSettings:
+    if raw_agent_loop is None:
+        return AgentLoopSettings()
+    if not isinstance(raw_agent_loop, dict):
+        raise ValueError("project_runtime.agent_loop 必须是对象。")
+    raw_max_rounds = raw_agent_loop.get("max_rounds", DEFAULT_AGENT_LOOP_MAX_ROUNDS)
+    max_rounds = _parse_positive_int(raw_max_rounds, field_name="agent_loop.max_rounds")
+    return AgentLoopSettings(max_rounds=max_rounds)
+
+
 def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
     if not isinstance(raw_providers, dict) or not raw_providers:
         raise ValueError("LLM 配置缺少 providers，且至少要配置一个厂商。")
@@ -463,11 +488,13 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
     payload = _load_project_runtime_payload()
     compaction_default, compaction_vendors = _load_project_compaction_settings(payload.get("compaction"))
     file_extraction_default, file_extraction_vendors = _load_project_file_extraction_settings(payload.get("file_extraction"))
+    agent_loop = _load_project_agent_loop_settings(payload.get("agent_loop"))
     return ProjectRuntimeSettings(
         compaction_default=compaction_default,
         compaction_vendors=compaction_vendors,
         file_extraction_default=file_extraction_default,
         file_extraction_vendors=file_extraction_vendors,
+        agent_loop=agent_loop,
     )
 
 
@@ -485,6 +512,10 @@ def resolve_file_extraction_settings(vendor: str | None = None) -> FileExtractio
     if normalized_vendor and normalized_vendor in settings.file_extraction_vendors:
         return settings.file_extraction_vendors[normalized_vendor]
     return settings.file_extraction_default
+
+
+def resolve_agent_loop_settings() -> AgentLoopSettings:
+    return get_project_runtime_settings().agent_loop
 
 
 def clear_runtime_settings_cache() -> None:

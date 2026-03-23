@@ -383,6 +383,15 @@ button:disabled {
   white-space: nowrap;
 }
 
+.assistant-timeline-toggle {
+  min-height: 24px;
+  margin-left: auto;
+  padding: 0 8px;
+  border-style: dashed;
+  color: var(--ink-subtle);
+  font-size: 11px;
+}
+
 .assistant-timeline-entry-block {
   display: flex;
   align-items: flex-start;
@@ -400,6 +409,25 @@ button:disabled {
   color: #b8cbde;
   font-size: 12px;
   line-height: 1.7;
+}
+
+.assistant-timeline-entry.kind-reasoning::before {
+  background: rgba(124, 194, 255, 0.72);
+}
+
+.reasoning-body {
+  padding: 10px 12px;
+  border: 1px dashed rgba(124, 194, 255, 0.28);
+  background: linear-gradient(180deg, rgba(12, 24, 38, 0.96), rgba(9, 18, 29, 0.9));
+}
+
+.reasoning-body.is-collapsed {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.reasoning-text {
+  color: #9fb5ca;
 }
 
 .assistant-timeline-entry-markdown,

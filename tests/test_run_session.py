@@ -5,6 +5,7 @@ import agent.runtime.compaction as compaction_module
 from agent.config.settings import (
     clear_runtime_settings_cache,
     get_project_runtime_settings,
+    resolve_agent_loop_settings,
     resolve_compaction_settings,
     resolve_file_extraction_settings,
     resolve_llm_config,
@@ -136,6 +137,68 @@ def test_run_session_should_replay_reasoning_content_for_tool_followup(monkeypat
     assert get_message_text(result) == "最终答案"
     assert captured_assistant_history[0]["reasoning_content"] == "先读取待办列表。"
     assert captured_assistant_history[0]["tool_calls"][0]["function"]["name"] == "todo_read"
+
+
+def test_run_session_should_continue_when_finish_reason_is_unknown(monkeypatch):
+    call_state = {"count": 0}
+    captured_assistant_history: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+
+        if call_state["count"] == 2:
+            provider_messages = to_provider_messages(messages)
+            assistant_history = next(msg for msg in provider_messages if msg["role"] == "assistant")
+            captured_assistant_history.append(assistant_history)
+
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            assistant["info"]["finish_reason"] = "unknown"
+            append_reasoning_part(assistant, "先确认当前工作目录。")
+        else:
+            assistant["info"]["finish_reason"] = "stop"
+            append_text_part(assistant, "当前工作目录是测试目录。")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("当前工作目录是多少", session_id="s_reasoning_continue")
+
+    assert get_message_text(result) == "当前工作目录是测试目录。"
+    assert captured_assistant_history[0]["reasoning_content"] == "先确认当前工作目录。"
+
+
+def test_run_session_should_stop_when_agent_loop_exceeds_max_rounds(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "agent_loop": {
+            "max_rounds": 2
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        assistant["info"]["finish_reason"] = "unknown"
+        append_reasoning_part(assistant, "继续思考")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    try:
+        result = run_session("为什么会一直思考", session_id="s_round_limit")
+        assert result["info"]["finish_reason"] == "error"
+        assert result["info"]["error"]["code"] == "loop_round_limit_exceeded"
+    finally:
+        clear_runtime_settings_cache()
 
 
 def test_run_session_end_on_failed_message(monkeypatch):
@@ -993,6 +1056,28 @@ def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
     assert done_event["display_parts"][0]["text"] == "流式回答"
 
 
+def test_run_session_stream_events_should_emit_reasoning_delta_and_keep_separate_display_part(monkeypatch):
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        yield {"type": "reasoning_delta", "delta": "先分析上下文"}
+        yield {"type": "text_delta", "delta": "最终回答"}
+        assistant = create_message("assistant", session_id, status="completed")
+        append_reasoning_part(assistant, "先分析上下文")
+        append_text_part(assistant, "最终回答")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("测试 reasoning 流式展示", session_id="s_stream_reasoning"))
+    event_names = [event["type"] for event in events]
+    done_event = next(event for event in events if event["type"] == "done" and event["agent_kind"] == "primary")
+
+    assert "reasoning_delta" in event_names
+    assert [item["kind"] for item in done_event["display_parts"]] == ["reasoning", "assistant_text"]
+    assert done_event["display_parts"][0]["text"] == "先分析上下文"
+    assert done_event["display_parts"][1]["text"] == "最终回答"
+
+
 def test_run_session_stream_events_should_emit_tool_events(monkeypatch):
     call_state = {"count": 0}
 
@@ -1349,6 +1434,37 @@ def test_merge_display_parts_with_message_should_not_append_fallback_when_stream
     assert merged == display_parts
 
 
+def test_merge_display_parts_with_message_should_not_duplicate_reasoning_fallback():
+    assistant = create_message("assistant", "s_display_reasoning", status="completed")
+    reasoning_part = append_reasoning_part(assistant, "先分析")
+    reasoning_part["created_at"] = "2026-03-14T00:00:00+00:00"
+    assistant["info"]["agent"] = "build"
+
+    display_parts = [
+        {
+            "id": "disp_reasoning_1",
+            "kind": "reasoning",
+            "title": "build 思考",
+            "detail": "",
+            "text": "先分析",
+            "created_at": "2026-03-14T00:00:00+00:00",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "",
+            "tool_call_id": "",
+        }
+    ]
+
+    merged = session_module._merge_display_parts_with_message(display_parts, assistant)
+
+    assert merged == display_parts
+
+
 def test_run_session_should_remember_explicit_provider_and_model(monkeypatch):
     configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
     clear_session_memory("s_provider_memory")
@@ -1697,7 +1813,7 @@ def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
         assert config.provider == "qwen"
         assert config.vendor == "qwen"
         assert config.model == "qwen3-coder-next"
-        assert config.api_mode == "responses"
+        assert config.api_mode == "chat_completions"
         assert config.base_url == "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
         assert config.timeout_seconds == 60
     finally:
@@ -1886,6 +2002,7 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.file_extraction_default.allowed_extensions == (".pdf",)
         assert settings.file_extraction_default.cleanup_mode == "async_delete"
         assert settings.file_extraction_vendors == {}
+        assert settings.agent_loop.max_rounds == 8
     finally:
         clear_runtime_settings_cache()
 
@@ -1987,6 +2104,29 @@ def test_get_project_runtime_settings_should_read_file_extraction_config(tmp_pat
         clear_runtime_settings_cache()
 
 
+def test_get_project_runtime_settings_should_read_agent_loop_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "agent_loop": {
+            "max_rounds": 12
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.agent_loop.max_rounds == 12
+        assert resolve_agent_loop_settings().max_rounds == 12
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_resolve_file_extraction_settings_should_merge_vendor_override(tmp_path, monkeypatch):
     config_path = tmp_path / "project_runtime.json"
     config_path.write_text(
@@ -2043,6 +2183,30 @@ def test_get_project_runtime_settings_should_reject_negative_keep_recent(tmp_pat
         raise AssertionError("期望非法 keep_recent 配置抛出异常")
     except ValueError as exc:
         assert "tool_result_keep_recent" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_non_positive_max_rounds(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "agent_loop": {
+            "max_rounds": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 max_rounds 配置抛出异常")
+    except ValueError as exc:
+        assert "max_rounds" in str(exc)
     finally:
         clear_runtime_settings_cache()
 
