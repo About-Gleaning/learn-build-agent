@@ -833,6 +833,7 @@ def test_run_session_should_expose_websearch_to_build_agent(monkeypatch):
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         del messages, max_tokens, hooks, llm_config
         assert "websearch" in _tool_names(tools)
+        assert "glob" in _tool_names(tools)
         assistant = create_message("assistant", "s_build_websearch", status="completed")
         append_text_part(assistant, "ok")
         return assistant
@@ -848,6 +849,7 @@ def test_run_session_should_expose_websearch_to_plan_agent(monkeypatch):
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         del messages, max_tokens, hooks, llm_config
         assert "websearch" in _tool_names(tools)
+        assert "glob" in _tool_names(tools)
         assistant = create_message("assistant", "s_plan_websearch", status="completed")
         append_text_part(assistant, "ok")
         return assistant
@@ -863,6 +865,7 @@ def test_subagent_loop_should_expose_websearch_to_explore_agent(monkeypatch):
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         del messages, max_tokens, hooks, llm_config
         assert "websearch" in _tool_names(tools)
+        assert "glob" in _tool_names(tools)
         assistant = create_message("assistant", "s_explore_websearch", status="completed")
         append_text_part(assistant, "ok")
         return assistant
@@ -904,6 +907,39 @@ def test_run_session_should_execute_websearch_tool(monkeypatch):
     result = run_session("执行 websearch", session_id="s_run_websearch")
 
     assert "搜索成功:python agent" in get_message_text(result)
+
+
+def test_run_session_should_execute_glob_tool(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_run_glob(pattern, path=None):
+        return {
+            "title": "src",
+            "output": f"匹配成功:{pattern}:{path}",
+            "metadata": {"status": "completed", "count": 1, "truncated": False},
+        }
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_glob",
+                name="glob",
+                arguments='{"pattern":"src/**/*.py","path":"src"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.run_glob", fake_run_glob)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("执行 glob", session_id="s_run_glob")
+
+    assert "匹配成功:src/**/*.py:src" in get_message_text(result)
 
 
 def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch, tmp_path):

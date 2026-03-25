@@ -4,6 +4,7 @@ from pathlib import Path
 from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path, build_session_storage_name, get_workspace
 from .handlers import build_tool_failure, build_tool_success
+from .path_utils import resolve_workspace_path
 
 MAX_INLINE_PDF_BYTES = 50 * 1024 * 1024
 EMPTY_FILE_OUTPUT = "文件存在，但内容为空。"
@@ -41,10 +42,10 @@ def resolve_readable_file_path(file_path: str) -> Path:
         return target
     if target.is_relative_to(workspace.runtime_home):
         raise ValueError(f"read_file 路径超出允许范围: {file_path}")
-    if target.is_relative_to(workspace.root):
-        return target
-
-    raise ValueError(f"read_file 路径超出允许范围: {file_path}")
+    try:
+        return resolve_workspace_path(file_path)
+    except ValueError as exc:
+        raise ValueError(f"read_file 路径超出允许范围: {file_path}") from exc
 
 
 def run_read(file_path: str, limit: int | None = None, offset: int = 0) -> dict[str, object]:

@@ -3,7 +3,7 @@ from typing import Any
 
 from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path
-from ..runtime.workspace import get_workspace
+from .path_utils import resolve_workspace_path
 
 
 def build_tool_success(output: str, **metadata: Any) -> dict[str, Any]:
@@ -30,13 +30,15 @@ def build_tool_failure(output: str, *, error_code: str, **metadata: Any) -> dict
 
 
 def safe_path(path_str: str) -> Path:
-    workspace_root = get_workspace().root
     plan_path = build_plan_storage_path(get_session_id())
     raw_path = Path(path_str).expanduser()
-    path = raw_path.resolve() if raw_path.is_absolute() else (workspace_root / path_str).resolve()
-    if not path.is_relative_to(workspace_root) and path != plan_path:
-        raise ValueError(f"Path escapes workspace: {path_str}")
-    return path
+    if raw_path.is_absolute() and raw_path.resolve() == plan_path:
+        return plan_path
+    try:
+        return resolve_workspace_path(path_str)
+    except ValueError as exc:
+        raise ValueError(f"Path escapes workspace: {path_str}") from exc
+
 
 def is_allowed_plan_write_path(path: str) -> bool:
     try:

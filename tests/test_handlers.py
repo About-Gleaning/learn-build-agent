@@ -1,3 +1,4 @@
+import os
 import base64
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from agent.tools.bash_tool import (
     run_bash,
     validate_readonly_bash,
 )
+from agent.tools.glob_tool import MAX_GLOB_RESULTS, resolve_glob_search_path, run_glob
 from agent.tools.handlers import (
     build_plan_placeholder_path,
     build_tool_failure,
@@ -258,6 +260,100 @@ def test_resolve_bash_workdir_should_reject_file_path(tmp_path):
 
     with pytest.raises(NotADirectoryError, match="workdir 不是目录"):
         resolve_bash_workdir("sample.txt")
+
+
+def test_resolve_glob_search_path_should_default_to_workspace_root(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    assert resolve_glob_search_path() == tmp_path.resolve()
+
+
+def test_run_glob_should_return_no_files_found_when_empty(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_glob("**/*.py")
+
+    assert result["title"] == "."
+    assert result["output"] == "No files found"
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["count"] == 0
+    assert result["metadata"]["truncated"] is False
+
+
+def test_run_glob_should_sort_files_by_mtime_desc_and_filter_directories(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    src_dir = tmp_path / "src"
+    nested_dir = src_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    old_file = src_dir / "old.py"
+    new_file = nested_dir / "new.py"
+    old_file.write_text("old", encoding="utf-8")
+    new_file.write_text("new", encoding="utf-8")
+    os.utime(old_file, (1_700_000_000, 1_700_000_000))
+    os.utime(new_file, (1_700_000_100, 1_700_000_100))
+
+    result = run_glob("**/*", "src")
+
+    assert result["title"] == "src"
+    assert result["metadata"]["count"] == 2
+    assert result["metadata"]["truncated"] is False
+    assert result["output"].splitlines() == [str(new_file.resolve()), str(old_file.resolve())]
+
+
+def test_run_glob_should_reject_path_outside_workspace(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_glob("**/*.py", "/tmp")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "glob_path_forbidden"
+
+
+def test_run_glob_should_reject_missing_directory(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_glob("**/*.py", "missing")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "glob_path_not_found"
+
+
+def test_run_glob_should_reject_non_directory_path(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    file_path = tmp_path / "demo.txt"
+    file_path.write_text("demo", encoding="utf-8")
+
+    result = run_glob("**/*.py", "demo.txt")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "glob_path_not_directory"
+
+
+def test_run_glob_should_truncate_to_latest_limit(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    for index in range(MAX_GLOB_RESULTS + 5):
+        file_path = tmp_path / f"file_{index:03d}.py"
+        file_path.write_text(str(index), encoding="utf-8")
+        timestamp = 1_700_000_000 + index
+        os.utime(file_path, (timestamp, timestamp))
+
+    result = run_glob("*.py")
+    output_lines = result["output"].splitlines()
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["count"] == MAX_GLOB_RESULTS
+    assert result["metadata"]["truncated"] is True
+    assert output_lines[0].endswith(f"file_{MAX_GLOB_RESULTS + 4:03d}.py")
+    assert output_lines[MAX_GLOB_RESULTS - 1].endswith("file_005.py")
+    assert output_lines[-1] == "... truncated, omitted 5 older matches"
 
 
 def test_is_allowed_plan_write_path():

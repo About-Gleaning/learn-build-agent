@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..runtime.workspace import get_workspace
+from .path_utils import resolve_workspace_directory
 
 DANGEROUS_PATTERNS = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
 DEFAULT_TIMEOUT = 120000
@@ -230,19 +230,14 @@ def _normalize_timeout(timeout: int | float | None) -> int:
 
 
 def resolve_bash_workdir(workdir: str | None) -> Path:
-    workspace_root = get_workspace().root
-    if workdir is None:
-        return workspace_root
-
-    raw_path = Path(workdir).expanduser()
-    target = raw_path.resolve() if raw_path.is_absolute() else (workspace_root / raw_path).resolve()
-    if not target.is_relative_to(workspace_root):
-        raise ValueError(f"workdir 超出工作区范围: {workdir}")
-    if not target.exists():
-        raise FileNotFoundError(f"workdir 不存在: {workdir}")
-    if not target.is_dir():
-        raise NotADirectoryError(f"workdir 不是目录: {workdir}")
-    return target
+    try:
+        return resolve_workspace_directory(workdir)
+    except ValueError as exc:
+        raise ValueError(f"workdir 超出工作区范围: {workdir}") from exc
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"workdir 不存在: {workdir}") from exc
+    except NotADirectoryError as exc:
+        raise NotADirectoryError(f"workdir 不是目录: {workdir}") from exc
 
 
 def _wrap_bash_command(command: str, marker: str) -> str:

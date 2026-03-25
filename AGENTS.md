@@ -25,6 +25,8 @@
 - `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
 - `src/agent/tools/`：工具分模块实现（如 `handlers.py`、`read_file_tool.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
+- `src/agent/tools/glob_tool.py`：glob 工具实现与按修改时间倒序的文件搜索。
+- `src/agent/tools/path_utils.py`：工具公共路径解析与工作区目录校验。
 - `src/agent/tools/task.txt`：`task` 工具描述模板，使用 `{agents}` 占位注入 subagent 列表。
 - `src/agent/core/`：消息模型、上下文与通用 HookDispatcher。
 - `src/agent/web/`：Web API 与请求/响应模型。
@@ -36,10 +38,12 @@
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
 - `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口；协议级转换统一收敛在 `adapters/llm/protocols.py`，厂商差异统一收敛在 `adapters/llm/vendors.py`，禁止继续把 `qwen` / `kimi` 等厂商分支散落回 `client.py` 或 `runtime/session.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
-- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，`glob` 放 `tools/glob_tool.py`，路径解析公共逻辑放 `tools/path_utils.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
+- `glob` 的正式参数统一为 `pattern` 与可选 `path`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件，按文件修改时间倒序排列，最多返回 `100` 条。
 - `read_file` 的正式参数统一为 `file_path`，且必须使用绝对路径；允许读取的范围仅限当前工作区，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件，禁止跨 session 读取其他运行态数据。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
+- 很多工具都会验证工作路径是否合法；相对路径解析、工作区越界校验、目录存在性校验等公共逻辑必须统一收敛到 `tools/path_utils.py`，禁止继续在各工具模块重复实现。
 - plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`，plan 模式下仅允许写入该文件。
 - 会话运行态数据写入 `~/.my-agent/workspaces/sessions/`；todo、tool-output 等共享运行态数据按类型聚合写入 `~/.my-agent/workspaces/todo/<session_id>.json` 与 `~/.my-agent/workspaces/tool-output/<session_id>/`，禁止继续写回仓库内 `src/storage/*`。
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
@@ -117,6 +121,7 @@
 
 ## 变更记录
 
+- 2026-03-25：新增 `src/agent/tools/glob_tool.py` 与 `glob` 工具，支持在工作区内按 glob 模式搜索普通文件、按修改时间倒序返回并最多截断 100 条；同时新增 `src/agent/tools/path_utils.py`，统一收敛工作区路径解析与目录校验逻辑，复用到 `bash` 与文件工具。
 - 2026-03-25：将 `read_file` 从 `handlers.py` 拆分到独立 `src/agent/tools/read_file_tool.py`，正式参数统一为 `file_path` 且仅支持绝对路径；同时新增当前 session 运行态白名单，允许读取当前 session 的 `plan`、`tool-output` 与 `sessions` 文件，并同步收敛工具描述、Schema 与测试。
 - 2026-03-23：修复 `bash` 工具链路的 3 个问题：`PersistentBashSession` 读取输出时改为增量查找 marker，避免大输出场景反复拼接全量缓冲区导致性能退化；`specs.py` 在构建 bash 工具描述时补齐 `bash.txt` 中 `${directory}`、`${maxLines}`、`${maxBytes}` 的实际替换；`session.py` 对非法 `timeout` 参数新增结构化失败返回 `bash_timeout_invalid`，不再落成泛化 `execution_error`。
 - 2026-03-23：`bash` 工具改为“单次调用内持久、调用结束即销毁”的持久 bash shell；同一次调用中的多步命令共享目录与环境变量状态，不再跨调用复用 shell，同时移除工具层固定字符截断，改为复用运行时统一长输出落盘链路，保持与 `src/agent/tools/bash.txt` 文档一致。

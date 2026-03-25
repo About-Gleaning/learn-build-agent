@@ -18,6 +18,8 @@ WEBSEARCH_TOOL_DESCRIPTION = WEBSEARCH_DESC_FILE.read_text().strip()
 BASH_DESC_FILE = Path(__file__).with_name("bash.txt")
 READ_FILE_DESC_FILE = Path(__file__).with_name("read_file.txt")
 READ_FILE_TOOL_DESCRIPTION = READ_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
+GLOB_DESC_FILE = Path(__file__).with_name("glob.txt")
+GLOB_TOOL_DESCRIPTION = GLOB_DESC_FILE.read_text(encoding="utf-8").strip()
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -121,6 +123,27 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                         },
                     },
                     "required": ["command", "description"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": GLOB_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "glob 匹配模式，例如 **/*.py",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "可选，指定从哪个目录开始搜索；支持相对路径",
+                        },
+                    },
+                    "required": ["pattern"],
                 },
             },
         },
