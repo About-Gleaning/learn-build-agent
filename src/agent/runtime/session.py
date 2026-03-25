@@ -30,6 +30,7 @@ from ..core.message import (
 )
 from ..runtime.agents import get_agent
 from ..tools.bash_tool import _normalize_timeout, resolve_bash_workdir, run_bash, validate_readonly_bash
+from ..tools.grep_tool import run_grep
 from ..tools.glob_tool import run_glob
 from ..skills.runtime import SkillRegistry
 from ..tools.handlers import (
@@ -2000,6 +2001,7 @@ def _build_tool_handlers(
     return {
         "bash": lambda **kw: _run_mode_aware_bash(**kw),
         "glob": lambda **kw: run_glob(kw["pattern"], kw.get("path")),
+        "grep": lambda **kw: run_grep(kw["pattern"], kw.get("path"), kw.get("include")),
         "read_file": lambda **kw: run_read(
             kw.get("file_path") or kw.get("path") or kw["filePath"],
             kw.get("limit"),

@@ -12,6 +12,7 @@ from agent.tools.bash_tool import (
     run_bash,
     validate_readonly_bash,
 )
+from agent.tools.grep_tool import MAX_GREP_RESULTS, resolve_grep_search_path, run_grep
 from agent.tools.glob_tool import MAX_GLOB_RESULTS, resolve_glob_search_path, run_glob
 from agent.tools.handlers import (
     build_plan_placeholder_path,
@@ -354,6 +355,129 @@ def test_run_glob_should_truncate_to_latest_limit(tmp_path):
     assert output_lines[0].endswith(f"file_{MAX_GLOB_RESULTS + 4:03d}.py")
     assert output_lines[MAX_GLOB_RESULTS - 1].endswith("file_005.py")
     assert output_lines[-1] == "... truncated, omitted 5 older matches"
+
+
+def test_resolve_grep_search_path_should_default_to_workspace_root(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    assert resolve_grep_search_path() == tmp_path.resolve()
+
+
+def test_run_grep_should_return_no_matches_when_empty(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    (tmp_path / "demo.py").write_text("print('hello')\n", encoding="utf-8")
+
+    result = run_grep("UserService")
+
+    assert result["title"] == "."
+    assert result["output"] == "No matches found"
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["count"] == 0
+    assert result["metadata"]["truncated"] is False
+
+
+def test_run_grep_should_sort_by_file_mtime_then_line_number(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    old_file = src_dir / "old.py"
+    new_file = src_dir / "new.py"
+    old_file.write_text("target old one\ntarget old two\n", encoding="utf-8")
+    new_file.write_text("target new one\ntarget new two\n", encoding="utf-8")
+    os.utime(old_file, (1_700_000_000, 1_700_000_000))
+    os.utime(new_file, (1_700_000_100, 1_700_000_100))
+
+    result = run_grep("target", "src")
+
+    assert result["title"] == "src"
+    assert result["metadata"]["count"] == 4
+    assert result["metadata"]["truncated"] is False
+    assert result["output"].splitlines() == [
+        f"{new_file.resolve()}:1:target new one",
+        f"{new_file.resolve()}:2:target new two",
+        f"{old_file.resolve()}:1:target old one",
+        f"{old_file.resolve()}:2:target old two",
+    ]
+
+
+def test_run_grep_should_support_include_filters(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    (tmp_path / "a.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("needle\n", encoding="utf-8")
+
+    result = run_grep("needle", include=["*.py"])
+
+    assert result["metadata"]["count"] == 1
+    assert result["metadata"]["include"] == ["*.py"]
+    assert str((tmp_path / "a.py").resolve()) in result["output"]
+    assert str((tmp_path / "b.txt").resolve()) not in result["output"]
+
+
+def test_run_grep_should_reject_invalid_include_type(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_grep("needle", include="*.py")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "grep_pattern_invalid"
+
+
+def test_run_grep_should_reject_path_outside_workspace(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_grep("needle", "/tmp")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "grep_path_forbidden"
+
+
+def test_run_grep_should_reject_missing_directory(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_grep("needle", "missing")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "grep_path_not_found"
+
+
+def test_run_grep_should_reject_non_directory_path(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    file_path = tmp_path / "demo.txt"
+    file_path.write_text("needle\n", encoding="utf-8")
+
+    result = run_grep("needle", "demo.txt")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "grep_path_not_directory"
+
+
+def test_run_grep_should_truncate_to_latest_limit(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    for index in range(MAX_GREP_RESULTS + 5):
+        file_path = tmp_path / f"file_{index:03d}.py"
+        file_path.write_text("needle\n", encoding="utf-8")
+        timestamp = 1_700_000_000 + index
+        os.utime(file_path, (timestamp, timestamp))
+
+    result = run_grep("needle")
+    output_lines = result["output"].splitlines()
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["count"] == MAX_GREP_RESULTS
+    assert result["metadata"]["truncated"] is True
+    assert output_lines[0].endswith(f"file_{MAX_GREP_RESULTS + 4:03d}.py:1:needle")
+    assert output_lines[MAX_GREP_RESULTS - 1].endswith("file_005.py:1:needle")
+    assert output_lines[-1] == "... truncated, omitted 5 additional matches"
 
 
 def test_is_allowed_plan_write_path():

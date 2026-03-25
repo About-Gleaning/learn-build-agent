@@ -942,6 +942,39 @@ def test_run_session_should_execute_glob_tool(monkeypatch):
     assert "匹配成功:src/**/*.py:src" in get_message_text(result)
 
 
+def test_run_session_should_execute_grep_tool(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_run_grep(pattern, path=None, include=None):
+        return {
+            "title": "src",
+            "output": f"搜索成功:{pattern}:{path}:{include}",
+            "metadata": {"status": "completed", "count": 1, "truncated": False},
+        }
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_grep",
+                name="grep",
+                arguments='{"pattern":"target","path":"src","include":["*.py"]}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.run_grep", fake_run_grep)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("执行 grep", session_id="s_run_grep")
+
+    assert "搜索成功:target:src:['*.py']" in get_message_text(result)
+
+
 def test_run_session_should_truncate_tool_output_with_task_guidance(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)

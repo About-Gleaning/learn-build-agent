@@ -1153,6 +1153,8 @@ def test_qwen_responses_adapter_should_omit_parameters_for_no_arg_agent_tools():
     }
     assert tools_by_name["glob"]["parameters"]["required"] == ["pattern"]
     assert "path" in tools_by_name["glob"]["parameters"]["properties"]
+    assert tools_by_name["grep"]["parameters"]["required"] == ["pattern"]
+    assert "include" in tools_by_name["grep"]["parameters"]["properties"]
     assert tools_by_name["read_file"]["parameters"]["required"] == ["file_path"]
     assert "file_path" in tools_by_name["read_file"]["parameters"]["properties"]
     assert tools_by_name["task"]["parameters"]["required"] == ["prompt"]

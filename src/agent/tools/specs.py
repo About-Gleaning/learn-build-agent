@@ -20,6 +20,8 @@ READ_FILE_DESC_FILE = Path(__file__).with_name("read_file.txt")
 READ_FILE_TOOL_DESCRIPTION = READ_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 GLOB_DESC_FILE = Path(__file__).with_name("glob.txt")
 GLOB_TOOL_DESCRIPTION = GLOB_DESC_FILE.read_text(encoding="utf-8").strip()
+GREP_DESC_FILE = Path(__file__).with_name("grep.txt")
+GREP_TOOL_DESCRIPTION = GREP_DESC_FILE.read_text(encoding="utf-8").strip()
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -141,6 +143,34 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                         "path": {
                             "type": "string",
                             "description": "可选，指定从哪个目录开始搜索；支持相对路径",
+                        },
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": GREP_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "要搜索的正则表达式",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "可选，指定从哪个目录开始搜索；支持相对路径",
+                        },
+                        "include": {
+                            "type": "array",
+                            "description": "可选，限制只搜索哪些文件，例如 ['*.py']",
+                            "items": {
+                                "type": "string",
+                            },
                         },
                     },
                     "required": ["pattern"],
