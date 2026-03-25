@@ -39,9 +39,9 @@ from ..tools.handlers import (
     run_edit,
     run_plan_enter,
     run_plan_exit,
-    run_read,
     run_write,
 )
+from ..tools.read_file_tool import run_read
 from ..tools.specs import build_agent_tools, build_base_tools
 from ..tools.todo_manager import TodoManager
 from ..tools.webfetch import webfetch
@@ -1998,7 +1998,11 @@ def _build_tool_handlers(
 
     return {
         "bash": lambda **kw: _run_mode_aware_bash(**kw),
-        "read_file": lambda **kw: run_read(kw["path"], kw.get("limit"), kw.get("offset", 0)),
+        "read_file": lambda **kw: run_read(
+            kw.get("file_path") or kw.get("path") or kw["filePath"],
+            kw.get("limit"),
+            kw.get("offset", 0),
+        ),
         "write_file": lambda **kw: _run_mode_aware_write(kw["path"], kw["content"]),
         "edit_file": lambda **kw: _run_mode_aware_edit(kw["path"], kw["old_text"], kw["new_text"]),
         "webfetch": lambda **kw: webfetch(kw),

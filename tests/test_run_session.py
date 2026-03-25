@@ -14,7 +14,8 @@ from agent.config.settings import (
     resolve_llm_config,
 )
 from agent.runtime.workspace import build_plan_storage_path, configure_workspace, get_workspace
-from agent.tools.handlers import build_plan_placeholder_path, run_read
+from agent.tools.handlers import build_plan_placeholder_path
+from agent.tools.read_file_tool import run_read
 from agent.tools.specs import build_base_tools, build_task_tool
 from agent.runtime.session import (
     build_system_prompt,
@@ -1037,7 +1038,7 @@ def test_run_read_should_support_offset_and_limit(monkeypatch, tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
     configure_workspace(tmp_path)
-    result = run_read("sample.txt", limit=2, offset=1)
+    result = run_read(str(file_path), limit=2, offset=1)
 
     assert result["metadata"]["status"] == "completed"
     assert result["output"] == "b\nc\n... (1 more lines)"
@@ -1060,7 +1061,7 @@ def test_build_tool_message_should_backfill_attachment_runtime_fields():
         "s_pdf",
         tool_call_id="call_pdf",
         tool_name="read_file",
-        arguments='{"path":"demo.pdf"}',
+        arguments='{"file_path":"demo.pdf"}',
         result=result,
         agent="build",
         turn_started_at="2026-03-20T00:00:00+00:00",
@@ -1923,7 +1924,7 @@ def test_run_session_should_allow_read_file_with_initialized_tool_session(monkey
                 assistant,
                 tool_call_id="call_read",
                 name="read_file",
-                arguments=f'{{"path":"{target_file}"}}',
+                arguments=f'{{"file_path":"{target_file}"}}',
             )
         else:
             append_text_part(assistant, "done")
@@ -1949,6 +1950,50 @@ def test_run_session_should_allow_read_file_with_initialized_tool_session(monkey
     assert get_message_text(result) == "done"
     assert any("hello" in output for output in tool_outputs)
     assert all("session_id 尚未初始化" not in output for output in tool_outputs)
+
+
+def test_run_session_should_keep_empty_file_read_as_completed_tool_result(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_read_empty_file_session")
+    target_file = tmp_path / "empty.txt"
+    target_file.write_text("", encoding="utf-8")
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_read_empty",
+                name="read_file",
+                arguments=f'{{"file_path":"{target_file}"}}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("测试 read_file 空文件 session", session_id="s_read_empty_file_session")
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_read_empty_file_session")
+    tool_outputs = [
+        part.get("state", {}).get("output", {})
+        for message in history_messages
+        for part in message["parts"]
+        if part.get("type") == "tool" and isinstance(part.get("state"), dict)
+    ]
+
+    assert get_message_text(result) == "文件存在，但内容为空。"
+    assert any(output.get("output") == "文件存在，但内容为空。" for output in tool_outputs)
+    assert any(
+        isinstance(output.get("metadata"), dict)
+        and output["metadata"].get("status") == "completed"
+        and output["metadata"].get("is_empty") is True
+        for output in tool_outputs
+    )
 
 
 def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):

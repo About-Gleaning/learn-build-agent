@@ -16,6 +16,8 @@ WEBFETCH_TOOL_DESCRIPTION = WEBFETCH_DESC_FILE.read_text().strip()
 WEBSEARCH_DESC_FILE = Path(__file__).with_name("websearch.txt")
 WEBSEARCH_TOOL_DESCRIPTION = WEBSEARCH_DESC_FILE.read_text().strip()
 BASH_DESC_FILE = Path(__file__).with_name("bash.txt")
+READ_FILE_DESC_FILE = Path(__file__).with_name("read_file.txt")
+READ_FILE_TOOL_DESCRIPTION = READ_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -126,15 +128,24 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read file contents. Supports offset and limit for chunked reading. Reading a PDF returns a PDF attachment for Responses-compatible providers.",
+                "description": READ_FILE_TOOL_DESCRIPTION,
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
-                        "limit": {"type": "integer"},
-                        "offset": {"type": "integer"},
+                        "file_path": {
+                            "type": "string",
+                            "description": "读取文件的绝对路径",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "可选，最多返回多少行文本",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "可选，从第几行开始读取（从 0 开始）",
+                        },
                     },
-                    "required": ["path"],
+                    "required": ["file_path"],
                 },
             },
         },

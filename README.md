@@ -44,6 +44,7 @@ src/
     tools/
       bash_tool.py                # bash 工具执行与 plan 模式只读校验
       handlers.py                 # 通用工具业务实现与结构化结果构造
+      read_file_tool.py           # read_file 工具实现与读取白名单校验
       specs.py                    # 工具协议定义
       todo_manager.py             # todo 状态管理与持久化
       task.txt                    # task 工具描述模板（含 {agents} 占位）
@@ -83,6 +84,7 @@ pnpm dev
 - Web / 运行时正式入口必须显式携带 `session_id`；CLI 与测试辅助入口会在最外层自动生成随机 `session_id`，运行时内部不再回退到默认会话。
 - 工作区内的 `AGENTS.md` 会自动追加到系统提示词中。
 - 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
+- `read_file` 的正式参数为 `file_path`，且必须传绝对路径；同时仅允许读取当前工作区内文件，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件。
 - 运行态数据默认落到 `~/.my-agent/`：
   - 会话历史：`~/.my-agent/workspaces/sessions/`
   - todo：`~/.my-agent/workspaces/todo/<session_id>.json`
@@ -99,7 +101,7 @@ pnpm dev
 - Web 端“确认切换”必须走流式接口继续执行后续会话，禁止退回阻塞式普通 POST，否则前端会丢失增量事件并表现为无响应。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 请求停止当前会话；运行时按 `session_id` 记录停止标记，并在 loop 顶部及关键边界协作式收口，统一返回 `interrupted/cancelled`。
 - `runtime/agents.py` 统一维护所有 agent 的元信息；每个 agent 必须声明 `model`（`primary` 或 `subagent`）与 `description`。
-- 工具实现统一放在 `tools/handlers.py`，工具协议统一放在 `tools/specs.py`；通用文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
+- 工具实现统一放在 `tools/` 目录内分模块维护，工具协议统一放在 `tools/specs.py`；其中 `read_file` 独立收敛到 `tools/read_file_tool.py`，文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
 - 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
 - 子 Agent 统一通过 `task` 工具路由；`task` 可见的 subagent 列表必须来自 `runtime/agents.py`，不在会话层硬编码分支逻辑。
 - Web 时间线按 `session` 维度累计展示，前端禁止在新一轮提交时清空既有执行轨迹。
@@ -119,7 +121,7 @@ pnpm dev
 
 ### 1) 新增工具
 
-1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
+1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，`read_file` 放在 `src/agent/tools/read_file_tool.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
 2. 在 `src/agent/tools/specs.py` 增加或调整 JSON Schema；若工具描述较长，优先拆到独立 `.txt` 模板文件。
 3. 在 `src/agent/runtime/session.py` 的工具映射中注册（仅路由）。
 4. 工具返回优先保持结构化结果，至少稳定返回 `output` 与 `metadata.status`，避免继续扩散 `"Error: ..."` 裸字符串协议。
@@ -211,6 +213,7 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-25：将 `read_file` 从 `handlers.py` 拆分到独立 `src/agent/tools/read_file_tool.py`，正式参数统一为 `file_path`，仅支持绝对路径；同时新增当前 session 运行态白名单，允许读取当前 session 的 `plan`、`tool-output` 与 `sessions` 文件，并同步收敛工具描述与测试。
 - 2026-03-23：`bash` 工具改为“单次调用内持久、调用结束即销毁”的持久 bash shell；同一次调用中的多步命令共享目录与环境变量状态，不再跨调用复用 shell，同时移除工具层固定字符截断，改为复用运行时统一长输出落盘链路。
 - 2026-03-23：增强 `llm.response` 日志，统一输出 `finish_reason`、响应文本、思考内容与工具调用摘要，避免仅有思考或仅有工具调用时日志出现空 `message=` 导致无法排查。
 - 2026-03-23：重构 `bash` 工具协议，新增必填 `description` 与可选 `timeout`、`workdir` 入参，默认超时收敛为 `DEFAULT_TIMEOUT=120000ms`，默认执行目录固定为当前工作区根目录，并将工具 description 拆分到独立 `src/agent/tools/bash.txt` 模板文件。

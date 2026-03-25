@@ -19,11 +19,17 @@ from agent.tools.handlers import (
     run_edit,
     run_plan_enter,
     run_plan_exit,
-    run_read,
     run_write,
 )
+from agent.tools.read_file_tool import resolve_readable_file_path, run_read
 from agent.tools.todo_manager import TodoManager
-from agent.runtime.workspace import build_plan_storage_path, build_todo_storage_path, configure_workspace, get_workspace
+from agent.runtime.workspace import (
+    build_plan_storage_path,
+    build_session_storage_name,
+    build_todo_storage_path,
+    configure_workspace,
+    get_workspace,
+)
 
 
 def _set_test_session(session_id: str = "test_handler_session") -> str:
@@ -286,11 +292,26 @@ def test_run_read_should_return_structured_success(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
     _set_test_session()
 
-    result = run_read("sample.txt", limit=2, offset=1)
+    result = run_read(str(file_path), limit=2, offset=1)
 
     assert result["metadata"]["status"] == "completed"
     assert result["output"] == "b\nc\n... (1 more lines)"
-    assert result["metadata"]["path"] == "sample.txt"
+    assert result["metadata"]["file_path"] == str(file_path.resolve())
+    assert result["metadata"]["is_empty"] is False
+
+
+def test_run_read_should_return_explicit_success_for_empty_file(tmp_path):
+    file_path = tmp_path / "empty.txt"
+    file_path.write_text("", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_read(str(file_path))
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "文件存在，但内容为空。"
+    assert result["metadata"]["file_path"] == str(file_path.resolve())
+    assert result["metadata"]["is_empty"] is True
 
 
 def test_run_read_should_return_pdf_attachment(monkeypatch, tmp_path):
@@ -300,7 +321,7 @@ def test_run_read_should_return_pdf_attachment(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
     _set_test_session()
 
-    result = run_read("demo.pdf", limit=2, offset=1)
+    result = run_read(str(pdf_path), limit=2, offset=1)
 
     assert result["metadata"]["status"] == "completed"
     assert result["output"] == "PDF read successfully"
@@ -318,13 +339,87 @@ def test_run_read_should_fail_when_pdf_file_is_too_large(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
     _set_test_session()
 
-    monkeypatch.setattr("agent.tools.handlers.base64.b64encode", lambda data: b"x" * 10)
+    monkeypatch.setattr("agent.tools.read_file_tool.base64.b64encode", lambda data: b"x" * 10)
     monkeypatch.setattr("pathlib.Path.read_bytes", lambda self: b"x" * (50 * 1024 * 1024))
 
-    result = run_read("too-large.pdf")
+    result = run_read(str(pdf_path))
 
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "pdf_file_too_large"
+
+
+def test_run_read_should_reject_relative_path(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_read("sample.txt")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "read_path_must_be_absolute"
+
+
+def test_run_read_should_allow_current_session_plan_file(tmp_path):
+    configure_workspace(tmp_path)
+    session_id = _set_test_session("session-plan")
+    plan_path = build_plan_storage_path(session_id)
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("plan body", encoding="utf-8")
+
+    result = run_read(str(plan_path))
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "plan body"
+
+
+def test_run_read_should_allow_current_session_tool_output_file(tmp_path):
+    configure_workspace(tmp_path)
+    session_id = _set_test_session("session-tool-output")
+    session_dir = get_workspace().tool_output_root / build_session_storage_name(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    output_file = session_dir / "demo.log"
+    output_file.write_text("tool output", encoding="utf-8")
+
+    result = run_read(str(output_file))
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "tool output"
+
+
+def test_run_read_should_allow_current_session_history_file(tmp_path):
+    configure_workspace(tmp_path)
+    session_id = _set_test_session("session-history")
+    history_path = get_workspace().sessions_dir / build_session_storage_name(session_id, suffix=".json")
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text('{"messages":[]}', encoding="utf-8")
+
+    result = run_read(str(history_path))
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == '{"messages":[]}'
+
+
+def test_run_read_should_reject_other_session_runtime_file(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("session-a")
+    other_history_path = get_workspace().sessions_dir / build_session_storage_name("session-b", suffix=".json")
+    other_history_path.parent.mkdir(parents=True, exist_ok=True)
+    other_history_path.write_text('{"messages":[1]}', encoding="utf-8")
+
+    result = run_read(str(other_history_path))
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "read_path_forbidden"
+
+
+def test_resolve_readable_file_path_should_allow_workspace_absolute_path(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    assert resolve_readable_file_path(str(file_path)) == file_path.resolve()
 
 
 def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
