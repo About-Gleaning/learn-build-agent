@@ -4,6 +4,7 @@ import pytest
 
 import agent.adapters.llm.client as client_module
 import agent.adapters.llm.vendors as vendors_module
+import agent.config.logging_setup as logging_setup_module
 from agent.adapters.llm.client import (
     LLMHook,
     LoggingHook,
@@ -22,6 +23,7 @@ from agent.adapters.llm.vendors import (
     QwenResponsesAdapter,
     build_provider_adapter,
 )
+from agent.config.settings import LoggingSettings
 from agent.config.settings import ResolvedLLMConfig
 from agent.core.message import append_text_part, append_tool_part, create_message
 from agent.core.message import append_reasoning_part, append_tool_call_part, extract_reasoning_content
@@ -1789,6 +1791,30 @@ def test_logging_hook_should_log_text_reasoning_and_tool_calls_together(monkeypa
     assert "reasoning=先确认有哪些待办项。" in caplog.text
     assert "tool_names=todo_read" in caplog.text
     assert 'tool_calls=todo_read[call_1] args={"path":"todo.md"}' in caplog.text
+
+
+def test_logging_hook_should_not_truncate_tool_calls_when_disabled(monkeypatch, caplog):
+    long_arguments = '{"content":"' + ("x" * 1200) + '"}'
+    monkeypatch.setattr(
+        logging_setup_module,
+        "resolve_logging_settings",
+        lambda: LoggingSettings(truncate_enabled=False, truncate_limit=500),
+    )
+    _patch_openai_client(
+        monkeypatch,
+        lambda **kwargs: _build_reasoning_tool_call_response(arguments=long_arguments),
+    )
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(
+            _build_user_message(),
+            tools=[{"type": "function"}],
+            agent="build",
+            llm_config=_build_chat_config(),
+        )
+
+    assert "...<truncated>" not in caplog.text
+    assert f'tool_calls=todo_read[call_1] args={long_arguments}' in caplog.text
 
 
 def test_logging_hook_should_log_reasoning_only_response(monkeypatch, caplog):

@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..runtime.workspace import get_workspace
-from .settings import LOG_LEVEL
+from .settings import LOG_LEVEL, resolve_logging_settings
 
 _LOGGER_INITIALIZED = False
 _DEFAULT_AGENT = "unknown"
@@ -43,9 +43,14 @@ def sanitize_log_text(text: object, limit: int = 500) -> str:
     cleaned = raw_text.replace("\r", "\\r").replace("\n", "\\n")
     for pattern in _SENSITIVE_PATTERNS:
         cleaned = pattern.sub("[REDACTED]", cleaned)
-    if len(cleaned) <= limit:
+    logging_settings = resolve_logging_settings()
+    if not logging_settings.truncate_enabled:
         return cleaned
-    return cleaned[:limit] + "...<truncated>"
+
+    effective_limit = min(logging_settings.truncate_limit, limit)
+    if len(cleaned) <= effective_limit:
+        return cleaned
+    return cleaned[:effective_limit] + "...<truncated>"
 
 
 def build_log_extra(*, agent: str | None = None, model: str | None = None) -> dict[str, str]:

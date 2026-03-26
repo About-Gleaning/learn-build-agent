@@ -181,6 +181,7 @@ pnpm dev
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止在业务代码里继续扩散硬编码常量。
 - 当前 `compaction` 采用 `default + vendors` 结构：优先读取当前模型厂商 `vendor` 的局部覆盖配置，未命中时回退 `default`。
 - 当前 `file_extraction` 也采用 `default + vendors` 结构；本次默认仅开放 `.pdf`，并使用 `cleanup_mode=async_delete` 做远端异步清理。
+- 当前 `logging` 负责日志截断策略；默认 `truncate_enabled=false`，即不截断普通日志文本，但仍保留换行转义与敏感信息脱敏。
 - 当前支持的压缩参数包括：
   - `tool_result_prune_enabled`
   - `tool_result_keep_recent`
@@ -228,10 +229,12 @@ pnpm dev
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
 - `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。
+- 日志是否截断必须走 `project_runtime.json -> logging` 配置，禁止在调用点重新硬编码长度策略；默认不启用截断。
 - plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`；plan 模式下仅允许写入该文件。
 
 ## 变更记录
 
+- 2026-03-26：新增 `project_runtime.logging` 配置，统一控制日志文本是否截断与截断长度；默认关闭截断，仅保留换行转义与敏感信息脱敏，便于排查超长 tool 参数与模型返回内容。
 - 2026-03-26：新增独立 `src/agent/tools/skill_tool.py` 与 `load_skill.txt`，将 `load_skill` 重构为按 `name` 精确加载单个 skill 的独立工具；返回结构统一为 `title/output/metadata(name, dir)`，`output` 仅注入 `Base directory` 与原始 `SKILL.md`，避免模型再用 `glob`/`bash` 搜索 skill 目录。
 - 2026-03-26：新增独立 `src/agent/tools/question_tool.py`，将 `question` 工具从 `handlers.py` 拆分；问题项新增可选 `custom` 字段，默认 `true`，由后端统一自动追加“不是以上任何选项”兜底项，并同步补齐 runtime/Web/schema 透传与测试覆盖。
 - 2026-03-26：新增 `question` 工具与 `src/agent/tools/question.txt`，支持 Agent 在执行过程中发起结构化提问；运行时新增待答问题状态管理、Web 答题/拒绝接口与流式恢复链路，助手消息与 SSE `done` 事件同步透传 `question` 结构，用户拒绝回答时会以“用户拒绝”语义继续后续推理并与普通工具异常区分。

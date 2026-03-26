@@ -41,6 +41,8 @@ DEFAULT_FILE_EXTRACTION_ALLOWED_EXTENSIONS = (".pdf",)
 DEFAULT_FILE_EXTRACTION_CLEANUP_MODE = "async_delete"
 DEFAULT_AGENT_LOOP_MAX_ROUNDS = 8
 DEFAULT_SUBAGENT_LOOP_MAX_ROUNDS = 15
+DEFAULT_LOG_TRUNCATE_ENABLED = False
+DEFAULT_LOG_TRUNCATE_LIMIT = 500
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,7 @@ class ProjectRuntimeSettings:
     file_extraction_vendors: dict[str, "FileExtractionSettings"]
     agent_loop: "AgentLoopSettings"
     subagent_loop: "SubagentLoopSettings"
+    logging: "LoggingSettings"
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,12 @@ class AgentLoopSettings:
 @dataclass(frozen=True)
 class SubagentLoopSettings:
     max_rounds: int = DEFAULT_SUBAGENT_LOOP_MAX_ROUNDS
+
+
+@dataclass(frozen=True)
+class LoggingSettings:
+    truncate_enabled: bool = DEFAULT_LOG_TRUNCATE_ENABLED
+    truncate_limit: int = DEFAULT_LOG_TRUNCATE_LIMIT
 
 
 @dataclass(frozen=True)
@@ -414,6 +423,20 @@ def _load_project_subagent_loop_settings(raw_subagent_loop: Any) -> SubagentLoop
     return SubagentLoopSettings(max_rounds=max_rounds)
 
 
+def _load_project_logging_settings(raw_logging: Any) -> LoggingSettings:
+    if raw_logging is None:
+        return LoggingSettings()
+    if not isinstance(raw_logging, dict):
+        raise ValueError("project_runtime.logging 必须是对象。")
+
+    raw_truncate_enabled = raw_logging.get("truncate_enabled", DEFAULT_LOG_TRUNCATE_ENABLED)
+    truncate_enabled = _parse_bool(raw_truncate_enabled, field_name="logging.truncate_enabled")
+
+    raw_truncate_limit = raw_logging.get("truncate_limit", DEFAULT_LOG_TRUNCATE_LIMIT)
+    truncate_limit = _parse_positive_int(raw_truncate_limit, field_name="logging.truncate_limit")
+    return LoggingSettings(truncate_enabled=truncate_enabled, truncate_limit=truncate_limit)
+
+
 def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
     if not isinstance(raw_providers, dict) or not raw_providers:
         raise ValueError("LLM 配置缺少 providers，且至少要配置一个厂商。")
@@ -507,6 +530,7 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
     file_extraction_default, file_extraction_vendors = _load_project_file_extraction_settings(payload.get("file_extraction"))
     agent_loop = _load_project_agent_loop_settings(payload.get("agent_loop"))
     subagent_loop = _load_project_subagent_loop_settings(payload.get("subagent_loop"))
+    logging_settings = _load_project_logging_settings(payload.get("logging"))
     return ProjectRuntimeSettings(
         compaction_default=compaction_default,
         compaction_vendors=compaction_vendors,
@@ -514,6 +538,7 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
         file_extraction_vendors=file_extraction_vendors,
         agent_loop=agent_loop,
         subagent_loop=subagent_loop,
+        logging=logging_settings,
     )
 
 
@@ -539,6 +564,10 @@ def resolve_agent_loop_settings() -> AgentLoopSettings:
 
 def resolve_subagent_loop_settings() -> SubagentLoopSettings:
     return get_project_runtime_settings().subagent_loop
+
+
+def resolve_logging_settings() -> LoggingSettings:
+    return get_project_runtime_settings().logging
 
 
 def clear_runtime_settings_cache() -> None:

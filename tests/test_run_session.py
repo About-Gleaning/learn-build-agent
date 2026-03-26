@@ -2713,6 +2713,9 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.file_extraction_default.cleanup_mode == "async_delete"
         assert settings.file_extraction_vendors == {}
         assert settings.agent_loop.max_rounds == 8
+        assert settings.subagent_loop.max_rounds == 15
+        assert settings.logging.truncate_enabled is False
+        assert settings.logging.truncate_limit == 500
     finally:
         clear_runtime_settings_cache()
 
@@ -2837,6 +2840,30 @@ def test_get_project_runtime_settings_should_read_agent_loop_config(tmp_path, mo
         clear_runtime_settings_cache()
 
 
+def test_get_project_runtime_settings_should_read_logging_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "truncate_enabled": true,
+            "truncate_limit": 2048
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.logging.truncate_enabled is True
+        assert settings.logging.truncate_limit == 2048
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_resolve_file_extraction_settings_should_merge_vendor_override(tmp_path, monkeypatch):
     config_path = tmp_path / "project_runtime.json"
     config_path.write_text(
@@ -2917,6 +2944,56 @@ def test_get_project_runtime_settings_should_reject_non_positive_max_rounds(tmp_
         raise AssertionError("期望非法 max_rounds 配置抛出异常")
     except ValueError as exc:
         assert "max_rounds" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_invalid_logging_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "truncate_enabled": "yes",
+            "truncate_limit": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.truncate_enabled" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_non_positive_logging_limit(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "truncate_enabled": true,
+            "truncate_limit": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging.truncate_limit 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.truncate_limit" in str(exc)
     finally:
         clear_runtime_settings_cache()
 
