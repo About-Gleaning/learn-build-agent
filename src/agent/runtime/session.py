@@ -30,6 +30,7 @@ from ..core.message import (
 )
 from ..runtime.agents import get_agent
 from ..tools.bash_tool import _normalize_timeout, resolve_bash_workdir, run_bash, validate_readonly_bash
+from ..tools.edit_file_tool import run_edit
 from ..tools.grep_tool import run_grep
 from ..tools.glob_tool import run_glob
 from ..skills.runtime import SkillRegistry
@@ -38,7 +39,6 @@ from ..tools.handlers import (
     build_tool_failure,
     build_tool_success,
     is_allowed_plan_write_path,
-    run_edit,
     run_plan_enter,
     run_plan_exit,
     run_write,
@@ -1971,14 +1971,14 @@ def _build_tool_handlers(
             )
         return run_write(path, content)
 
-    def _run_mode_aware_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
-        if get_mode() == "plan" and not is_allowed_plan_write_path(path):
+    def _run_mode_aware_edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict[str, Any]:
+        if get_mode() == "plan" and not is_allowed_plan_write_path(file_path):
             plan_path = str(build_plan_placeholder_path(session_id))
             return build_tool_failure(
                 f"Error: plan 模式下仅允许编辑 {plan_path} 文件。",
                 error_code="plan_edit_forbidden",
             )
-        return run_edit(path, old_text, new_text)
+        return run_edit(file_path, old_string, new_string, replace_all)
 
     def _run_plan_enter_tool(**kw: Any) -> dict[str, Any]:
         plan_path = str(build_plan_placeholder_path(session_id))
@@ -2008,7 +2008,12 @@ def _build_tool_handlers(
             kw.get("offset", 0),
         ),
         "write_file": lambda **kw: _run_mode_aware_write(kw["path"], kw["content"]),
-        "edit_file": lambda **kw: _run_mode_aware_edit(kw["path"], kw["old_text"], kw["new_text"]),
+        "edit_file": lambda **kw: _run_mode_aware_edit(
+            kw.get("filePath") or kw.get("path") or kw["file_path"],
+            kw.get("oldString") or kw.get("old_text") or kw["old_string"],
+            kw.get("newString") or kw.get("new_text") or kw["new_string"],
+            bool(kw.get("replaceAll", kw.get("replace_all", False))),
+        ),
         "webfetch": lambda **kw: webfetch(kw),
         "websearch": lambda **kw: websearch(kw),
         "todo_write": lambda **kw: TODO.update(kw["todo_list"]),

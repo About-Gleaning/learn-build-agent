@@ -1,0 +1,23 @@
+按给定旧文本，把文件中的内容精确替换成新文本，并返回 diff 与结构化变更摘要。
+
+使用要求：
+- 编辑前，必须先用 `read_file` 读取目标文件；否则会失败。
+- 当前工具会校验“最近一次读取”之后文件是否又被修改过；若文件已变化，必须重新读取后再编辑。
+- `filePath` 支持绝对路径；相对路径会按当前工作区解析。
+- `oldString` 不能为空时，表示查找后替换。
+- `oldString` 为空字符串时，表示把 `newString` 作为整文件内容写入；文件不存在时会新建。
+- `newString` 必须与 `oldString` 不同。
+- `replaceAll` 默认为 `false`，仅允许唯一匹配；设为 `true` 时会替换全部确定命中。
+
+返回结果：
+- `title`：被修改文件路径
+- `output`：执行结果说明
+- `metadata.diff`：统一 diff 文本
+- `metadata.filediff`：结构化变更摘要，包含 `file`、`before`、`after`、`additions`、`deletions`
+- `metadata.diagnostics`：当前固定返回空数组，预留后续接入各语言 LSP
+- `metadata.diagnostics_status`：当前固定为 `not_enabled`
+
+注意：
+- 本工具只适合文本文件，不支持目录或二进制文件。
+- 若匹配不唯一且未开启 `replaceAll`，会直接失败，避免误改。
+- 为降低误伤风险，工具只做保守兜底匹配，不做激进近似替换。

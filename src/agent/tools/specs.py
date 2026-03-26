@@ -22,6 +22,8 @@ GLOB_DESC_FILE = Path(__file__).with_name("glob.txt")
 GLOB_TOOL_DESCRIPTION = GLOB_DESC_FILE.read_text(encoding="utf-8").strip()
 GREP_DESC_FILE = Path(__file__).with_name("grep.txt")
 GREP_TOOL_DESCRIPTION = GREP_DESC_FILE.read_text(encoding="utf-8").strip()
+EDIT_FILE_DESC_FILE = Path(__file__).with_name("edit_file.txt")
+EDIT_FILE_TOOL_DESCRIPTION = EDIT_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -218,15 +220,16 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
             "type": "function",
             "function": {
                 "name": "edit_file",
-                "description": "Replace exact text in file.",
+                "description": EDIT_FILE_TOOL_DESCRIPTION,
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
-                        "old_text": {"type": "string"},
-                        "new_text": {"type": "string"},
+                        "filePath": {"type": "string"},
+                        "oldString": {"type": "string"},
+                        "newString": {"type": "string"},
+                        "replaceAll": {"type": "boolean"},
                     },
-                    "required": ["path", "old_text", "new_text"],
+                    "required": ["filePath", "oldString", "newString"],
                 },
             },
         },

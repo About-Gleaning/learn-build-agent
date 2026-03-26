@@ -58,19 +58,6 @@ def run_write(path: str, content: str) -> dict[str, Any]:
         return build_tool_failure(f"Error: {exc}", error_code="write_failed", error_type=type(exc).__name__)
 
 
-def run_edit(path: str, old_text: str, new_text: str) -> dict[str, Any]:
-    try:
-        target = safe_path(path)
-        content = target.read_text()
-        if old_text not in content:
-            return build_tool_failure(f"Error: Text not found in {path}", error_code="text_not_found")
-
-        target.write_text(content.replace(old_text, new_text, 1))
-        return build_tool_success(f"Edited {path}")
-    except Exception as exc:
-        return build_tool_failure(f"Error: {exc}", error_code="edit_failed", error_type=type(exc).__name__)
-
-
 def build_plan_placeholder_path(session_id: str) -> Path:
     return build_plan_storage_path(session_id)
 

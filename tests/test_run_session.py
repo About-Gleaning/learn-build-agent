@@ -14,6 +14,7 @@ from agent.config.settings import (
     resolve_llm_config,
 )
 from agent.runtime.workspace import build_plan_storage_path, configure_workspace, get_workspace
+from agent.tools.file_edit_state import clear_file_edit_states
 from agent.tools.handlers import build_plan_placeholder_path
 from agent.tools.read_file_tool import run_read
 from agent.tools.specs import build_base_tools, build_task_tool
@@ -76,6 +77,13 @@ def _last_tool_result_metadata(messages):
 
 def _tool_names(tools):
     return [tool["function"]["name"] for tool in tools]
+
+
+@pytest.fixture(autouse=True)
+def _clear_edit_state():
+    clear_file_edit_states()
+    yield
+    clear_file_edit_states()
 
 
 def test_run_session_with_tool_call(monkeypatch):
@@ -581,6 +589,63 @@ def test_run_session_should_fail_when_bash_timeout_is_non_positive():
     assert result["output"] == "Error: timeout 必须大于 0"
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "bash_timeout_invalid"
+
+
+def test_edit_file_tool_schema_should_use_camel_case_and_replace_all():
+    tools = build_base_tools()
+    edit_tool = next(tool for tool in tools if tool["function"]["name"] == "edit_file")
+    properties = edit_tool["function"]["parameters"]["properties"]
+
+    assert "filePath" in properties
+    assert "oldString" in properties
+    assert "newString" in properties
+    assert "replaceAll" in properties
+    assert edit_tool["function"]["parameters"]["required"] == ["filePath", "oldString", "newString"]
+
+
+def test_run_session_should_route_camel_case_edit_file_arguments(monkeypatch):
+    handlers = session_module._build_tool_handlers(
+        session_id="s_edit_file_route",
+        get_mode=lambda: "build",
+        get_latest_model=lambda: "qwen-plus",
+        get_current_runtime=lambda: ResolvedLLMConfig(
+            agent="build",
+            provider="qwen",
+            vendor="qwen",
+            model="qwen3-coder-next",
+            api_mode="responses",
+            base_url="https://example.com",
+            api_key="test",
+            timeout_seconds=60,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_edit(file_path, old_string, new_string, replace_all=False):
+        captured.update(
+            file_path=file_path,
+            old_string=old_string,
+            new_string=new_string,
+            replace_all=replace_all,
+        )
+        return {"output": "ok", "metadata": {"status": "completed"}}
+
+    monkeypatch.setattr(session_module, "run_edit", fake_run_edit)
+
+    result = handlers["edit_file"](
+        filePath="/tmp/demo.py",
+        oldString="old",
+        newString="new",
+        replaceAll=True,
+    )
+
+    assert result["metadata"]["status"] == "completed"
+    assert captured == {
+        "file_path": "/tmp/demo.py",
+        "old_string": "old",
+        "new_string": "new",
+        "replace_all": True,
+    }
 
 
 def test_task_with_unknown_subagent_should_return_error(monkeypatch):

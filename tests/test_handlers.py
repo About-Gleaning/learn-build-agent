@@ -14,12 +14,13 @@ from agent.tools.bash_tool import (
 )
 from agent.tools.grep_tool import MAX_GREP_RESULTS, resolve_grep_search_path, run_grep
 from agent.tools.glob_tool import MAX_GLOB_RESULTS, resolve_glob_search_path, run_glob
+from agent.tools.edit_file_tool import run_edit
+from agent.tools.file_edit_state import clear_file_edit_states
 from agent.tools.handlers import (
     build_plan_placeholder_path,
     build_tool_failure,
     build_tool_success,
     is_allowed_plan_write_path,
-    run_edit,
     run_plan_enter,
     run_plan_exit,
     run_write,
@@ -37,6 +38,13 @@ from agent.runtime.workspace import (
 
 def _set_test_session(session_id: str = "test_handler_session") -> str:
     return set_session_id(session_id)
+
+
+@pytest.fixture(autouse=True)
+def _clear_edit_state():
+    clear_file_edit_states()
+    yield
+    clear_file_edit_states()
 
 
 def test_build_plan_placeholder_path_should_be_absolute():
@@ -653,17 +661,118 @@ def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
 
 
-def test_run_edit_should_return_text_not_found_failure(monkeypatch, tmp_path):
+def test_run_edit_should_require_read_before_edit(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello", encoding="utf-8")
     configure_workspace(tmp_path)
     _set_test_session()
 
+    result = run_edit("sample.txt", "hello", "world")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "edit_read_required"
+
+
+def test_run_edit_should_return_text_not_found_failure(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+
     result = run_edit("sample.txt", "missing", "world")
 
     assert result["metadata"]["status"] == "failed"
-    assert result["metadata"]["error_code"] == "text_not_found"
-    assert "Text not found" in result["output"]
+    assert result["metadata"]["error_code"] == "edit_text_not_found"
+    assert "未在" in result["output"]
+
+
+def test_run_edit_should_succeed_after_read_and_return_diff(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello\nworld\n", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+
+    result = run_edit("sample.txt", "world", "agent")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["diagnostics"] == []
+    assert result["metadata"]["diagnostics_status"] == "not_enabled"
+    assert result["metadata"]["filediff"]["before"] == "hello\nworld\n"
+    assert result["metadata"]["filediff"]["after"] == "hello\nagent\n"
+    assert "+agent" in result["metadata"]["diff"]
+    assert file_path.read_text(encoding="utf-8") == "hello\nagent\n"
+
+
+def test_run_edit_should_fail_when_file_changed_after_read(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+    file_path.write_text("hello2", encoding="utf-8")
+
+    result = run_edit("sample.txt", "hello", "world")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "edit_stale_read"
+
+
+def test_run_edit_should_fail_when_editing_twice_without_reread(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+
+    first_result = run_edit("sample.txt", "hello", "world")
+    second_result = run_edit("sample.txt", "world", "agent")
+
+    assert first_result["metadata"]["status"] == "completed"
+    assert second_result["metadata"]["status"] == "failed"
+    assert second_result["metadata"]["error_code"] == "edit_stale_read"
+
+
+def test_run_edit_should_support_replace_all(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("name = old\nprint('old')\n", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+
+    result = run_edit("sample.txt", "old", "new", replace_all=True)
+
+    assert result["metadata"]["status"] == "completed"
+    assert file_path.read_text(encoding="utf-8") == "name = new\nprint('new')\n"
+
+
+def test_run_edit_should_fail_when_match_is_not_unique(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("old\nold\n", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+
+    result = run_edit("sample.txt", "old", "new")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "edit_match_not_unique"
+
+
+def test_run_edit_should_allow_overwrite_or_create_when_old_string_is_empty(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    existing = tmp_path / "existing.txt"
+    existing.write_text("old", encoding="utf-8")
+
+    overwrite_result = run_edit("existing.txt", "", "new content")
+    create_result = run_edit("created.txt", "", "created")
+
+    assert overwrite_result["metadata"]["status"] == "completed"
+    assert create_result["metadata"]["status"] == "completed"
+    assert existing.read_text(encoding="utf-8") == "new content"
+    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "created"
 
 
 def test_build_plan_placeholder_path_should_anchor_to_workspace_plan_path(tmp_path):

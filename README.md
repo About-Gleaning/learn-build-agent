@@ -43,6 +43,8 @@ src/
       serializers.py              # MessageVO 与 SSE payload 序列化
     tools/
       bash_tool.py                # bash 工具执行与 plan 模式只读校验
+      edit_file_tool.py           # edit_file 工具实现与精确替换/差异摘要
+      file_edit_state.py          # 文件读取/编辑时序状态记录
       grep_tool.py                # grep 工具实现与内容正则搜索
       glob_tool.py                # glob 工具实现与文件匹配排序
       handlers.py                 # 通用工具业务实现与结构化结果构造
@@ -90,6 +92,8 @@ pnpm dev
 - `glob` 的正式参数为 `pattern` 与可选 `path`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件。
 - `grep` 的正式参数为 `pattern` 与可选 `path`、`include`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围，结果返回命中的文件路径、行号与行内容。
 - `read_file` 的正式参数为 `file_path`，且必须传绝对路径；同时仅允许读取当前工作区内文件，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件。
+- `edit_file` 的正式参数为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；编辑已有文件前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
+- `edit_file` 会返回结构化 `diff/filediff/diagnostics`；当前 `diagnostics` 仅预留扩展入口，固定返回空数组与 `diagnostics_status=not_enabled`。
 - 运行态数据默认落到 `~/.my-agent/`：
   - 会话历史：`~/.my-agent/workspaces/sessions/`
   - todo：`~/.my-agent/workspaces/todo/<session_id>.json`
@@ -106,7 +110,7 @@ pnpm dev
 - Web 端“确认切换”必须走流式接口继续执行后续会话，禁止退回阻塞式普通 POST，否则前端会丢失增量事件并表现为无响应。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 请求停止当前会话；运行时按 `session_id` 记录停止标记，并在 loop 顶部及关键边界协作式收口，统一返回 `interrupted/cancelled`。
 - `runtime/agents.py` 统一维护所有 agent 的元信息；每个 agent 必须声明 `model`（`primary` 或 `subagent`）与 `description`。
-- 工具实现统一放在 `tools/` 目录内分模块维护，工具协议统一放在 `tools/specs.py`；其中 `read_file` 独立收敛到 `tools/read_file_tool.py`，`glob` 独立收敛到 `tools/glob_tool.py`，`grep` 独立收敛到 `tools/grep_tool.py`，路径解析与工作区目录校验统一收敛到 `tools/path_utils.py`，文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
+- 工具实现统一放在 `tools/` 目录内分模块维护，工具协议统一放在 `tools/specs.py`；其中 `read_file` 独立收敛到 `tools/read_file_tool.py`，`edit_file` 独立收敛到 `tools/edit_file_tool.py`，`glob` 独立收敛到 `tools/glob_tool.py`，`grep` 独立收敛到 `tools/grep_tool.py`，路径解析与工作区目录校验统一收敛到 `tools/path_utils.py`，文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
 - 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
 - 子 Agent 统一通过 `task` 工具路由；`task` 可见的 subagent 列表必须来自 `runtime/agents.py`，不在会话层硬编码分支逻辑。
 - Web 时间线按 `session` 维度累计展示，前端禁止在新一轮提交时清空既有执行轨迹。
@@ -126,7 +130,7 @@ pnpm dev
 
 ### 1) 新增工具
 
-1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，`read_file` 放在 `src/agent/tools/read_file_tool.py`，`glob` 放在 `src/agent/tools/glob_tool.py`，`grep` 放在 `src/agent/tools/grep_tool.py`，路径解析公共逻辑放在 `src/agent/tools/path_utils.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
+1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，`read_file` 放在 `src/agent/tools/read_file_tool.py`，`edit_file` 放在 `src/agent/tools/edit_file_tool.py`，`glob` 放在 `src/agent/tools/glob_tool.py`，`grep` 放在 `src/agent/tools/grep_tool.py`，路径解析公共逻辑放在 `src/agent/tools/path_utils.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
 2. 在 `src/agent/tools/specs.py` 增加或调整 JSON Schema；若工具描述较长，优先拆到独立 `.txt` 模板文件。
 3. 在 `src/agent/runtime/session.py` 的工具映射中注册（仅路由）。
 4. 工具返回优先保持结构化结果，至少稳定返回 `output` 与 `metadata.status`，避免继续扩散 `"Error: ..."` 裸字符串协议。
@@ -218,6 +222,7 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-26：重构 `edit_file` 工具为独立 `src/agent/tools/edit_file_tool.py`，正式参数切换为 `filePath/oldString/newString/replaceAll`，新增“先 `read_file` 再编辑”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `diff/filediff/diagnostics_status` 结构化返回；同时新增 `src/agent/tools/file_edit_state.py` 维护当前 session 的文件读取/编辑时序状态。
 - 2026-03-25：新增 `src/agent/tools/grep_tool.py` 与 `grep` 工具，基于 ripgrep 在工作区内做内容正则搜索，支持 `pattern/path/include` 入参，结果按命中文件修改时间倒序、同文件内按行号升序返回，并统一复用结构化工具返回协议。
 - 2026-03-25：新增 `src/agent/tools/glob_tool.py` 与 `glob` 工具，支持在工作区内按 glob 模式搜索普通文件、按修改时间倒序返回并最多截断 100 条；同时新增 `src/agent/tools/path_utils.py`，统一收敛工作区路径解析与目录校验逻辑，复用到 `bash` 与文件工具。
 - 2026-03-25：将 `read_file` 从 `handlers.py` 拆分到独立 `src/agent/tools/read_file_tool.py`，正式参数统一为 `file_path`，仅支持绝对路径；同时新增当前 session 运行态白名单，允许读取当前 session 的 `plan`、`tool-output` 与 `sessions` 文件，并同步收敛工具描述与测试。

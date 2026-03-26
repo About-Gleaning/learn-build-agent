@@ -3,6 +3,7 @@ from pathlib import Path
 
 from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path, build_session_storage_name, get_workspace
+from .file_edit_state import record_file_read
 from .handlers import build_tool_failure, build_tool_success
 from .path_utils import resolve_workspace_path
 
@@ -89,6 +90,7 @@ def run_read(file_path: str, limit: int | None = None, offset: int = 0) -> dict[
         text = target.read_text()
         if text == "":
             # 空文件属于成功读取，显式返回提示文案，避免后续链路把空字符串误判成错误或无结果。
+            record_file_read(target, mtime_ns=target.stat().st_mtime_ns)
             return build_tool_success(
                 EMPTY_FILE_OUTPUT,
                 file_path=str(target),
@@ -100,6 +102,7 @@ def run_read(file_path: str, limit: int | None = None, offset: int = 0) -> dict[
         selected = lines[start:]
         if limit is not None and limit < len(selected):
             selected = selected[:limit] + [f"... ({len(lines) - start - limit} more lines)"]
+        record_file_read(target, mtime_ns=target.stat().st_mtime_ns)
         return build_tool_success(
             "\n".join(selected)[:50000],
             file_path=str(target),
