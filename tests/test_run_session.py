@@ -23,7 +23,10 @@ from agent.runtime.session import (
     clear_session_memory,
     configure_session_memory_store,
     generate_session_id,
+    get_pending_question,
     request_session_stop,
+    run_question_answer_stream_events,
+    run_question_reject_stream_events,
     run_session,
     run_mode_switch_stream_events,
     run_session_stream_events,
@@ -247,6 +250,282 @@ def test_plan_enter_should_interrupt_on_confirmation_required(monkeypatch):
     assert "等待用户确认是否切换到 plan 模式" in text
     assert result["info"]["confirmation"]["target_agent"] == "plan"
     assert session_module.get_pending_mode_switch("s_plan_confirm") is not None
+
+
+def test_question_tool_should_interrupt_and_save_pending_question(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id="call_question",
+            name="question",
+            arguments=(
+                '{"questions":[{"question":"选择方案？","header":"方案",'
+                '"options":[{"label":"A","description":"快"},{"label":"B","description":"稳"}]}]}'
+            ),
+        )
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    result = run_session("需要补充问题", session_id="s_question_pending")
+
+    assert result["info"]["status"] == "interrupted"
+    assert result["info"]["finish_reason"] == "question_required"
+    assert result["info"]["question"]["questions"][0]["header"] == "方案"
+    assert result["info"]["question"]["questions"][0]["custom"] is True
+    pending = get_pending_question("s_question_pending")
+    assert pending is not None
+    assert pending["questions"][0]["question"] == "选择方案？"
+    assert pending["questions"][0]["custom"] is True
+    assert pending["resume_mode"] == "build"
+    assert pending["agent_kind"] == "primary"
+
+
+def test_question_answer_should_resume_session(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_question_resume",
+                name="question",
+                arguments=(
+                    '{"questions":[{"question":"选哪个？","header":"方向",'
+                    '"options":[{"label":"方案A","description":"最小改动"},{"label":"方案B","description":"扩展性好"}]}]}'
+                ),
+            )
+        else:
+            last_user_text = get_message_text(messages[-1])
+            append_text_part(assistant, "已收到方案A" if "方向：方案A" in last_user_text else "bad")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    first_result = run_session("继续执行", session_id="s_question_answer")
+    request_id = first_result["info"]["question"]["request_id"]
+
+    result = session_module.apply_question_answer(
+        "s_question_answer",
+        request_id,
+        [{"answers": ["方案A"], "notes": "优先最小改动"}],
+    )
+
+    assert get_message_text(result) == "已收到方案A"
+    assert get_pending_question("s_question_answer") is None
+
+
+def test_question_reject_should_resume_session_with_reject_context(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_question_reject",
+                name="question",
+                arguments=(
+                    '{"questions":[{"question":"是否继续？","header":"确认",'
+                    '"options":[{"label":"是","description":"继续"},{"label":"否","description":"停止"}]}]}'
+                ),
+            )
+        else:
+            last_user_text = get_message_text(messages[-1])
+            append_text_part(assistant, "知道用户拒绝" if "用户拒绝回答这些问题" in last_user_text else "bad")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    first_result = run_session("继续执行", session_id="s_question_reject")
+    request_id = first_result["info"]["question"]["request_id"]
+
+    result = session_module.apply_question_reject("s_question_reject", request_id)
+
+    assert get_message_text(result) == "知道用户拒绝"
+    assert get_pending_question("s_question_reject") is None
+
+
+def test_question_answer_stream_events_should_continue(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id="call_question_stream",
+            name="question",
+            arguments=(
+                '{"questions":[{"question":"选哪个？","header":"方向",'
+                '"options":[{"label":"A","description":"快"},{"label":"B","description":"稳"}]}]}'
+            ),
+        )
+        return assistant
+
+    def fake_stream_chat(messages, tools, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+
+        def _generator():
+            yield {"type": "text_delta", "delta": "继续处理"}
+            assistant = create_message("assistant", session_id, status="completed")
+            append_text_part(assistant, "继续处理")
+            return assistant
+
+        return _generator()
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream_chat)
+    first_result = run_session("继续执行", session_id="s_question_stream")
+    request_id = first_result["info"]["question"]["request_id"]
+
+    events = list(
+        run_question_answer_stream_events(
+            "s_question_stream",
+            request_id,
+            [{"answers": ["A"], "notes": ""}],
+        )
+    )
+
+    done_event = next(event for event in events if event["type"] == "done")
+    assert done_event["status"] == "completed"
+    assert done_event["display_parts"][-1]["text"] == "继续处理"
+
+
+def test_question_answer_should_reject_empty_answers():
+    pending = session_module.PendingQuestion(
+        request_id="question_empty",
+        tool_name="question",
+        title="等待用户回答 1 个问题",
+        questions=[
+            session_module.PendingQuestionItem(
+                question="选哪个？",
+                header="方向",
+                options=[session_module.PendingQuestionOption(label="A", description="快")],
+                multiple=False,
+                custom=True,
+            )
+        ],
+        agent_name="build",
+        agent_kind="primary",
+        resume_mode="build",
+        resume_runtime_agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3-max",
+        delegation_id="",
+        parent_tool_call_id="",
+        requested_at="t1",
+    )
+
+    with pytest.raises(ValueError) as exc:
+        session_module._normalize_question_answers(pending, [{"answers": [], "notes": ""}])
+
+    assert "至少需要一个答案" in str(exc.value)
+
+
+def test_task_subagent_question_should_interrupt_top_level_and_preserve_resume_context(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_stream_chat(messages, tools, llm_config=None, agent=""):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+
+        def _generator():
+            if False:
+                yield {"type": "text_delta", "delta": ""}
+            assistant = create_message("assistant", session_id, status="completed")
+            if call_state["count"] == 1:
+                append_tool_call_part(
+                    assistant,
+                    tool_call_id="call_task_question",
+                    name="task",
+                    arguments='{"prompt":"补充需求","agent":"explore"}',
+                )
+            elif agent == "explore":
+                append_tool_call_part(
+                    assistant,
+                    tool_call_id="call_sub_question",
+                    name="question",
+                    arguments=(
+                        '{"questions":[{"question":"需要哪种输出？","header":"输出",'
+                        '"options":[{"label":"A","description":"简洁"},{"label":"B","description":"详细"}]}]}'
+                    ),
+                )
+            else:
+                append_text_part(assistant, "bad")
+            return assistant
+
+        return _generator()
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream_chat)
+
+    events = list(run_session_stream_events("主任务", session_id="s_task_question"))
+
+    done_event = next(event for event in events if event["type"] == "done")
+    assert done_event["finish_reason"] == "question_required"
+    assert done_event["question"]["questions"][0]["header"] == "输出"
+    assert done_event["delegation_id"]
+    pending = get_pending_question("s_task_question")
+    assert pending is not None
+    assert pending["agent_kind"] == "subagent"
+    assert pending["resume_runtime_agent"] == "explore"
+    assert pending["delegation_id"] == done_event["delegation_id"]
+
+
+def test_subagent_question_answer_should_resume_with_subagent_runtime(monkeypatch):
+    pending = session_module.PendingQuestion(
+        request_id="question_subagent",
+        tool_name="question",
+        title="等待用户回答 1 个问题",
+        questions=[
+            session_module.PendingQuestionItem(
+                question="需要哪种输出？",
+                header="输出",
+                options=[session_module.PendingQuestionOption(label="A", description="简洁")],
+                multiple=False,
+                custom=True,
+            )
+        ],
+        agent_name="explore",
+        agent_kind="subagent",
+        resume_mode="",
+        resume_runtime_agent="explore",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3-max",
+        delegation_id="delegation_123",
+        parent_tool_call_id="call_task_1",
+        requested_at="t1",
+    )
+    session_module.PENDING_QUESTIONS["s_subagent_resume"] = pending
+    captured: dict[str, object] = {}
+
+    def fake_run_session(user_input: str, session_id: str, **kwargs):
+        captured["user_input"] = user_input
+        captured["session_id"] = session_id
+        captured["runtime_agent"] = kwargs.get("runtime_agent")
+        captured["tools"] = kwargs.get("tools")
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "subagent resumed")
+        return assistant
+
+    monkeypatch.setattr(session_module, "run_session", fake_run_session)
+
+    result = session_module.apply_question_answer(
+        "s_subagent_resume",
+        "question_subagent",
+        [{"answers": ["A"], "notes": "备注信息"}],
+    )
+
+    assert get_message_text(result) == "subagent resumed"
+    assert captured["runtime_agent"] == "explore"
+    assert isinstance(captured["tools"], list)
+    assert "输出：A" in str(captured["user_input"])
+    assert "备注：备注信息" in str(captured["user_input"])
+    assert get_pending_question("s_subagent_resume") is None
 
 
 def test_plan_enter_confirmed_should_switch_by_program_control(monkeypatch):

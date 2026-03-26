@@ -23,7 +23,7 @@
 - `src/agent/adapters/llm/vendors.py`：厂商方言注册与独立转换层。
 - `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
 - `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
-- `src/agent/tools/`：工具分模块实现（如 `handlers.py`、`read_file_tool.py`）与协议定义（`specs.py`）。
+- `src/agent/tools/`：工具分模块实现（如 `handlers.py`、`question_tool.py`、`read_file_tool.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
 - `src/agent/tools/write_file_tool.py`：`write_file` 工具实现与整文件覆盖写入。
 - `src/agent/tools/edit_file_tool.py`：`edit_file` 工具实现与精确替换、diff 摘要。
@@ -42,7 +42,7 @@
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
 - `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口；协议级转换统一收敛在 `adapters/llm/protocols.py`，厂商差异统一收敛在 `adapters/llm/vendors.py`，禁止继续把 `qwen` / `kimi` 等厂商分支散落回 `client.py` 或 `runtime/session.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
-- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，`write_file` 放 `tools/write_file_tool.py`，`edit_file` 放 `tools/edit_file_tool.py`，`glob` 放 `tools/glob_tool.py`，`grep` 放 `tools/grep_tool.py`，路径解析公共逻辑放 `tools/path_utils.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，`write_file` 放 `tools/write_file_tool.py`，`edit_file` 放 `tools/edit_file_tool.py`，`glob` 放 `tools/glob_tool.py`，`grep` 放 `tools/grep_tool.py`，`question` 放 `tools/question_tool.py`，路径解析公共逻辑放 `tools/path_utils.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
 - `glob` 的正式参数统一为 `pattern` 与可选 `path`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件，按文件修改时间倒序排列，最多返回 `100` 条。
 - `grep` 的正式参数统一为 `pattern` 与可选 `path`、`include`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围；结果返回命中的文件路径、行号与行内容，按命中文件修改时间倒序、同文件内按行号升序排列，最多返回 `100` 条。
@@ -58,6 +58,8 @@
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序侧状态机控制，禁止继续通过 LLM 参数决定。
 - Web 端“确认切换”必须通过流式接口继续执行确认后的会话，避免阻塞式请求导致界面无法实时更新。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 停止当前会话；运行时必须按 `session_id` 管理停止标记，并在 loop 顶部优先检查，命中后以 `interrupted/cancelled` 统一收口。
+- `question` 工具用于向用户发起结构化问题；运行时必须按 `session_id` 管理待答问题，并通过独立的 Web 答题/拒绝接口恢复执行；Web 答题接口固定提交“每题 `answers[] + notes`”的结构化结果，恢复给 LLM 的输入必须明确区分选项与备注。
+- `question` 工具实现统一收敛在 `tools/question_tool.py`；问题项支持可选 `custom` 字段，默认 `true`，命中时由后端统一自动追加“不是以上任何选项”兜底项，禁止模型手写重复兜底选项。
 - skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
 - 主 Agent 模式状态统一收敛在 `runtime/main_agent_mode.py`（若启用该模块），禁止散落存储。
 - 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
@@ -130,6 +132,9 @@
 
 ## 变更记录
 
+- 2026-03-26：新增独立 `src/agent/tools/question_tool.py`，将 `question` 工具从 `handlers.py` 拆分；问题项新增可选 `custom` 字段，默认 `true`，由后端统一自动追加“不是以上任何选项”兜底项，并同步补齐 runtime/Web/schema 透传与测试覆盖。
+- 2026-03-26：新增 `question` 工具与 `src/agent/tools/question.txt`，支持 Agent 在执行过程中发起结构化提问；运行时新增待答问题状态管理、Web 答题/拒绝接口与流式恢复链路，助手消息与 SSE `done` 事件同步透传 `question` 结构，用户拒绝回答时会以“用户拒绝”语义继续后续推理并与普通工具异常区分。
+- 2026-03-26：Web 前端补齐 `question_required` 交互：最新待答问题会切换输入区为 question composer，支持问题/选项/notes 三段式输入、上下左右键导航、`Tab` 焦点切换、`Shift+Enter` 备注换行，并将每题 `answers + notes` 以结构化 payload 提交到 question 恢复接口。
 - 2026-03-26：新增独立 `src/agent/tools/write_file_tool.py` 与 `write_file.txt`，将 `write_file` 收敛为整文件覆盖写工具；正式参数切换为 `filePath/content`，新增“已有文件先 `read_file` 再写”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `filepath/exists/diagnostics_status` 结构化返回。
 - 2026-03-26：重构 `edit_file` 为独立 `src/agent/tools/edit_file_tool.py`，正式参数切换为 `filePath/oldString/newString/replaceAll`，新增“先读后改”强校验、基于 `mtime_ns` 的读后变更保护、保守多层文本匹配与 `diff/filediff/diagnostics_status` 结构化返回；同时新增 `src/agent/tools/file_edit_state.py` 记录当前 session 的文件读取/编辑时序状态。
 - 2026-03-25：新增 `src/agent/tools/grep_tool.py` 与 `grep` 工具，基于 ripgrep 在工作区内做内容正则搜索，支持 `pattern/path/include` 入参，结果按命中文件修改时间倒序、同文件内按行号升序返回，并统一复用结构化工具返回协议。

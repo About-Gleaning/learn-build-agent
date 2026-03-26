@@ -81,6 +81,44 @@ def _normalize_confirmation(raw_value: Any) -> dict[str, str] | None:
     }
 
 
+def _normalize_question(raw_value: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_value, dict):
+        return None
+    questions = raw_value.get("questions")
+    normalized_questions: list[dict[str, Any]] = []
+    if isinstance(questions, list):
+        for item in questions:
+            if not isinstance(item, dict):
+                continue
+            raw_options = item.get("options")
+            normalized_options: list[dict[str, str]] = []
+            if isinstance(raw_options, list):
+                for option in raw_options:
+                    if not isinstance(option, dict):
+                        continue
+                    normalized_options.append(
+                        {
+                            "label": str(option.get("label", "")),
+                            "description": str(option.get("description", "")),
+                        }
+                    )
+            normalized_questions.append(
+                {
+                    "question": str(item.get("question", "")),
+                    "header": str(item.get("header", "")),
+                    "options": normalized_options,
+                    "multiple": bool(item.get("multiple", False)),
+                    "custom": bool(item.get("custom", True)),
+                }
+            )
+    return {
+        "tool": str(raw_value.get("tool", "")),
+        "request_id": str(raw_value.get("request_id", "")),
+        "title": str(raw_value.get("title", "")),
+        "questions": normalized_questions,
+    }
+
+
 def message_to_vo(message: Message) -> MessageVO:
     # Web 层统一在这里兜底缺省字段，避免路由层重复手工搬运。
     info = message.get("info", {})
@@ -100,6 +138,7 @@ def message_to_vo(message: Message) -> MessageVO:
         process_items=_normalize_process_items(info.get("process_items")),
         display_parts=_normalize_display_parts(info.get("display_parts")),
         confirmation=_normalize_confirmation(info.get("confirmation")),
+        question=_normalize_question(info.get("question")),
     )
 
 

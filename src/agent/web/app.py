@@ -14,6 +14,8 @@ from .schemas import (
     ChatStreamReq,
     ModeSwitchActionReq,
     ModeSwitchActionVO,
+    QuestionActionVO,
+    QuestionAnswerReq,
     RuntimeOptionsVO,
     SessionClearedVO,
     SessionMessagesVO,
@@ -61,6 +63,59 @@ def _stream_mode_switch(session_id: str, req: ModeSwitchActionReq) -> Generator[
             "error",
             {
                 "code": "mode_switch_conflict",
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:  # pragma: no cover - 兜底分支
+        yield sse_event(
+            "error",
+            {
+                "code": "internal_error",
+                "message": str(exc),
+            },
+        )
+
+
+def _stream_question_answer(session_id: str, request_id: str, req: QuestionAnswerReq) -> Generator[str, None, None]:
+    try:
+        answer_payload = [item.model_dump() for item in req.answers]
+        for event in session_runtime.run_question_answer_stream_events(session_id, request_id, answer_payload):
+            serialized = split_stream_event(event)
+            if serialized is None:
+                continue
+            event_type, payload = serialized
+            yield sse_event(event_type, payload)
+    except ValueError as exc:
+        yield sse_event(
+            "error",
+            {
+                "code": "question_conflict",
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:  # pragma: no cover - 兜底分支
+        yield sse_event(
+            "error",
+            {
+                "code": "internal_error",
+                "message": str(exc),
+            },
+        )
+
+
+def _stream_question_reject(session_id: str, request_id: str) -> Generator[str, None, None]:
+    try:
+        for event in session_runtime.run_question_reject_stream_events(session_id, request_id):
+            serialized = split_stream_event(event)
+            if serialized is None:
+                continue
+            event_type, payload = serialized
+            yield sse_event(event_type, payload)
+    except ValueError as exc:
+        yield sse_event(
+            "error",
+            {
+                "code": "question_conflict",
                 "message": str(exc),
             },
         )
@@ -170,6 +225,87 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="session_id 不能为空")
         return StreamingResponse(
             _stream_mode_switch(normalized_id, req),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/sessions/{session_id}/questions/{request_id}/answer", response_model=QuestionActionVO)
+    def apply_question_answer(session_id: str, request_id: str, req: QuestionAnswerReq) -> QuestionActionVO:
+        normalized_id = (session_id or "").strip()
+        normalized_request_id = (request_id or "").strip()
+        if not normalized_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        if not normalized_request_id:
+            raise HTTPException(status_code=400, detail="request_id 不能为空")
+        try:
+            answer_payload = [item.model_dump() for item in req.answers]
+            message = session_runtime.apply_question_answer(normalized_id, normalized_request_id, answer_payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        current_mode = str(message["info"].get("agent", "build")).strip().lower()
+        if current_mode not in {"build", "plan"}:
+            current_mode = "build"
+        return QuestionActionVO(
+            session_id=normalized_id,
+            status=str(message["info"].get("status", "")),
+            current_mode=current_mode,  # type: ignore[arg-type]
+            message=message_to_vo(message),
+        )
+
+    @app.post("/api/sessions/{session_id}/questions/{request_id}/answer/stream")
+    def apply_question_answer_stream(session_id: str, request_id: str, req: QuestionAnswerReq) -> StreamingResponse:
+        normalized_id = (session_id or "").strip()
+        normalized_request_id = (request_id or "").strip()
+        if not normalized_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        if not normalized_request_id:
+            raise HTTPException(status_code=400, detail="request_id 不能为空")
+        return StreamingResponse(
+            _stream_question_answer(normalized_id, normalized_request_id, req),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/sessions/{session_id}/questions/{request_id}/reject", response_model=QuestionActionVO)
+    def apply_question_reject(session_id: str, request_id: str) -> QuestionActionVO:
+        normalized_id = (session_id or "").strip()
+        normalized_request_id = (request_id or "").strip()
+        if not normalized_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        if not normalized_request_id:
+            raise HTTPException(status_code=400, detail="request_id 不能为空")
+        try:
+            message = session_runtime.apply_question_reject(normalized_id, normalized_request_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        current_mode = str(message["info"].get("agent", "build")).strip().lower()
+        if current_mode not in {"build", "plan"}:
+            current_mode = "build"
+        return QuestionActionVO(
+            session_id=normalized_id,
+            status=str(message["info"].get("status", "")),
+            current_mode=current_mode,  # type: ignore[arg-type]
+            message=message_to_vo(message),
+        )
+
+    @app.post("/api/sessions/{session_id}/questions/{request_id}/reject/stream")
+    def apply_question_reject_stream(session_id: str, request_id: str) -> StreamingResponse:
+        normalized_id = (session_id or "").strip()
+        normalized_request_id = (request_id or "").strip()
+        if not normalized_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        if not normalized_request_id:
+            raise HTTPException(status_code=400, detail="request_id 不能为空")
+        return StreamingResponse(
+            _stream_question_reject(normalized_id, normalized_request_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

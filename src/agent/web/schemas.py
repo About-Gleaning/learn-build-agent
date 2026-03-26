@@ -58,6 +58,26 @@ class ConfirmationVO(BaseModel):
     plan_path: str = ""
 
 
+class QuestionOptionVO(BaseModel):
+    label: str = ""
+    description: str = ""
+
+
+class QuestionItemVO(BaseModel):
+    question: str = ""
+    header: str = ""
+    options: list[QuestionOptionVO] = Field(default_factory=list)
+    multiple: bool = False
+    custom: bool = True
+
+
+class QuestionVO(BaseModel):
+    tool: str = ""
+    request_id: str = ""
+    title: str = ""
+    questions: list[QuestionItemVO] = Field(default_factory=list)
+
+
 class ChatStreamReq(BaseModel):
     session_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     user_input: str = Field(min_length=1, max_length=8000)
@@ -82,6 +102,7 @@ class MessageVO(BaseModel):
     process_items: list[ProcessItemVO] = Field(default_factory=list)
     display_parts: list[DisplayPartVO] = Field(default_factory=list)
     confirmation: ConfirmationVO | None = None
+    question: QuestionVO | None = None
 
 
 class SessionMessagesVO(BaseModel):
@@ -105,6 +126,22 @@ class ModeSwitchActionReq(BaseModel):
 
 
 class ModeSwitchActionVO(BaseModel):
+    session_id: str
+    status: str
+    current_mode: Literal["build", "plan"]
+    message: MessageVO
+
+
+class QuestionAnswerItemReq(BaseModel):
+    answers: list[str] = Field(default_factory=list)
+    notes: str = ""
+
+
+class QuestionAnswerReq(BaseModel):
+    answers: list[QuestionAnswerItemReq] = Field(default_factory=list)
+
+
+class QuestionActionVO(BaseModel):
     session_id: str
     status: str
     current_mode: Literal["build", "plan"]

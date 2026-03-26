@@ -24,6 +24,7 @@ from agent.tools.handlers import (
     run_plan_enter,
     run_plan_exit,
 )
+from agent.tools.question_tool import CUSTOM_OPTION_LABEL, run_question
 from agent.tools.read_file_tool import resolve_readable_file_path, run_read
 from agent.tools.todo_manager import TodoManager
 from agent.tools.write_file_tool import run_write
@@ -115,6 +116,68 @@ def test_run_plan_exit_should_return_completed_when_not_in_plan():
         latest_model="qwen-plus",
     )
     assert result["metadata"]["status"] == "completed"
+
+
+def test_run_question_should_return_question_required():
+    result = run_question(
+        questions=[
+            {
+                "question": "选择实现方式？",
+                "header": "实现方式",
+                "options": [
+                    {"label": "方案A", "description": "改动更小"},
+                    {"label": "方案B", "description": "扩展性更好"},
+                ],
+            }
+        ]
+    )
+    assert result["metadata"]["status"] == "question_required"
+    assert result["metadata"]["questions"][0]["header"] == "实现方式"
+    assert result["metadata"]["questions"][0]["custom"] is True
+    assert result["metadata"]["questions"][0]["options"][-1]["label"] == CUSTOM_OPTION_LABEL
+
+
+def test_run_question_should_not_append_custom_option_when_disabled():
+    result = run_question(
+        questions=[
+            {
+                "question": "选择实现方式？",
+                "header": "实现方式",
+                "custom": False,
+                "options": [
+                    {"label": "方案A", "description": "改动更小"},
+                    {"label": "方案B", "description": "扩展性更好"},
+                ],
+            }
+        ]
+    )
+
+    assert result["metadata"]["questions"][0]["custom"] is False
+    assert [item["label"] for item in result["metadata"]["questions"][0]["options"]] == ["方案A", "方案B"]
+
+
+def test_run_question_should_not_duplicate_custom_option():
+    result = run_question(
+        questions=[
+            {
+                "question": "选择实现方式？",
+                "header": "实现方式",
+                "options": [
+                    {"label": "方案A", "description": "改动更小"},
+                    {"label": CUSTOM_OPTION_LABEL, "description": "以上选项都不合适"},
+                ],
+            }
+        ]
+    )
+
+    labels = [item["label"] for item in result["metadata"]["questions"][0]["options"]]
+    assert labels.count(CUSTOM_OPTION_LABEL) == 1
+
+
+def test_run_question_should_reject_invalid_questions():
+    result = run_question(questions=[])
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "question_invalid"
 
 
 def test_validate_readonly_bash_should_block_redirection():

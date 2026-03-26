@@ -42,6 +42,7 @@ from ..tools.handlers import (
     run_plan_enter,
     run_plan_exit,
 )
+from ..tools.question_tool import run_question
 from ..tools.read_file_tool import run_read
 from ..tools.specs import build_agent_tools, build_base_tools
 from ..tools.todo_manager import TodoManager
@@ -92,6 +93,41 @@ class PendingModeSwitch(TypedDict):
     requested_at: str
 
 
+class PendingQuestionOption(TypedDict):
+    label: str
+    description: str
+
+
+class PendingQuestionItem(TypedDict):
+    question: str
+    header: str
+    options: list[PendingQuestionOption]
+    multiple: bool
+    custom: bool
+
+
+class PendingQuestion(TypedDict):
+    request_id: str
+    tool_name: str
+    title: str
+    questions: list[PendingQuestionItem]
+    agent_name: str
+    agent_kind: str
+    resume_mode: str
+    resume_runtime_agent: str
+    provider: str
+    vendor: str
+    model: str
+    delegation_id: str
+    parent_tool_call_id: str
+    requested_at: str
+
+
+class QuestionAnswerPayload(TypedDict):
+    answers: list[str]
+    notes: str
+
+
 @dataclass(frozen=True)
 class SessionBootstrap:
     session_id: str
@@ -125,6 +161,7 @@ class TaskToolRequest:
 
 
 PENDING_MODE_SWITCHES: dict[str, PendingModeSwitch] = {}
+PENDING_QUESTIONS: dict[str, PendingQuestion] = {}
 STOP_REQUESTED_SESSION_IDS: set[str] = set()
 
 _SECRET_PATTERNS = [
@@ -667,6 +704,39 @@ def _build_confirmation_interrupted_message(
     return message
 
 
+def _build_question_interrupted_message(
+    session_id: str,
+    *,
+    tool_name: str,
+    request_id: str,
+    title: str,
+    questions: list[PendingQuestionItem],
+    output_text: str,
+) -> Message:
+    message = create_message(
+        role="assistant",
+        session_id=session_id,
+        status="interrupted",
+        finish_reason="question_required",
+    )
+    append_text_part(
+        message,
+        f"{output_text}\n请先回答这些问题后再继续。".strip(),
+        meta={
+            "tool": tool_name,
+            "question_required": True,
+            "request_id": request_id,
+        },
+    )
+    message["info"]["question"] = {
+        "tool": tool_name,
+        "request_id": request_id,
+        "title": title,
+        "questions": questions,
+    }
+    return message
+
+
 def _save_pending_mode_switch(session_id: str, metadata: dict[str, Any]) -> None:
     target_agent = str(metadata.get("target_agent", "")).strip().lower()
     current_agent = str(metadata.get("current_agent", "")).strip().lower()
@@ -692,6 +762,75 @@ def _save_pending_mode_switch(session_id: str, metadata: dict[str, Any]) -> None
 
 def get_pending_mode_switch(session_id: str) -> PendingModeSwitch | None:
     return PENDING_MODE_SWITCHES.get(session_id)
+
+
+def _new_question_request_id() -> str:
+    return f"question_{uuid.uuid4().hex[:12]}"
+
+
+def _save_pending_question(session_id: str, metadata: dict[str, Any], *, active_agent: str) -> PendingQuestion:
+    raw_questions = metadata.get("questions")
+    if not isinstance(raw_questions, list) or not raw_questions:
+        raise ValueError("无效的问题列表")
+    questions: list[PendingQuestionItem] = []
+    for item in raw_questions:
+        if not isinstance(item, dict):
+            raise ValueError("无效的问题项")
+        raw_options = item.get("options")
+        if not isinstance(raw_options, list) or not raw_options:
+            raise ValueError("问题项缺少选项")
+        options: list[PendingQuestionOption] = []
+        for option in raw_options:
+            if not isinstance(option, dict):
+                raise ValueError("无效的问题选项")
+            options.append(
+                PendingQuestionOption(
+                    label=str(option.get("label", "")).strip(),
+                    description=str(option.get("description", "")).strip(),
+                )
+            )
+        questions.append(
+            PendingQuestionItem(
+                question=str(item.get("question", "")).strip(),
+                header=str(item.get("header", "")).strip(),
+                options=options,
+                multiple=bool(item.get("multiple", False)),
+                custom=bool(item.get("custom", True)),
+            )
+        )
+
+    normalized_agent = str(metadata.get("agent_name", "")).strip().lower() or active_agent.strip().lower()
+    agent_kind = _resolve_agent_kind(normalized_agent)
+    pending = PendingQuestion(
+        request_id=_new_question_request_id(),
+        tool_name=str(metadata.get("tool_name", "")).strip() or "question",
+        title=str(metadata.get("title", "")).strip() or f"等待用户回答 {len(questions)} 个问题",
+        questions=questions,
+        agent_name=normalized_agent,
+        agent_kind=agent_kind,
+        resume_mode=normalized_agent if normalized_agent in {"build", "plan"} else "",
+        resume_runtime_agent=normalized_agent,
+        provider=str(metadata.get("provider", "")).strip(),
+        vendor=str(metadata.get("vendor", "")).strip(),
+        model=str(metadata.get("model", "")).strip(),
+        delegation_id=str(metadata.get("delegation_id", "")).strip(),
+        parent_tool_call_id=str(metadata.get("parent_tool_call_id", "")).strip(),
+        requested_at=utc_now_iso(),
+    )
+    PENDING_QUESTIONS[session_id] = pending
+    return pending
+
+
+def get_pending_question(session_id: str) -> PendingQuestion | None:
+    return PENDING_QUESTIONS.get(session_id)
+
+
+def _clear_pending_question(session_id: str | None = None) -> None:
+    normalized = (session_id or "").strip()
+    if not normalized:
+        PENDING_QUESTIONS.clear()
+        return
+    PENDING_QUESTIONS.pop(normalized, None)
 
 
 def _clear_pending_mode_switch(session_id: str | None = None) -> None:
@@ -737,6 +876,105 @@ def _build_mode_switch_cancel_text(pending: PendingModeSwitch) -> str:
     if target_agent == "plan":
         return "已取消切换到 plan 模式，继续保持当前 build 模式。"
     return "已取消切换到 build 模式，继续保持当前 plan 模式。"
+
+
+def _normalize_question_answers(pending: PendingQuestion, answers: list[QuestionAnswerPayload]) -> list[QuestionAnswerPayload]:
+    questions = pending["questions"]
+    if len(answers) != len(questions):
+        raise ValueError("answers 数量与问题数量不一致。")
+
+    normalized_answers: list[QuestionAnswerPayload] = []
+    for index, question in enumerate(questions):
+        raw_answer = answers[index]
+        if not isinstance(raw_answer, dict):
+            raise ValueError(f"第 {index + 1} 个问题的答案必须是对象。")
+        raw_values = raw_answer.get("answers", [])
+        if not isinstance(raw_values, list):
+            raise ValueError(f"第 {index + 1} 个问题的 answers 必须是数组。")
+        normalized = [str(item).strip() for item in raw_values if str(item).strip()]
+        if not normalized:
+            raise ValueError(f"第 {index + 1} 个问题至少需要一个答案；若用户拒绝回答，请调用 reject 接口。")
+        if not question.get("multiple", False) and len(normalized) > 1:
+            raise ValueError(f"第 {index + 1} 个问题是单选，不能提交多个答案。")
+        normalized_answers.append(
+            QuestionAnswerPayload(
+                answers=normalized,
+                notes=str(raw_answer.get("notes", "")).strip(),
+            )
+        )
+    return normalized_answers
+
+
+def _build_question_answer_summary(pending: PendingQuestion, answers: list[QuestionAnswerPayload]) -> str:
+    lines = ["question 工具已收到用户回答："]
+    for index, question in enumerate(pending["questions"]):
+        answer_item = answers[index]
+        answer_values = answer_item["answers"]
+        answer_text = "、".join(answer_values)
+        lines.append(f"- {question['header']}：{answer_text}")
+        notes_text = answer_item.get("notes", "").strip()
+        if notes_text:
+            lines.append(f"  备注：{notes_text}")
+    return "\n".join(lines)
+
+
+def _build_question_rejected_input(pending: PendingQuestion) -> str:
+    return (
+        "question 工具未拿到答案：用户拒绝回答这些问题。"
+        "这不是工具执行异常，而是用户明确拒绝提供补充信息。"
+        "请基于现有上下文决定如何继续，必要时可以向用户解释影响。"
+    )
+
+
+def _resume_question_session(
+    *,
+    pending: PendingQuestion,
+    session_id: str,
+    user_input: str,
+    stream: bool,
+) -> Message | Generator[dict[str, Any], None, None]:
+    agent_kind = str(pending.get("agent_kind", "")).strip().lower()
+    if agent_kind == "subagent":
+        provider_name = str(pending.get("provider", "")).strip()
+        model_name = str(pending.get("model", "")).strip()
+        runtime_agent = str(pending.get("resume_runtime_agent", "")).strip().lower() or "explore"
+        if provider_name and model_name:
+            llm_config = resolve_llm_config("build", provider_name, model_name)
+        elif provider_name:
+            llm_config = resolve_llm_config("build", provider_name)
+        else:
+            llm_config = resolve_llm_config("build")
+        kwargs: dict[str, Any] = {
+            "user_input": user_input,
+            "session_id": session_id,
+            "tools": build_base_tools(registry.list_briefs()),
+            "system_prompt": _call_build_system_prompt(
+                agent=runtime_agent,
+                model=llm_config.model,
+                provider=llm_config.provider,
+                vendor=llm_config.vendor,
+                session_id=session_id,
+            ),
+            "runtime_agent": runtime_agent,
+            "todo_tool_names": {"todo_write", "todo_read"},
+            "llm_config": llm_config,
+        }
+        if stream:
+            return run_session_stream_events(**kwargs)
+        return run_session(**kwargs)
+
+    resume_mode = str(pending.get("resume_mode", "")).strip().lower() or "build"
+    if stream:
+        return run_session_stream_events(
+            user_input,
+            session_id=session_id,
+            mode=resume_mode,  # type: ignore[arg-type]
+        )
+    return run_session(
+        user_input,
+        session_id=session_id,
+        mode=resume_mode,  # type: ignore[arg-type]
+    )
 
 
 def _append_synthetic_user_message(
@@ -899,6 +1137,24 @@ def _build_tool_message(
     return message
 
 
+def _pending_question_result_from_message(message: Message) -> ToolResult:
+    info = message.get("info", {})
+    question_info = info.get("question") if isinstance(info.get("question"), dict) else {}
+    metadata: dict[str, Any] = {
+        "status": "question_required",
+        "tool_name": "question",
+        "title": str(question_info.get("title", "")).strip(),
+        "questions": question_info.get("questions", []),
+        "agent_name": str(info.get("agent", "")).strip(),
+        "model": str(info.get("model", "")).strip(),
+        "provider": str(info.get("provider", "")).strip(),
+    }
+    return {
+        "output": get_message_text(message),
+        "metadata": metadata,
+    }
+
+
 def _prepare_task_tool_request(arguments: str, *, delegation_id: str | None = None) -> TaskToolRequest:
     metadata: dict[str, Any] = {"status": "completed"}
     if delegation_id:
@@ -1007,6 +1263,53 @@ def _handle_mode_switch_tool_result(
     return None, status == "cancelled"
 
 
+def _handle_question_tool_result(
+    *,
+    session_id: str,
+    tool_name: str,
+    result: ToolResult,
+    messages: list[Message],
+    active_agent: str,
+    current_runtime: ResolvedLLMConfig,
+    turn_started_at: str,
+    delegation_id: str | None = None,
+    parent_tool_call_id: str | None = None,
+) -> Message | None:
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    status = str(metadata.get("status", "")).strip().lower()
+    if status != "question_required":
+        return None
+
+    normalized_metadata = {
+        **metadata,
+        "tool_name": tool_name,
+        "model": current_runtime.model,
+        "provider": current_runtime.provider,
+        "vendor": current_runtime.vendor,
+        "delegation_id": delegation_id or "",
+        "parent_tool_call_id": parent_tool_call_id or "",
+    }
+    pending = _save_pending_question(session_id, normalized_metadata, active_agent=active_agent)
+    interrupted_message = _build_question_interrupted_message(
+        session_id,
+        tool_name=tool_name,
+        request_id=pending["request_id"],
+        title=pending["title"],
+        questions=pending["questions"],
+        output_text=str(result.get("output", "等待用户回答问题后再继续。")).strip() or "等待用户回答问题后再继续。",
+    )
+    _set_message_runtime_info(
+        interrupted_message,
+        agent=active_agent,
+        model=current_runtime.model,
+        provider=current_runtime.provider,
+        turn_started_at=turn_started_at,
+        turn_completed_at=utc_now_iso(),
+    )
+    messages.append(interrupted_message)
+    return interrupted_message
+
+
 def _build_cancelled_mode_switch_message(
     *,
     session_id: str,
@@ -1093,6 +1396,7 @@ def configure_session_memory_store(store: SessionMemoryStore) -> None:
 def clear_session_memory(session_id: str | None = None) -> None:
     SESSION_MEMORY_STORE.clear(session_id)
     _clear_pending_mode_switch(session_id)
+    _clear_pending_question(session_id)
     clear_session_stop(session_id)
 
 
@@ -1203,6 +1507,89 @@ def run_mode_switch_stream_events(
         session_id=normalized_session_id,
         mode=target_agent,  # type: ignore[arg-type]
     )
+
+
+def apply_question_answer(session_id: str, request_id: str, answers: list[QuestionAnswerPayload]) -> Message:
+    normalized_session_id = (session_id or "").strip()
+    normalized_request_id = (request_id or "").strip()
+    pending = get_pending_question(normalized_session_id)
+    if pending is None:
+        raise ValueError("当前没有待回答的问题。")
+    if pending["request_id"] != normalized_request_id:
+        raise ValueError("问题请求已失效或不匹配。")
+
+    normalized_answers = _normalize_question_answers(pending, answers)
+    _clear_pending_question(normalized_session_id)
+    return _resume_question_session(
+        pending=pending,
+        session_id=normalized_session_id,
+        user_input=_build_question_answer_summary(pending, normalized_answers),
+        stream=False,
+    )
+
+
+def run_question_answer_stream_events(
+    session_id: str,
+    request_id: str,
+    answers: list[QuestionAnswerPayload],
+) -> Generator[dict[str, Any], None, None]:
+    normalized_session_id = (session_id or "").strip()
+    normalized_request_id = (request_id or "").strip()
+    pending = get_pending_question(normalized_session_id)
+    if pending is None:
+        raise ValueError("当前没有待回答的问题。")
+    if pending["request_id"] != normalized_request_id:
+        raise ValueError("问题请求已失效或不匹配。")
+
+    normalized_answers = _normalize_question_answers(pending, answers)
+    _clear_pending_question(normalized_session_id)
+    resumed = _resume_question_session(
+        pending=pending,
+        session_id=normalized_session_id,
+        user_input=_build_question_answer_summary(pending, normalized_answers),
+        stream=True,
+    )
+    yield from resumed
+
+
+def apply_question_reject(session_id: str, request_id: str) -> Message:
+    normalized_session_id = (session_id or "").strip()
+    normalized_request_id = (request_id or "").strip()
+    pending = get_pending_question(normalized_session_id)
+    if pending is None:
+        raise ValueError("当前没有待回答的问题。")
+    if pending["request_id"] != normalized_request_id:
+        raise ValueError("问题请求已失效或不匹配。")
+
+    _clear_pending_question(normalized_session_id)
+    return _resume_question_session(
+        pending=pending,
+        session_id=normalized_session_id,
+        user_input=_build_question_rejected_input(pending),
+        stream=False,
+    )
+
+
+def run_question_reject_stream_events(
+    session_id: str,
+    request_id: str,
+) -> Generator[dict[str, Any], None, None]:
+    normalized_session_id = (session_id or "").strip()
+    normalized_request_id = (request_id or "").strip()
+    pending = get_pending_question(normalized_session_id)
+    if pending is None:
+        raise ValueError("当前没有待回答的问题。")
+    if pending["request_id"] != normalized_request_id:
+        raise ValueError("问题请求已失效或不匹配。")
+
+    _clear_pending_question(normalized_session_id)
+    resumed = _resume_question_session(
+        pending=pending,
+        session_id=normalized_session_id,
+        user_input=_build_question_rejected_input(pending),
+        stream=True,
+    )
+    yield from resumed
 
 
 def subagent_loop(
@@ -1374,6 +1761,7 @@ def _run_session_stream(
             process_items=[dict(item) for item in active_process_items],
             display_parts=message["info"].get("display_parts", []),
             confirmation=message["info"].get("confirmation"),
+            question=message["info"].get("question"),
         )
         return message
 
@@ -1465,6 +1853,7 @@ def _run_session_stream(
                     process_items=[dict(item) for item in active_process_items],
                     display_parts=limit_message["info"].get("display_parts", []),
                     confirmation=limit_message["info"].get("confirmation"),
+                    question=limit_message["info"].get("question"),
                 )
                 return limit_message
             pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
@@ -1670,6 +2059,7 @@ def _run_session_stream(
                     process_items=[dict(item) for item in active_process_items],
                     display_parts=assistant_message["info"].get("display_parts", []),
                     confirmation=assistant_message["info"].get("confirmation"),
+                    question=assistant_message["info"].get("question"),
                 )
                 return assistant_message
 
@@ -1724,7 +2114,16 @@ def _run_session_stream(
                             process_items=active_process_items,
                             display_parts=active_display_parts,
                         )
-                        result["output"] = get_message_text(delegated_message)
+                        delegated_finish_reason = str(delegated_message["info"].get("finish_reason", "")).strip().lower()
+                        delegated_status = str(delegated_message["info"].get("status", "")).strip().lower()
+                        if delegated_finish_reason == "question_required" or (
+                            delegated_status == "interrupted" and isinstance(delegated_message["info"].get("question"), dict)
+                        ):
+                            result = _pending_question_result_from_message(delegated_message)
+                            result["metadata"]["delegation_id"] = delegation_instance_id
+                            result["metadata"]["parent_tool_call_id"] = tool_call["id"]
+                        else:
+                            result["output"] = get_message_text(delegated_message)
                 else:
                     result = tool_executor.execute(
                         tool_call["name"],
@@ -1770,74 +2169,145 @@ def _run_session_stream(
                 if stopped_message is not None:
                     return stopped_message
 
-                if tool_call["name"] not in {"plan_enter", "plan_exit"}:
+                if tool_call["name"] in {"plan_enter", "plan_exit"}:
+                    status = str(metadata.get("status", "")).strip().lower()
+
+                    interrupted_message, should_cancel = _handle_mode_switch_tool_result(
+                        session_id=active_session_id,
+                        tool_name=tool_call["name"],
+                        result=result,
+                        messages=messages,
+                        active_agent=active_agent,
+                        current_runtime=current_runtime,
+                        current_provider_explicit=current_provider_explicit,
+                        current_model_explicit=current_model_explicit,
+                        turn_started_at=turn_started_at,
+                    )
+
+                    if interrupted_message is not None:
+                        completed_at = str(interrupted_message["info"].get("turn_completed_at", ""))
+                        yield _emit_event(
+                        "round_end",
+                        agent=active_agent,
+                        agent_kind=agent_kind,
+                        depth=depth,
+                        delegation_id=delegation_id,
+                        parent_tool_call_id=parent_tool_call_id,
+                        round=round_no,
+                        status=interrupted_message["info"].get("status", "interrupted"),
+                        finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
+                        provider=current_runtime.provider,
+                        model=current_runtime.model,
+                        completed_at=completed_at,
+                        )
+                        response_meta = _attach_response_summary(
+                            interrupted_message,
+                            process_items=active_process_items,
+                            display_parts=active_display_parts,
+                            turn_started_at=turn_started_at,
+                            turn_completed_at=completed_at,
+                        )
+                        if mode_enabled:
+                            SESSION_MEMORY_STORE.save(active_session_id, messages)
+                        if depth == 0:
+                            clear_session_stop(active_session_id)
+                        yield _emit_event(
+                            "done",
+                            agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                            message_id=str(interrupted_message["info"].get("message_id", "")),
+                            status=interrupted_message["info"].get("status", "interrupted"),
+                            finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
+                            provider=current_runtime.provider,
+                            model=current_runtime.model,
+                            completed_at=completed_at,
+                            turn_started_at=turn_started_at,
+                            turn_completed_at=completed_at,
+                            response_meta=response_meta,
+                            process_items=[dict(item) for item in active_process_items],
+                            display_parts=interrupted_message["info"].get("display_parts", []),
+                            confirmation=interrupted_message["info"].get("confirmation"),
+                            question=interrupted_message["info"].get("question"),
+                        )
+                        return interrupted_message
+
+                    if should_cancel:
+                        should_interrupt = True
                     continue
 
-                status = str(metadata.get("status", "")).strip().lower()
+                if tool_call["name"] != "question":
+                    continue
 
-                interrupted_message, should_cancel = _handle_mode_switch_tool_result(
+                interrupted_message = _handle_question_tool_result(
                     session_id=active_session_id,
                     tool_name=tool_call["name"],
                     result=result,
                     messages=messages,
                     active_agent=active_agent,
                     current_runtime=current_runtime,
-                    current_provider_explicit=current_provider_explicit,
-                    current_model_explicit=current_model_explicit,
                     turn_started_at=turn_started_at,
+                    delegation_id=str(metadata.get("delegation_id", delegation_id or "")).strip() or delegation_id,
+                    parent_tool_call_id=str(metadata.get("parent_tool_call_id", parent_tool_call_id or "")).strip()
+                    or parent_tool_call_id,
                 )
+                if interrupted_message is None:
+                    continue
 
-                if interrupted_message is not None:
-                    completed_at = str(interrupted_message["info"].get("turn_completed_at", ""))
-                    yield _emit_event(
+                completed_at = str(interrupted_message["info"].get("turn_completed_at", ""))
+                question_delegation_id = str(metadata.get("delegation_id", delegation_id or "")).strip() or delegation_id
+                question_parent_tool_call_id = (
+                    str(metadata.get("parent_tool_call_id", parent_tool_call_id or "")).strip() or parent_tool_call_id
+                )
+                yield _emit_event(
                     "round_end",
                     agent=active_agent,
                     agent_kind=agent_kind,
                     depth=depth,
-                    delegation_id=delegation_id,
-                    parent_tool_call_id=parent_tool_call_id,
+                    delegation_id=question_delegation_id,
+                    parent_tool_call_id=question_parent_tool_call_id,
                     round=round_no,
                     status=interrupted_message["info"].get("status", "interrupted"),
-                    finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
+                    finish_reason=interrupted_message["info"].get("finish_reason", "question_required"),
                     provider=current_runtime.provider,
                     model=current_runtime.model,
                     completed_at=completed_at,
-                    )
-                    response_meta = _attach_response_summary(
-                        interrupted_message,
-                        process_items=active_process_items,
-                        display_parts=active_display_parts,
-                        turn_started_at=turn_started_at,
-                        turn_completed_at=completed_at,
-                    )
-                    if mode_enabled:
-                        SESSION_MEMORY_STORE.save(active_session_id, messages)
-                    if depth == 0:
-                        clear_session_stop(active_session_id)
-                    yield _emit_event(
-                        "done",
-                        agent=active_agent,
-                        agent_kind=agent_kind,
-                        depth=depth,
-                        delegation_id=delegation_id,
-                        parent_tool_call_id=parent_tool_call_id,
-                        message_id=str(interrupted_message["info"].get("message_id", "")),
-                        status=interrupted_message["info"].get("status", "interrupted"),
-                        finish_reason=interrupted_message["info"].get("finish_reason", "confirmation_required"),
-                        provider=current_runtime.provider,
-                        model=current_runtime.model,
-                        completed_at=completed_at,
-                        turn_started_at=turn_started_at,
-                        turn_completed_at=completed_at,
-                        response_meta=response_meta,
-                        process_items=[dict(item) for item in active_process_items],
-                        display_parts=interrupted_message["info"].get("display_parts", []),
-                        confirmation=interrupted_message["info"].get("confirmation"),
-                    )
-                    return interrupted_message
-
-                if should_cancel:
-                    should_interrupt = True
+                )
+                response_meta = _attach_response_summary(
+                    interrupted_message,
+                    process_items=active_process_items,
+                    display_parts=active_display_parts,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                )
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                if depth == 0:
+                    clear_session_stop(active_session_id)
+                yield _emit_event(
+                    "done",
+                    agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=question_delegation_id,
+                    parent_tool_call_id=question_parent_tool_call_id,
+                    message_id=str(interrupted_message["info"].get("message_id", "")),
+                    status=interrupted_message["info"].get("status", "interrupted"),
+                    finish_reason=interrupted_message["info"].get("finish_reason", "question_required"),
+                    provider=current_runtime.provider,
+                    model=current_runtime.model,
+                    completed_at=completed_at,
+                    turn_started_at=turn_started_at,
+                    turn_completed_at=completed_at,
+                    response_meta=response_meta,
+                    process_items=[dict(item) for item in active_process_items],
+                    display_parts=interrupted_message["info"].get("display_parts", []),
+                    confirmation=interrupted_message["info"].get("confirmation"),
+                    question=interrupted_message["info"].get("question"),
+                )
+                return interrupted_message
 
             if should_interrupt:
                 message = _build_cancelled_mode_switch_message(
@@ -1892,6 +2362,7 @@ def _run_session_stream(
                     process_items=[dict(item) for item in active_process_items],
                     display_parts=message["info"].get("display_parts", []),
                     confirmation=message["info"].get("confirmation"),
+                    question=message["info"].get("question"),
                 )
                 return message
 
@@ -2016,6 +2487,7 @@ def _build_tool_handlers(
         ),
         "webfetch": lambda **kw: webfetch(kw),
         "websearch": lambda **kw: websearch(kw),
+        "question": lambda **kw: run_question(questions=kw["questions"]),
         "todo_write": lambda **kw: TODO.update(kw["todo_list"]),
         "todo_read": lambda **kw: TODO.read_current_session(),
         "task": lambda **kw: subagent_loop(
@@ -2196,26 +2668,42 @@ def run_session(
                 )
             )
 
-            if tool_call["name"] not in {"plan_enter", "plan_exit"}:
+            if tool_call["name"] in {"plan_enter", "plan_exit"}:
+                interrupted_message, should_cancel = _handle_mode_switch_tool_result(
+                    session_id=active_session_id,
+                    tool_name=tool_call["name"],
+                    result=result,
+                    messages=messages,
+                    active_agent=active_agent,
+                    current_runtime=current_runtime,
+                    current_provider_explicit=current_provider_explicit,
+                    current_model_explicit=current_model_explicit,
+                    turn_started_at=turn_started_at,
+                )
+                if interrupted_message is not None:
+                    if mode_enabled:
+                        SESSION_MEMORY_STORE.save(active_session_id, messages)
+                    return interrupted_message
+                if should_cancel:
+                    should_interrupt = True
                 continue
 
-            interrupted_message, should_cancel = _handle_mode_switch_tool_result(
+            if tool_call["name"] != "question":
+                continue
+
+            interrupted_message = _handle_question_tool_result(
                 session_id=active_session_id,
                 tool_name=tool_call["name"],
                 result=result,
                 messages=messages,
                 active_agent=active_agent,
                 current_runtime=current_runtime,
-                current_provider_explicit=current_provider_explicit,
-                current_model_explicit=current_model_explicit,
                 turn_started_at=turn_started_at,
             )
             if interrupted_message is not None:
                 if mode_enabled:
                     SESSION_MEMORY_STORE.save(active_session_id, messages)
                 return interrupted_message
-            if should_cancel:
-                should_interrupt = True
 
         if should_interrupt:
             message = _build_cancelled_mode_switch_message(

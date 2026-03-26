@@ -26,6 +26,8 @@ EDIT_FILE_DESC_FILE = Path(__file__).with_name("edit_file.txt")
 EDIT_FILE_TOOL_DESCRIPTION = EDIT_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 WRITE_FILE_DESC_FILE = Path(__file__).with_name("write_file.txt")
 WRITE_FILE_TOOL_DESCRIPTION = WRITE_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
+QUESTION_DESC_FILE = Path(__file__).with_name("question.txt")
+QUESTION_TOOL_DESCRIPTION = QUESTION_DESC_FILE.read_text(encoding="utf-8").strip()
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -241,6 +243,63 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                         "replaceAll": {"type": "boolean", "description": "是否替换 oldString 的所有出现位置（默认为 false）。"},
                     },
                     "required": ["filePath", "oldString", "newString"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "question",
+                "description": QUESTION_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "description": "要提出的问题",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {
+                                        "type": "string",
+                                        "description": "完整的问题",
+                                    },
+                                    "header": {
+                                        "type": "string",
+                                        "description": "简短标签（最多 30 个字符）",
+                                    },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "可选选项",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": {
+                                                    "type": "string",
+                                                    "description": "显示文本（1-5 个词，简洁）",
+                                                },
+                                                "description": {
+                                                    "type": "string",
+                                                    "description": "选项说明",
+                                                },
+                                            },
+                                            "required": ["label", "description"],
+                                        },
+                                    },
+                                    "multiple": {
+                                        "type": "boolean",
+                                        "description": "允许选择多个选项，默认 false。",
+                                    },
+                                    "custom": {
+                                        "type": "boolean",
+                                        "description": "是否自动追加“不是以上任何选项”兜底项，默认 true。",
+                                    },
+                                },
+                                "required": ["question", "header", "options"],
+                            },
+                        },
+                    },
+                    "required": ["questions"],
                 },
             },
         },
