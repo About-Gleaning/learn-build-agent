@@ -48,16 +48,6 @@ def is_allowed_plan_write_path(path: str) -> bool:
     return target == build_plan_storage_path(get_session_id())
 
 
-def run_write(path: str, content: str) -> dict[str, Any]:
-    try:
-        target = safe_path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-        return build_tool_success(f"Wrote {len(content)} bytes to {path}")
-    except Exception as exc:
-        return build_tool_failure(f"Error: {exc}", error_code="write_failed", error_type=type(exc).__name__)
-
-
 def build_plan_placeholder_path(session_id: str) -> Path:
     return build_plan_storage_path(session_id)
 

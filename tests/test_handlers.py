@@ -23,10 +23,10 @@ from agent.tools.handlers import (
     is_allowed_plan_write_path,
     run_plan_enter,
     run_plan_exit,
-    run_write,
 )
 from agent.tools.read_file_tool import resolve_readable_file_path, run_read
 from agent.tools.todo_manager import TodoManager
+from agent.tools.write_file_tool import run_write
 from agent.runtime.workspace import (
     build_plan_storage_path,
     build_session_storage_name,
@@ -657,8 +657,63 @@ def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
     result = run_write("notes.txt", "hello")
 
     assert result["metadata"]["status"] == "completed"
-    assert result["output"] == "Wrote 5 bytes to notes.txt"
+    assert result["title"] == "notes.txt"
+    assert result["metadata"]["filepath"] == str((tmp_path / "notes.txt").resolve())
+    assert result["metadata"]["exists"] is False
+    assert result["metadata"]["diagnostics"] == []
+    assert result["metadata"]["diagnostics_status"] == "not_enabled"
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_run_write_should_require_read_before_overwriting_existing_file(tmp_path):
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("old", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_write("notes.txt", "new")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "write_read_required"
+
+
+def test_run_write_should_overwrite_existing_file_after_read(tmp_path):
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("old", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+
+    result = run_write("notes.txt", "new")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["exists"] is True
+    assert file_path.read_text(encoding="utf-8") == "new"
+
+
+def test_run_write_should_fail_when_existing_file_changed_after_read(tmp_path):
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("old", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+    file_path.write_text("changed", encoding="utf-8")
+
+    result = run_write("notes.txt", "new")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "write_stale_read"
+
+
+def test_run_write_should_reject_directory_target(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    (tmp_path / "dir").mkdir()
+
+    result = run_write("dir", "new")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "write_path_is_directory"
 
 
 def test_run_edit_should_require_read_before_edit(tmp_path):

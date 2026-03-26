@@ -24,6 +24,8 @@ GREP_DESC_FILE = Path(__file__).with_name("grep.txt")
 GREP_TOOL_DESCRIPTION = GREP_DESC_FILE.read_text(encoding="utf-8").strip()
 EDIT_FILE_DESC_FILE = Path(__file__).with_name("edit_file.txt")
 EDIT_FILE_TOOL_DESCRIPTION = EDIT_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
+WRITE_FILE_DESC_FILE = Path(__file__).with_name("write_file.txt")
+WRITE_FILE_TOOL_DESCRIPTION = WRITE_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -140,11 +142,11 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "glob 匹配模式，例如 **/*.py",
+                            "description": "用于匹配文件的 glob 模式",
                         },
                         "path": {
                             "type": "string",
-                            "description": "可选，指定从哪个目录开始搜索；支持相对路径",
+                            "description": "要搜索的目录。若未指定，将使用当前工作目录。重要提示：如需使用默认目录，请留空此字段。切勿输入`undefined`或`null` - 默认行为应通过直接留空字段实现。若填写则必须为有效的目录路径。",
                         },
                     },
                     "required": ["pattern"],
@@ -161,15 +163,15 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "要搜索的正则表达式",
+                            "description": "用于在文件内容中搜索的正则表达式模式。",
                         },
                         "path": {
                             "type": "string",
-                            "description": "可选，指定从哪个目录开始搜索；支持相对路径",
+                            "description": "要搜索的目录，默认为当前工作目录。",
                         },
                         "include": {
                             "type": "array",
-                            "description": "可选，限制只搜索哪些文件，例如 ['*.py']",
+                            "description": "要包含在搜索中的文件模式（例如 '.js'、'.{ts,tsx}'）。",
                             "items": {
                                 "type": "string",
                             },
@@ -208,11 +210,20 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Write content to file.",
+                "description": WRITE_FILE_TOOL_DESCRIPTION,
                 "parameters": {
                     "type": "object",
-                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                    "required": ["path", "content"],
+                    "properties": {
+                        "filePath": {
+                            "type": "string",
+                            "description": "要写入的文件的绝对路径（必须是绝对路径，而非相对路径）。",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "要写入文件的内容。",
+                        },
+                    },
+                    "required": ["filePath", "content"],
                 },
             },
         },
@@ -224,10 +235,10 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "filePath": {"type": "string"},
-                        "oldString": {"type": "string"},
-                        "newString": {"type": "string"},
-                        "replaceAll": {"type": "boolean"},
+                        "filePath": {"type": "string", "description": "要修改的文件的绝对路径。"},
+                        "oldString": {"type": "string", "description": "要替换的文本。"},
+                        "newString": {"type": "string", "description": "用于替换的新文本（必须与原字符串不同）。"},
+                        "replaceAll": {"type": "boolean", "description": "是否替换 oldString 的所有出现位置（默认为 false）。"},
                     },
                     "required": ["filePath", "oldString", "newString"],
                 },
@@ -241,9 +252,9 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "url": {"type": "string"},
-                        "format": {"type": "string", "enum": ["text", "markdown", "html"]},
-                        "timeout": {"type": "number"},
+                        "url": {"type": "string", "description": "要从中获取内容的 URL。"},
+                        "format": {"type": "string", "enum": ["text", "markdown", "html"], "description": "返回内容的格式（text、markdown 或 html），默认为 markdown。"},
+                        "timeout": {"type": "number", "description": "可选的超时时间（秒），最大值为 120。"},
                     },
                     "required": ["url"],
                 },
@@ -257,11 +268,11 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
-                        "numResults": {"type": "integer"},
-                        "livecrawl": {"type": "string", "enum": ["fallback", "preferred"]},
-                        "type": {"type": "string", "enum": ["auto", "fast", "deep"]},
-                        "contextMaxCharacters": {"type": "integer"},
+                        "query": {"type": "string", "description": "网络搜索查询"},
+                        "numResults": {"type": "integer", "description": "要返回的搜索结果数量（默认：8）。"},
+                        "livecrawl": {"type": "string", "enum": ["fallback", "preferred"], "description": "实时爬取模式 ——  'fallback'：当缓存内容不可用时，将实时爬取作为备用方案；  'preferred'：优先使用实时爬取（默认值：'fallback'）。"},
+                        "type": {"type": "string", "enum": ["auto", "fast", "deep"], "description": "搜索类型 ——  'auto'：平衡型搜索（默认），  'fast'：快速结果，  'deep'：全面深入的搜索。"},
+                        "contextMaxCharacters": {"type": "integer", "description": "为大语言模型（LLM）优化的上下文字符串的最大字符数（默认：10000）。"},
                     },
                     "required": ["query"],
                 },
@@ -280,13 +291,14 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "id": {"type": "string"},
-                                    "text": {"type": "string"},
+                                    "id": {"type": "string", "description": "待办事项的唯一标识符"},
+                                    "text": {"type": "string", "description": "任务的简要描述"},
                                     "status": {
                                         "type": "string",
                                         "enum": ["pending", "in_progress", "completed", "cancelled"],
+                                        "description": "任务的当前状态：pending, in_progress, completed, cancelled",
                                     },
-                                    "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                                    "priority": {"type": "string", "enum": ["high", "medium", "low"], "description": "任务的优先级：high, medium, low"},
                                 },
                                 "required": ["text", "status", "priority"],
                             },

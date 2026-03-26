@@ -41,13 +41,13 @@ from ..tools.handlers import (
     is_allowed_plan_write_path,
     run_plan_enter,
     run_plan_exit,
-    run_write,
 )
 from ..tools.read_file_tool import run_read
 from ..tools.specs import build_agent_tools, build_base_tools
 from ..tools.todo_manager import TodoManager
 from ..tools.webfetch import webfetch
 from ..tools.websearch import websearch
+from ..tools.write_file_tool import run_write
 from .compaction import compact
 from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore
 from .stream_display import (
@@ -1962,14 +1962,14 @@ def _build_tool_handlers(
             return build_tool_failure(f"Error: {exc}", error_code="bash_workdir_forbidden")
         return build_tool_success(run_bash(command, timeout, workdir))
 
-    def _run_mode_aware_write(path: str, content: str) -> dict[str, Any]:
-        if get_mode() == "plan" and not is_allowed_plan_write_path(path):
+    def _run_mode_aware_write(file_path: str, content: str) -> dict[str, Any]:
+        if get_mode() == "plan" and not is_allowed_plan_write_path(file_path):
             plan_path = str(build_plan_placeholder_path(session_id))
             return build_tool_failure(
                 f"Error: plan 模式下仅允许写入 {plan_path} 文件。",
                 error_code="plan_write_forbidden",
             )
-        return run_write(path, content)
+        return run_write(file_path, content)
 
     def _run_mode_aware_edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(file_path):
@@ -2007,7 +2007,7 @@ def _build_tool_handlers(
             kw.get("limit"),
             kw.get("offset", 0),
         ),
-        "write_file": lambda **kw: _run_mode_aware_write(kw["path"], kw["content"]),
+        "write_file": lambda **kw: _run_mode_aware_write(kw["filePath"], kw["content"]),
         "edit_file": lambda **kw: _run_mode_aware_edit(
             kw.get("filePath") or kw.get("path") or kw["file_path"],
             kw.get("oldString") or kw.get("old_text") or kw["old_string"],

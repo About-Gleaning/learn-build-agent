@@ -390,7 +390,7 @@ def test_plan_mode_write_should_be_limited_to_workspace_plan_file(monkeypatch):
                 assistant,
                 tool_call_id="call_write",
                 name="write_file",
-                arguments='{"path":"src/main.py","content":"x"}',
+                arguments='{"filePath":"src/main.py","content":"x"}',
             )
         else:
             append_text_part(assistant, _last_tool_result_content(messages))
@@ -601,6 +601,52 @@ def test_edit_file_tool_schema_should_use_camel_case_and_replace_all():
     assert "newString" in properties
     assert "replaceAll" in properties
     assert edit_tool["function"]["parameters"]["required"] == ["filePath", "oldString", "newString"]
+
+
+def test_write_file_tool_schema_should_use_file_path_and_content():
+    tools = build_base_tools()
+    write_tool = next(tool for tool in tools if tool["function"]["name"] == "write_file")
+    properties = write_tool["function"]["parameters"]["properties"]
+
+    assert "filePath" in properties
+    assert "content" in properties
+    assert write_tool["function"]["parameters"]["required"] == ["filePath", "content"]
+
+
+def test_run_session_should_route_write_file_arguments(monkeypatch):
+    handlers = session_module._build_tool_handlers(
+        session_id="s_write_file_route",
+        get_mode=lambda: "build",
+        get_latest_model=lambda: "qwen-plus",
+        get_current_runtime=lambda: ResolvedLLMConfig(
+            agent="build",
+            provider="qwen",
+            vendor="qwen",
+            model="qwen3-coder-next",
+            api_mode="responses",
+            base_url="https://example.com",
+            api_key="test",
+            timeout_seconds=60,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_write(file_path, content):
+        captured.update(file_path=file_path, content=content)
+        return {"output": "ok", "metadata": {"status": "completed"}}
+
+    monkeypatch.setattr(session_module, "run_write", fake_run_write)
+
+    result = handlers["write_file"](
+        filePath="/tmp/demo.py",
+        content="hello",
+    )
+
+    assert result["metadata"]["status"] == "completed"
+    assert captured == {
+        "file_path": "/tmp/demo.py",
+        "content": "hello",
+    }
 
 
 def test_run_session_should_route_camel_case_edit_file_arguments(monkeypatch):

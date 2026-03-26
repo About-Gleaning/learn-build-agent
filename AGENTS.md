@@ -25,6 +25,7 @@
 - `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
 - `src/agent/tools/`：工具分模块实现（如 `handlers.py`、`read_file_tool.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
+- `src/agent/tools/write_file_tool.py`：`write_file` 工具实现与整文件覆盖写入。
 - `src/agent/tools/edit_file_tool.py`：`edit_file` 工具实现与精确替换、diff 摘要。
 - `src/agent/tools/file_edit_state.py`：当前 session 的文件读取/编辑时序状态。
 - `src/agent/tools/grep_tool.py`：grep 工具实现与内容正则搜索。
@@ -41,11 +42,13 @@
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
 - `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口；协议级转换统一收敛在 `adapters/llm/protocols.py`，厂商差异统一收敛在 `adapters/llm/vendors.py`，禁止继续把 `qwen` / `kimi` 等厂商分支散落回 `client.py` 或 `runtime/session.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
-- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，`edit_file` 放 `tools/edit_file_tool.py`，`glob` 放 `tools/glob_tool.py`，`grep` 放 `tools/grep_tool.py`，路径解析公共逻辑放 `tools/path_utils.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，`write_file` 放 `tools/write_file_tool.py`，`edit_file` 放 `tools/edit_file_tool.py`，`glob` 放 `tools/glob_tool.py`，`grep` 放 `tools/grep_tool.py`，路径解析公共逻辑放 `tools/path_utils.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
 - `glob` 的正式参数统一为 `pattern` 与可选 `path`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件，按文件修改时间倒序排列，最多返回 `100` 条。
 - `grep` 的正式参数统一为 `pattern` 与可选 `path`、`include`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围；结果返回命中的文件路径、行号与行内容，按命中文件修改时间倒序、同文件内按行号升序排列，最多返回 `100` 条。
 - `read_file` 的正式参数统一为 `file_path`，且必须使用绝对路径；允许读取的范围仅限当前工作区，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件，禁止跨 session 读取其他运行态数据。
+- `write_file` 的正式参数统一为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；对已存在文件，写入前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再写入。
+- `write_file` 当前返回 `metadata.filepath`、`metadata.exists`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language service 的统一入口，本期固定返回空数组与 `not_enabled`。
 - `edit_file` 的正式参数统一为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；编辑已有文件前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再编辑。
 - `edit_file` 当前返回 `metadata.diff`、`metadata.filediff`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language server 的统一入口，本期固定返回空数组与 `not_enabled`。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
@@ -127,6 +130,7 @@
 
 ## 变更记录
 
+- 2026-03-26：新增独立 `src/agent/tools/write_file_tool.py` 与 `write_file.txt`，将 `write_file` 收敛为整文件覆盖写工具；正式参数切换为 `filePath/content`，新增“已有文件先 `read_file` 再写”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `filepath/exists/diagnostics_status` 结构化返回。
 - 2026-03-26：重构 `edit_file` 为独立 `src/agent/tools/edit_file_tool.py`，正式参数切换为 `filePath/oldString/newString/replaceAll`，新增“先读后改”强校验、基于 `mtime_ns` 的读后变更保护、保守多层文本匹配与 `diff/filediff/diagnostics_status` 结构化返回；同时新增 `src/agent/tools/file_edit_state.py` 记录当前 session 的文件读取/编辑时序状态。
 - 2026-03-25：新增 `src/agent/tools/grep_tool.py` 与 `grep` 工具，基于 ripgrep 在工作区内做内容正则搜索，支持 `pattern/path/include` 入参，结果按命中文件修改时间倒序、同文件内按行号升序返回，并统一复用结构化工具返回协议。
 - 2026-03-25：新增 `src/agent/tools/glob_tool.py` 与 `glob` 工具，支持在工作区内按 glob 模式搜索普通文件、按修改时间倒序返回并最多截断 100 条；同时新增 `src/agent/tools/path_utils.py`，统一收敛工作区路径解析与目录校验逻辑，复用到 `bash` 与文件工具。
