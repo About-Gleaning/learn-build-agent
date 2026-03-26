@@ -38,7 +38,7 @@ src/
       stream_display.py           # 流式事件、display_parts 与响应摘要组装
       workspace.py                # 当前工作区与运行态目录解析
     web/
-      app.py                      # Web API（SSE 聊天、历史查询、模式切换确认、停止会话、清空会话）
+      app.py                      # Web API（SSE 聊天、历史查询、模式切换/问题答复、停止会话、清空会话）
       schemas.py                  # Web 层请求/响应模型
       serializers.py              # MessageVO 与 SSE payload 序列化
     tools/
@@ -47,11 +47,13 @@ src/
       file_edit_state.py          # 文件读取/编辑时序状态记录
       grep_tool.py                # grep 工具实现与内容正则搜索
       glob_tool.py                # glob 工具实现与文件匹配排序
-      handlers.py                 # 通用工具业务实现与结构化结果构造
+      handlers.py                 # 通用工具结果构造与 plan 相关工具实现
       path_utils.py               # 工具公共路径解析与工作区目录校验
+      question_tool.py            # question 工具实现与问题结构归一化
       read_file_tool.py           # read_file 工具实现与读取白名单校验
       write_file_tool.py          # write_file 工具实现与整文件覆盖写入
       specs.py                    # 工具协议定义
+      question.txt                # question 工具描述模板
       todo_manager.py             # todo 状态管理与持久化
       task.txt                    # task 工具描述模板（含 {agents} 占位）
       todo_write.txt              # todo_write 工具描述
@@ -112,6 +114,8 @@ pnpm dev
 - `plan_enter` / `plan_exit` 仅负责发起模式切换申请，确认与取消必须由程序状态机和 Web 交互控制，禁止让 LLM 直接决定确认结果。
 - Web 端“确认切换”必须走流式接口继续执行后续会话，禁止退回阻塞式普通 POST，否则前端会丢失增量事件并表现为无响应。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 请求停止当前会话；运行时按 `session_id` 记录停止标记，并在 loop 顶部及关键边界协作式收口，统一返回 `interrupted/cancelled`。
+- `question` 工具用于向用户发起结构化问题；运行时必须按 `session_id` 保存待答问题，并通过独立的 Web 答题/拒绝接口恢复执行；Web 答题接口统一提交“每题 `answers[] + notes`”的结构化结果，运行时恢复消息中必须显式区分选项与备注。
+- `question` 的问题项支持可选 `custom` 字段，默认 `true`；启用后由后端统一自动追加“不是以上任何选项”兜底项，禁止让模型手写重复兜底选项。
 - `runtime/agents.py` 统一维护所有 agent 的元信息；每个 agent 必须声明 `model`（`primary` 或 `subagent`）与 `description`。
 - 工具实现统一放在 `tools/` 目录内分模块维护，工具协议统一放在 `tools/specs.py`；其中 `read_file` 独立收敛到 `tools/read_file_tool.py`，`write_file` 独立收敛到 `tools/write_file_tool.py`，`edit_file` 独立收敛到 `tools/edit_file_tool.py`，`glob` 独立收敛到 `tools/glob_tool.py`，`grep` 独立收敛到 `tools/grep_tool.py`，路径解析与工作区目录校验统一收敛到 `tools/path_utils.py`，文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
 - 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
@@ -133,7 +137,7 @@ pnpm dev
 
 ### 1) 新增工具
 
-1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，`read_file` 放在 `src/agent/tools/read_file_tool.py`，`write_file` 放在 `src/agent/tools/write_file_tool.py`，`edit_file` 放在 `src/agent/tools/edit_file_tool.py`，`glob` 放在 `src/agent/tools/glob_tool.py`，`grep` 放在 `src/agent/tools/grep_tool.py`，路径解析公共逻辑放在 `src/agent/tools/path_utils.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
+1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，`read_file` 放在 `src/agent/tools/read_file_tool.py`，`write_file` 放在 `src/agent/tools/write_file_tool.py`，`edit_file` 放在 `src/agent/tools/edit_file_tool.py`，`glob` 放在 `src/agent/tools/glob_tool.py`，`grep` 放在 `src/agent/tools/grep_tool.py`，`question` 放在 `src/agent/tools/question_tool.py`，路径解析公共逻辑放在 `src/agent/tools/path_utils.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
 2. 在 `src/agent/tools/specs.py` 增加或调整 JSON Schema；若工具描述较长，优先拆到独立 `.txt` 模板文件。
 3. 在 `src/agent/runtime/session.py` 的工具映射中注册（仅路由）。
 4. 工具返回优先保持结构化结果，至少稳定返回 `output` 与 `metadata.status`，避免继续扩散 `"Error: ..."` 裸字符串协议。
@@ -225,6 +229,9 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-26：新增独立 `src/agent/tools/question_tool.py`，将 `question` 工具从 `handlers.py` 拆分；问题项新增可选 `custom` 字段，默认 `true`，由后端统一自动追加“不是以上任何选项”兜底项，并同步补齐 runtime/Web/schema 透传与测试覆盖。
+- 2026-03-26：新增 `question` 工具与 `src/agent/tools/question.txt`，支持 Agent 在执行过程中发起结构化提问；运行时新增待答问题状态管理、Web 答题/拒绝接口与流式恢复链路，助手消息与 SSE `done` 事件同步透传 `question` 结构，用户拒绝回答时会以“用户拒绝”语义继续后续推理并与普通工具异常区分。
+- 2026-03-26：Web 前端补齐 `question_required` 交互：最新待答问题会切换输入区为 question composer，支持问题/选项/notes 三段式输入、上下左右键导航、`Tab` 焦点切换、`Shift+Enter` 备注换行，并将每题 `answers + notes` 以结构化 payload 提交到 question 恢复接口。
 - 2026-03-26：新增独立 `src/agent/tools/write_file_tool.py` 与 `write_file.txt`，将 `write_file` 收敛为整文件覆盖写工具；正式参数切换为 `filePath/content`，新增“已有文件先 `read_file` 再写”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `filepath/exists/diagnostics_status` 结构化返回。
 
 - 2026-03-26：重构 `edit_file` 工具为独立 `src/agent/tools/edit_file_tool.py`，正式参数切换为 `filePath/oldString/newString/replaceAll`，新增“先 `read_file` 再编辑”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `diff/filediff/diagnostics_status` 结构化返回；同时新增 `src/agent/tools/file_edit_state.py` 维护当前 session 的文件读取/编辑时序状态。

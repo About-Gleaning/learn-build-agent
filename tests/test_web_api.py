@@ -193,6 +193,7 @@ def test_message_to_vo_should_normalize_missing_optional_fields():
     assert message_vo.process_items == []
     assert message_vo.display_parts == []
     assert message_vo.confirmation is None
+    assert message_vo.question is None
 
 
 def test_message_to_vo_should_keep_reasoning_display_part_kind():
@@ -229,6 +230,35 @@ def test_split_stream_event_should_remove_type_field():
 
     assert event_type == "done"
     assert payload == {"message_id": "m1", "status": "completed"}
+
+
+def test_message_to_vo_should_keep_question_payload():
+    assistant = create_message("assistant", "s_question_vo", status="interrupted")
+    append_text_part(assistant, "等待用户回答问题后再继续。")
+    assistant["info"]["question"] = {
+        "tool": "question",
+        "request_id": "question_123",
+        "title": "等待用户回答 1 个问题",
+        "questions": [
+            {
+                "question": "选择方案？",
+                "header": "方案",
+                "options": [
+                    {"label": "A", "description": "快"},
+                    {"label": "B", "description": "稳"},
+                ],
+                "multiple": False,
+                "custom": True,
+            }
+        ],
+    }
+
+    message_vo = message_to_vo(assistant)
+
+    assert message_vo.question is not None
+    assert message_vo.question.request_id == "question_123"
+    assert message_vo.question.questions[0].options[0].label == "A"
+    assert message_vo.question.questions[0].custom is True
 
 
 def test_get_session_messages_and_clear():
@@ -432,6 +462,131 @@ def test_apply_mode_switch_should_return_conflict_when_no_pending(monkeypatch):
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == "当前没有待确认的模式切换。"
+
+
+def test_apply_question_answer_should_return_message(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    assistant = create_message("assistant", "s_question", status="completed")
+    append_text_part(assistant, "已根据回答继续处理")
+    assistant["info"]["agent"] = "build"
+    assistant["info"]["finish_reason"] = "stop"
+
+    monkeypatch.setattr(
+        "agent.web.app.session_runtime.apply_question_answer",
+        lambda session_id, request_id, answers: assistant,
+    )
+
+    resp = client.post(
+        "/api/sessions/s_question/questions/question_1/answer",
+        json={"answers": [{"answers": ["方案A"], "notes": "优先兼容旧逻辑"}]},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["session_id"] == "s_question"
+    assert payload["message"]["text"] == "已根据回答继续处理"
+
+
+def test_apply_question_reject_should_return_message(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    assistant = create_message("assistant", "s_question_reject", status="completed")
+    append_text_part(assistant, "已按拒绝分支继续")
+    assistant["info"]["agent"] = "build"
+    assistant["info"]["finish_reason"] = "stop"
+
+    monkeypatch.setattr(
+        "agent.web.app.session_runtime.apply_question_reject",
+        lambda session_id, request_id: assistant,
+    )
+
+    resp = client.post("/api/sessions/s_question_reject/questions/question_1/reject")
+
+    assert resp.status_code == 200
+    assert resp.json()["message"]["text"] == "已按拒绝分支继续"
+
+
+def test_apply_question_answer_stream_should_return_sse_events(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def fake_question_stream(session_id: str, request_id: str, answers: list[dict[str, object]]):
+        assert session_id == "s_question"
+        assert request_id == "question_1"
+        assert answers == [{"answers": ["方案A"], "notes": "补充说明"}]
+        yield {"type": "text_delta", "event_id": "evt_q_1", "delta": "继续处理"}
+        yield {
+            "type": "done",
+            "event_id": "evt_q_2",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "m_q_1",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {
+                "round_count": 1,
+                "tool_call_count": 0,
+                "tool_names": [],
+                "delegation_count": 0,
+                "delegated_agents": [],
+                "duration_ms": 300,
+            },
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_question_answer_stream_events", fake_question_stream)
+
+    with client.stream(
+        "POST",
+        "/api/sessions/s_question/questions/question_1/answer/stream",
+        json={"answers": [{"answers": ["方案A"], "notes": "补充说明"}]},
+    ) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+
+    events = _stream_events(body)
+    assert [evt for evt, _ in events] == ["text_delta", "done"]
+
+
+def test_apply_question_reject_should_return_conflict_when_no_pending(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def raise_no_pending(session_id, request_id):
+        raise ValueError("当前没有待回答的问题。")
+
+    monkeypatch.setattr("agent.web.app.session_runtime.apply_question_reject", raise_no_pending)
+
+    resp = client.post("/api/sessions/s_question/questions/question_1/reject")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "当前没有待回答的问题。"
+
+
+def test_apply_question_answer_should_return_conflict_when_answers_invalid(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def raise_invalid(session_id, request_id, answers):
+        raise ValueError("第 1 个问题至少需要一个答案；若用户拒绝回答，请调用 reject 接口。")
+
+    monkeypatch.setattr("agent.web.app.session_runtime.apply_question_answer", raise_invalid)
+
+    resp = client.post(
+        "/api/sessions/s_question/questions/question_1/answer",
+        json={"answers": [{"answers": [], "notes": ""}]},
+    )
+
+    assert resp.status_code == 409
+    assert "至少需要一个答案" in resp.json()["detail"]
 
 
 def test_stop_session_should_return_requested(monkeypatch):

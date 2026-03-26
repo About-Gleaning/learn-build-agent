@@ -74,6 +74,26 @@ class ConfirmationInfo(TypedDict, total=False):
     plan_path: str
 
 
+class QuestionOptionInfo(TypedDict, total=False):
+    label: str
+    description: str
+
+
+class QuestionItemInfo(TypedDict, total=False):
+    question: str
+    header: str
+    options: list[QuestionOptionInfo]
+    multiple: bool
+    custom: bool
+
+
+class QuestionInfo(TypedDict, total=False):
+    tool: str
+    request_id: str
+    title: str
+    questions: list[QuestionItemInfo]
+
+
 class MessageInfo(TypedDict, total=False):
     message_id: str
     session_id: str
@@ -98,6 +118,7 @@ class MessageInfo(TypedDict, total=False):
     process_items: list[ProcessItem]
     display_parts: list[DisplayPart]
     confirmation: ConfirmationInfo
+    question: QuestionInfo
 
 
 class Part(TypedDict, total=False):

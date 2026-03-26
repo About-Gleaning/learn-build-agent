@@ -21,6 +21,7 @@ type UiMessage = {
   displayParts: DisplayPart[];
   displayTextMergeOpen: boolean;
   confirmation: ConfirmationInfo | null;
+  question: QuestionInfo | null;
 };
 
 type ResponseMeta = {
@@ -74,6 +75,25 @@ type ConfirmationInfo = {
   currentAgent: string;
   actionType: string;
   planPath: string;
+};
+
+type QuestionOption = {
+  label: string;
+  description: string;
+};
+
+type QuestionItem = {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiple: boolean;
+};
+
+type QuestionInfo = {
+  tool: string;
+  requestId: string;
+  title: string;
+  questions: QuestionItem[];
 };
 
 type ProgressEntry = {
@@ -183,6 +203,20 @@ type HistoryResp = {
       action_type: string;
       plan_path: string;
     } | null;
+    question?: {
+      tool: string;
+      request_id: string;
+      title: string;
+      questions: Array<{
+        question: string;
+        header: string;
+        options: Array<{
+          label: string;
+          description: string;
+        }>;
+        multiple: boolean;
+      }>;
+    } | null;
   }>;
 };
 
@@ -200,11 +234,19 @@ type StopSessionResp = {
 };
 
 type ActiveTurn = {
-  kind: "chat" | "mode_switch_confirm";
+  kind: "chat" | "mode_switch_confirm" | "question_answer" | "question_reject";
   assistantMessageId: string;
   userMessageId?: string;
   turnStartedAt: string;
 };
+
+type QuestionDraft = {
+  answers: string[];
+  notes: string;
+  activeOptionIndex: number;
+};
+
+type QuestionFocusTarget = "options" | "notes";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "http://127.0.0.1:8000";
 const AUTO_SCROLL_THRESHOLD = 56;
@@ -250,6 +292,38 @@ function readString(payload: Record<string, unknown>, key: string, fallback = ""
 function readNumber(payload: Record<string, unknown>, key: string, fallback = 0): number {
   const value = payload[key];
   return typeof value === "number" ? value : fallback;
+}
+
+function normalizeQuestion(rawValue: unknown): QuestionInfo | null {
+  if (!rawValue || typeof rawValue !== "object") {
+    return null;
+  }
+  const payload = rawValue as Record<string, unknown>;
+  const rawQuestions = Array.isArray(payload.questions) ? payload.questions : [];
+  const questions = rawQuestions
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      question: readString(item, "question"),
+      header: readString(item, "header"),
+      options: (Array.isArray(item.options) ? item.options : [])
+        .filter((option): option is Record<string, unknown> => Boolean(option) && typeof option === "object")
+        .map((option) => ({
+          label: readString(option, "label"),
+          description: readString(option, "description"),
+        })),
+      multiple: Boolean(item.multiple),
+    }));
+
+  const requestId = readString(payload, "request_id");
+  if (!requestId) {
+    return null;
+  }
+  return {
+    tool: readString(payload, "tool"),
+    requestId,
+    title: readString(payload, "title"),
+    questions,
+  };
 }
 
 function formatTime(isoText: string): string {
@@ -630,6 +704,7 @@ function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, f
             planPath: readString(finalPayload.confirmation as Record<string, unknown>, "plan_path"),
           }
         : null,
+    question: normalizeQuestion(finalPayload.question),
   };
 }
 
@@ -672,6 +747,7 @@ async function loadHistory(sessionId: string): Promise<UiMessage[]> {
           planPath: msg.confirmation.plan_path || "",
         }
       : null,
+    question: normalizeQuestion(msg.question),
   }));
 }
 
@@ -819,6 +895,41 @@ async function streamModeSwitchAction(params: {
     body: {
       action: params.action,
     },
+    onDelta: params.onDelta,
+    onEvent: params.onEvent,
+    signal: params.signal,
+  });
+}
+
+async function streamQuestionAnswer(params: {
+  sessionId: string;
+  requestId: string;
+  answers: Array<{ answers: string[]; notes: string }>;
+  onDelta: (delta: string) => void;
+  onEvent: (eventName: string, payload: Record<string, unknown>) => void;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await streamSse({
+    url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/questions/${encodeURIComponent(params.requestId)}/answer/stream`,
+    body: {
+      answers: params.answers,
+    },
+    onDelta: params.onDelta,
+    onEvent: params.onEvent,
+    signal: params.signal,
+  });
+}
+
+async function streamQuestionReject(params: {
+  sessionId: string;
+  requestId: string;
+  onDelta: (delta: string) => void;
+  onEvent: (eventName: string, payload: Record<string, unknown>) => void;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await streamSse({
+    url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/questions/${encodeURIComponent(params.requestId)}/reject/stream`,
+    body: {},
     onDelta: params.onDelta,
     onEvent: params.onEvent,
     signal: params.signal,
@@ -1386,6 +1497,34 @@ function renderModeSwitchActions(params: {
   );
 }
 
+function renderQuestionPrompt(params: { message: UiMessage; isLatest: boolean }) {
+  const { message, isLatest } = params;
+  if (!isLatest || message.role !== "assistant" || message.finishReason !== "question_required" || !message.question) {
+    return null;
+  }
+
+  return (
+    <section className="question-prompt-card" aria-label="待回答问题">
+      <div className="question-prompt-head">
+        <strong>等待用户回答</strong>
+        <span>{message.question.title || `共 ${message.question.questions.length} 个问题`}</span>
+      </div>
+      <div className="question-prompt-list">
+        {message.question.questions.map((item, index) => (
+          <article key={`${message.question?.requestId}_${index}`} className="question-prompt-item">
+            <div className="question-prompt-item-head">
+              <span>{index + 1}.</span>
+              <strong>{item.header || `问题 ${index + 1}`}</strong>
+              <span>{item.multiple ? "多选" : "单选"}</span>
+            </div>
+            <div className="question-prompt-item-body">{item.question}</div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function App() {
   const [sessionId] = useState(() => buildSessionId());
   const [input, setInput] = useState("");
@@ -1403,19 +1542,33 @@ export function App() {
   const [activeModel, setActiveModel] = useState("");
   const [reasoningDefaultCollapsed, setReasoningDefaultCollapsed] = useState(false);
   const [reasoningCollapsedState, setReasoningCollapsedState] = useState<Record<string, boolean>>({});
+  const [questionDrafts, setQuestionDrafts] = useState<QuestionDraft[]>([]);
+  const [questionCursor, setQuestionCursor] = useState(0);
+  const [questionFocus, setQuestionFocus] = useState<QuestionFocusTarget>("options");
+  const [questionRequestId, setQuestionRequestId] = useState("");
 
   const messageListRef = useRef<HTMLDivElement>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
+  const questionNotesRef = useRef<HTMLTextAreaElement>(null);
+  const questionOptionsRef = useRef<HTMLDivElement>(null);
 
-  const canSubmit = useMemo(
-    () => input.trim().length > 0 && !isStreaming && !isApplyingModeSwitch && !isStopping,
-    [input, isStreaming, isApplyingModeSwitch, isStopping],
-  );
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant") || null,
     [messages],
+  );
+  const latestPendingQuestionMessage =
+    latestAssistantMessage &&
+    latestAssistantMessage.finishReason === "question_required" &&
+    latestAssistantMessage.status === "interrupted" &&
+    latestAssistantMessage.question?.requestId
+      ? latestAssistantMessage
+      : null;
+  const activeQuestion = latestPendingQuestionMessage?.question || null;
+  const canSubmit = useMemo(
+    () => input.trim().length > 0 && !activeQuestion && !isStreaming && !isApplyingModeSwitch && !isStopping,
+    [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping],
   );
 
   const modeDefaults = useMemo(() => {
@@ -1518,6 +1671,40 @@ export function App() {
     }
   }, [activeProvider, activeModel, isRuntimeBusy, providerModelKey, providerModelKeys]);
 
+  useEffect(() => {
+    if (!activeQuestion) {
+      setQuestionRequestId("");
+      setQuestionDrafts([]);
+      setQuestionCursor(0);
+      setQuestionFocus("options");
+      return;
+    }
+    if (activeQuestion.requestId === questionRequestId) {
+      return;
+    }
+    setQuestionRequestId(activeQuestion.requestId);
+    setQuestionCursor(0);
+    setQuestionFocus("options");
+    setQuestionDrafts(
+      activeQuestion.questions.map((item) => ({
+        answers: [],
+        notes: "",
+        activeOptionIndex: item.options.length > 0 ? 0 : -1,
+      })),
+    );
+  }, [activeQuestion, questionRequestId]);
+
+  useEffect(() => {
+    if (!activeQuestion) {
+      return;
+    }
+    if (questionFocus === "notes") {
+      questionNotesRef.current?.focus();
+      return;
+    }
+    questionOptionsRef.current?.focus();
+  }, [activeQuestion, questionCursor, questionFocus]);
+
   const refreshHistory = async () => {
     setError("");
     try {
@@ -1585,6 +1772,80 @@ export function App() {
     void refreshRuntimeOptions();
   }, []);
 
+  const updateQuestionDraft = (index: number, updater: (draft: QuestionDraft) => QuestionDraft) => {
+    setQuestionDrafts((prev) =>
+      prev.map((draft, draftIndex) => (draftIndex === index ? updater(draft) : draft)),
+    );
+  };
+
+  const moveQuestionCursor = (delta: number) => {
+    if (!activeQuestion) {
+      return;
+    }
+    setQuestionCursor((prev) => {
+      const next = prev + delta;
+      if (next < 0) {
+        return 0;
+      }
+      if (next >= activeQuestion.questions.length) {
+        return activeQuestion.questions.length - 1;
+      }
+      return next;
+    });
+  };
+
+  const toggleQuestionOptionSelection = () => {
+    if (!activeQuestion) {
+      return;
+    }
+    const question = activeQuestion.questions[questionCursor];
+    const draft = questionDrafts[questionCursor];
+    if (!question || !draft || draft.activeOptionIndex < 0 || draft.activeOptionIndex >= question.options.length) {
+      return;
+    }
+    const selectedLabel = question.options[draft.activeOptionIndex]?.label || "";
+    if (!selectedLabel) {
+      return;
+    }
+    updateQuestionDraft(questionCursor, (currentDraft) => {
+      const exists = currentDraft.answers.includes(selectedLabel);
+      if (question.multiple) {
+        return {
+          ...currentDraft,
+          answers: exists
+            ? currentDraft.answers.filter((item) => item !== selectedLabel)
+            : [...currentDraft.answers, selectedLabel],
+        };
+      }
+      return {
+        ...currentDraft,
+        answers: [selectedLabel],
+      };
+    });
+  };
+
+  const validateQuestionDrafts = (): string | null => {
+    if (!activeQuestion) {
+      return "当前没有待回答的问题。";
+    }
+    if (questionDrafts.length !== activeQuestion.questions.length) {
+      return "问题状态尚未准备完成，请稍后重试。";
+    }
+    for (let index = 0; index < activeQuestion.questions.length; index += 1) {
+      if ((questionDrafts[index]?.answers || []).length === 0) {
+        const question = activeQuestion.questions[index];
+        return `${question.header || `问题 ${index + 1}`} 还没有选择答案。`;
+      }
+    }
+    return null;
+  };
+
+  const buildQuestionAnswerPayload = () =>
+    questionDrafts.map((draft) => ({
+      answers: draft.answers,
+      notes: draft.notes,
+    }));
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = input.trim();
@@ -1614,6 +1875,7 @@ export function App() {
       displayParts: [],
       displayTextMergeOpen: false,
       confirmation: null,
+      question: null,
     };
     const assistantId = buildId("assistant");
     const assistantMessage: UiMessage = {
@@ -1633,6 +1895,7 @@ export function App() {
       displayParts: [],
       displayTextMergeOpen: false,
       confirmation: null,
+      question: null,
     };
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
@@ -1812,6 +2075,7 @@ export function App() {
           displayParts: [],
           displayTextMergeOpen: false,
           confirmation: null,
+          question: null,
         };
 
         setMessages((prev) => [...prev, assistantMessage]);
@@ -1941,6 +2205,199 @@ export function App() {
     }
   };
 
+  const handleQuestionAction = async (action: "answer" | "reject") => {
+    if (!activeQuestion || isStreaming || isApplyingModeSwitch) {
+      return;
+    }
+    if (action === "answer") {
+      const validationError = validateQuestionDrafts();
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
+    }
+
+    setError("");
+    setShouldFollow(true);
+    setIsStreaming(true);
+    setIsStopping(false);
+
+    const now = new Date().toISOString();
+    const assistantId = buildId("assistant");
+    const assistantMessage: UiMessage = {
+      id: assistantId,
+      role: "assistant",
+      text: "",
+      createdAt: now,
+      status: "running",
+      agent: latestPendingQuestionMessage?.agent || mode,
+      provider: "",
+      model: "",
+      finishReason: "",
+      turnStartedAt: now,
+      turnCompletedAt: "",
+      responseMeta: emptyResponseMeta(),
+      processItems: [],
+      displayParts: [],
+      displayTextMergeOpen: false,
+      confirmation: null,
+      question: null,
+    };
+
+    setMessages((prev) => [...prev, assistantMessage]);
+    setActiveProvider("");
+    setActiveModel("");
+    activeTurnRef.current = {
+      kind: action === "answer" ? "question_answer" : "question_reject",
+      assistantMessageId: assistantId,
+      turnStartedAt: now,
+    };
+
+    let finalStatus = "completed";
+    let finalPayload: Record<string, unknown> = {};
+    const controller = new AbortController();
+    activeStreamControllerRef.current = controller;
+    let wasAborted = false;
+
+    try {
+      if (action === "answer") {
+        await streamQuestionAnswer({
+          sessionId,
+          requestId: activeQuestion.requestId,
+          answers: buildQuestionAnswerPayload(),
+          onDelta: () => {},
+          onEvent: (eventName, payload) => {
+            if (eventName === "text_delta") {
+              const delta = readString(payload, "delta");
+              setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? appendDisplayTextDelta(msg, delta, payload) : msg)));
+            } else if (eventName === "reasoning_delta") {
+              const delta = readString(payload, "delta");
+              setMessages((prev) =>
+                prev.map((msg) => (msg.id === assistantId ? appendDisplayReasoningDelta(msg, delta, payload) : msg)),
+              );
+            }
+            const processItem = buildLiveProcessItem(eventName, payload);
+            if (processItem) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId
+                    ? {
+                        ...msg,
+                        processItems: appendProcessItem(msg.processItems, processItem),
+                        displayParts: (() => {
+                          const displayPart = buildLiveDisplayPart(eventName, payload);
+                          return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
+                        })(),
+                        displayTextMergeOpen: false,
+                      }
+                    : msg,
+                ),
+              );
+            } else if (eventName !== "text_delta" && eventName !== "reasoning_delta") {
+              setMessages((prev) =>
+                prev.map((msg) => (msg.id === assistantId ? { ...msg, displayTextMergeOpen: false } : msg)),
+              );
+            }
+            const providerName = readString(payload, "provider");
+            const modelName = readString(payload, "model");
+            if (providerName) {
+              setActiveProvider(providerName);
+            }
+            if (modelName) {
+              setActiveModel(modelName);
+            }
+            if (eventName === "done") {
+              finalStatus = readString(payload, "status", "completed");
+              finalPayload = payload;
+            }
+          },
+          signal: controller.signal,
+        });
+      } else {
+        await streamQuestionReject({
+          sessionId,
+          requestId: activeQuestion.requestId,
+          onDelta: () => {},
+          onEvent: (eventName, payload) => {
+            if (eventName === "text_delta") {
+              const delta = readString(payload, "delta");
+              setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? appendDisplayTextDelta(msg, delta, payload) : msg)));
+            } else if (eventName === "reasoning_delta") {
+              const delta = readString(payload, "delta");
+              setMessages((prev) =>
+                prev.map((msg) => (msg.id === assistantId ? appendDisplayReasoningDelta(msg, delta, payload) : msg)),
+              );
+            }
+            const processItem = buildLiveProcessItem(eventName, payload);
+            if (processItem) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId
+                    ? {
+                        ...msg,
+                        processItems: appendProcessItem(msg.processItems, processItem),
+                        displayParts: (() => {
+                          const displayPart = buildLiveDisplayPart(eventName, payload);
+                          return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
+                        })(),
+                        displayTextMergeOpen: false,
+                      }
+                    : msg,
+                ),
+              );
+            } else if (eventName !== "text_delta" && eventName !== "reasoning_delta") {
+              setMessages((prev) =>
+                prev.map((msg) => (msg.id === assistantId ? { ...msg, displayTextMergeOpen: false } : msg)),
+              );
+            }
+            const providerName = readString(payload, "provider");
+            const modelName = readString(payload, "model");
+            if (providerName) {
+              setActiveProvider(providerName);
+            }
+            if (modelName) {
+              setActiveModel(modelName);
+            }
+            if (eventName === "done") {
+              finalStatus = readString(payload, "status", "completed");
+              finalPayload = payload;
+            }
+          },
+          signal: controller.signal,
+        });
+      }
+
+      setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? mergeMessageWithFinalPayload(msg, finalStatus, finalPayload) : msg)));
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        wasAborted = true;
+        return;
+      }
+      setError((err as Error).message || "问题回答提交失败");
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? {
+                ...msg,
+                status: "failed",
+                text: msg.text || "问题处理失败，请稍后重试。",
+                displayTextMergeOpen: false,
+              }
+            : msg,
+        ),
+      );
+    } finally {
+      if (activeStreamControllerRef.current === controller) {
+        activeStreamControllerRef.current = null;
+      }
+      if (!wasAborted && activeTurnRef.current?.assistantMessageId === assistantId) {
+        activeTurnRef.current = null;
+      }
+      setIsStreaming(false);
+      setIsStopping(false);
+    }
+  };
+
   const handleStopCurrentRun = async () => {
     if ((!isStreaming && !isApplyingModeSwitch) || isStopping) {
       return;
@@ -2013,12 +2470,141 @@ export function App() {
     }
   };
 
+  const handleQuestionOptionClick = (optionIndex: number) => {
+    if (!activeQuestion) {
+      return;
+    }
+    updateQuestionDraft(questionCursor, (draft) => {
+      const question = activeQuestion.questions[questionCursor];
+      const option = question?.options[optionIndex];
+      if (!question || !option) {
+        return draft;
+      }
+      const nextAnswers = question.multiple
+        ? draft.answers.includes(option.label)
+          ? draft.answers.filter((item) => item !== option.label)
+          : [...draft.answers, option.label]
+        : [option.label];
+      return {
+        ...draft,
+        answers: nextAnswers,
+        activeOptionIndex: optionIndex,
+      };
+    });
+    setQuestionFocus("options");
+  };
+
+  const handleQuestionNotesChange = (value: string) => {
+    updateQuestionDraft(questionCursor, (draft) => ({
+      ...draft,
+      notes: value,
+    }));
+  };
+
+  const handleQuestionOptionKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!activeQuestion) {
+      return;
+    }
+    const question = activeQuestion.questions[questionCursor];
+    const draft = questionDrafts[questionCursor];
+    if (!question || !draft) {
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      updateQuestionDraft(questionCursor, (currentDraft) => ({
+        ...currentDraft,
+        activeOptionIndex: Math.max(0, currentDraft.activeOptionIndex - 1),
+      }));
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      updateQuestionDraft(questionCursor, (currentDraft) => ({
+        ...currentDraft,
+        activeOptionIndex: Math.min(question.options.length - 1, currentDraft.activeOptionIndex + 1),
+      }));
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveQuestionCursor(-1);
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      moveQuestionCursor(1);
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      setQuestionFocus("notes");
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const activeLabel = question.options[draft.activeOptionIndex]?.label || "";
+      const alreadySelected = activeLabel ? draft.answers.includes(activeLabel) : false;
+      if (!alreadySelected) {
+        toggleQuestionOptionSelection();
+        return;
+      }
+      if (questionCursor >= activeQuestion.questions.length - 1) {
+        void handleQuestionAction("answer");
+        return;
+      }
+      moveQuestionCursor(1);
+    }
+  };
+
+  const handleQuestionNotesKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!activeQuestion) {
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      setQuestionFocus("options");
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      if (event.nativeEvent.isComposing) {
+        return;
+      }
+      event.preventDefault();
+      if (questionCursor >= activeQuestion.questions.length - 1) {
+        void handleQuestionAction("answer");
+        return;
+      }
+      moveQuestionCursor(1);
+      setQuestionFocus("options");
+      return;
+    }
+    const target = event.currentTarget;
+    const selectionStart = target.selectionStart ?? 0;
+    const selectionEnd = target.selectionEnd ?? 0;
+    if (event.key === "ArrowLeft" && selectionStart === selectionEnd && selectionStart === 0) {
+      event.preventDefault();
+      moveQuestionCursor(-1);
+      setQuestionFocus("options");
+      return;
+    }
+    if (event.key === "ArrowRight" && selectionStart === selectionEnd && selectionEnd === target.value.length) {
+      event.preventDefault();
+      moveQuestionCursor(1);
+      setQuestionFocus("options");
+    }
+  };
+
   const handleToggleReasoning = (entryKey: string) => {
     setReasoningCollapsedState((prev) => ({
       ...prev,
       [entryKey]: !(prev[entryKey] ?? reasoningDefaultCollapsed),
     }));
   };
+
+  const currentQuestion = activeQuestion?.questions[questionCursor] || null;
+  const currentQuestionDraft = questionDrafts[questionCursor] || null;
+  const isQuestionMode = Boolean(activeQuestion);
 
   return (
     <div className="app-shell">
@@ -2089,6 +2675,10 @@ export function App() {
                           void handleModeSwitchAction(action);
                         },
                       })}
+                      {renderQuestionPrompt({
+                        message: msg,
+                        isLatest: latestAssistantMessage?.id === msg.id,
+                      })}
                     </div>
                   </article>
                 );
@@ -2102,7 +2692,7 @@ export function App() {
                   id="agent-mode"
                   value={mode}
                   onChange={(e) => setMode(e.target.value as AgentName)}
-                  disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode}
                   className="terminal-select"
                 >
                   {agentOptions.map((item) => (
@@ -2119,7 +2709,7 @@ export function App() {
                   id="provider-name"
                   value={providerModelKey}
                   onChange={(e) => setProviderModelKey(e.target.value)}
-                  disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode}
                   className="terminal-select"
                 >
                   {providerModelOptions.map((item) => (
@@ -2134,53 +2724,152 @@ export function App() {
                 <span>{followText}</span>
                 <span>最近消息 {latestMessageTime}</span>
               </div>
-              <button
-                type="button"
-                onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
-                disabled={isApplyingModeSwitch || isStopping}
-                className="plain-btn terminal-inline-btn"
-              >
+                <button
+                  type="button"
+                  onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
+                  disabled={isApplyingModeSwitch || isStopping || isQuestionMode}
+                  className="plain-btn terminal-inline-btn"
+                >
                 {reasoningDefaultCollapsed ? "思考默认收起" : "思考默认展开"}
               </button>
-              <button
-                type="button"
-                onClick={() => void refreshRuntimeOptions()}
-                disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping}
-                className="plain-btn terminal-inline-btn"
-              >
+                <button
+                  type="button"
+                  onClick={() => void refreshRuntimeOptions()}
+                  disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode}
+                  className="plain-btn terminal-inline-btn"
+                >
                 {isLoadingOptions ? "刷新中..." : "刷新配置"}
               </button>
             </div>
 
             <form className="terminal-composer" onSubmit={handleSubmit}>
               <div className="terminal-composer-head">
-                <span className="terminal-prompt">cmd&gt;</span>
-                <span className="terminal-composer-summary">{currentRuntimeSummary}</span>
+                <span className="terminal-prompt">{isQuestionMode ? "ask&gt;" : "cmd&gt;"}</span>
+                <span className="terminal-composer-summary">
+                  {isQuestionMode && activeQuestion
+                    ? `${activeQuestion.title || "等待回答"} · ${questionCursor + 1}/${activeQuestion.questions.length}`
+                    : currentRuntimeSummary}
+                </span>
               </div>
-              <div className="terminal-input-wrap">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="输入目标、上下文或想修的细节；Enter 发送，Shift+Enter 换行，Shift+Tab 切换 Agent。"
-                  rows={3}
-                  onKeyDown={onComposerKeyDown}
-                  aria-label="消息输入框"
-                  disabled={isApplyingModeSwitch || isStopping}
-                />
-              </div>
+              {isQuestionMode && activeQuestion && currentQuestion && currentQuestionDraft ? (
+                <div className="question-composer" aria-label="问题回答输入区">
+                  <div className="question-composer-nav">
+                    {activeQuestion.questions.map((item, index) => {
+                      const draft = questionDrafts[index];
+                      const isDone = (draft?.answers || []).length > 0;
+                      return (
+                        <button
+                          key={`${activeQuestion.requestId}_${index}`}
+                          type="button"
+                          className={`question-nav-btn ${index === questionCursor ? "is-active" : ""} ${isDone ? "is-done" : ""}`}
+                          onClick={() => setQuestionCursor(index)}
+                          disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                        >
+                          {index + 1}. {item.header || `问题 ${index + 1}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="question-composer-panel">
+                    <div className="question-panel-main">
+                      <div className="question-panel-head">
+                        <strong>{currentQuestion.header || `问题 ${questionCursor + 1}`}</strong>
+                        <span>{currentQuestion.multiple ? "多选题" : "单选题"}</span>
+                      </div>
+                      <div className="question-panel-body">{currentQuestion.question}</div>
+                      <div
+                        className={`question-options ${questionFocus === "options" ? "is-focused" : ""}`}
+                        ref={questionOptionsRef}
+                        tabIndex={0}
+                        onFocus={() => setQuestionFocus("options")}
+                        onKeyDown={handleQuestionOptionKeyDown}
+                        aria-label="答案选项"
+                      >
+                        {currentQuestion.options.map((option, optionIndex) => {
+                          const isActive = currentQuestionDraft.activeOptionIndex === optionIndex;
+                          const isSelected = currentQuestionDraft.answers.includes(option.label);
+                          return (
+                            <button
+                              key={`${currentQuestion.header}_${option.label}_${optionIndex}`}
+                              type="button"
+                              className={`question-option ${isActive ? "is-active" : ""} ${isSelected ? "is-selected" : ""}`}
+                              onClick={() => handleQuestionOptionClick(optionIndex)}
+                              disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                            >
+                              <div className="question-option-top">
+                                <strong>{option.label}</strong>
+                                <span>{isSelected ? "已选" : currentQuestion.multiple ? "可切换" : "回车选中"}</span>
+                              </div>
+                              <div className="question-option-desc">{option.description || "无额外说明"}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="question-panel-notes">
+                      <label className="question-notes-label" htmlFor="question-notes">
+                        notes
+                      </label>
+                      <textarea
+                        id="question-notes"
+                        ref={questionNotesRef}
+                        value={currentQuestionDraft.notes}
+                        onChange={(e) => handleQuestionNotesChange(e.target.value)}
+                        onFocus={() => setQuestionFocus("notes")}
+                        onKeyDown={handleQuestionNotesKeyDown}
+                        placeholder="可选备注；Tab 切回选项，Shift+Enter 换行。"
+                        rows={6}
+                        disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                        aria-label="备注输入框"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="terminal-input-wrap">
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="输入目标、上下文或想修的细节；Enter 发送，Shift+Enter 换行，Shift+Tab 切换 Agent。"
+                    rows={3}
+                    onKeyDown={onComposerKeyDown}
+                    aria-label="消息输入框"
+                    disabled={isApplyingModeSwitch || isStopping}
+                  />
+                </div>
+              )}
               <div className="composer-footer">
                 <div className="composer-tips">
                   <span>{followText}</span>
                   <span>最近消息: {latestMessageTime}</span>
+                  {isQuestionMode ? <span>左右键切题，上下键选项，Tab 切换到 notes</span> : null}
                 </div>
-                <button
-                  type={isStreaming || isApplyingModeSwitch ? "button" : "submit"}
-                  disabled={isStreaming || isApplyingModeSwitch ? isStopping : !canSubmit}
-                  onClick={isStreaming || isApplyingModeSwitch ? () => void handleStopCurrentRun() : undefined}
-                  className={`primary-btn ${isStreaming || isApplyingModeSwitch || isStopping ? "stop-btn" : ""}`.trim()}
-                >
-                  {isStopping ? "停止中..." : isStreaming || isApplyingModeSwitch ? "停止" : "发送"}
-                </button>
+                <div className="composer-actions">
+                  {isQuestionMode ? (
+                    <button
+                      type="button"
+                      className="plain-btn"
+                      disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                      onClick={() => void handleQuestionAction("reject")}
+                    >
+                      拒绝回答
+                    </button>
+                  ) : null}
+                  <button
+                    type={isStreaming || isApplyingModeSwitch ? "button" : isQuestionMode ? "button" : "submit"}
+                    disabled={isStreaming || isApplyingModeSwitch ? isStopping : isQuestionMode ? false : !canSubmit}
+                    onClick={
+                      isStreaming || isApplyingModeSwitch
+                        ? () => void handleStopCurrentRun()
+                        : isQuestionMode
+                          ? () => void handleQuestionAction("answer")
+                          : undefined
+                    }
+                    className={`primary-btn ${isStreaming || isApplyingModeSwitch || isStopping ? "stop-btn" : ""}`.trim()}
+                  >
+                    {isStopping ? "停止中..." : isStreaming || isApplyingModeSwitch ? "停止" : isQuestionMode ? "提交回答" : "发送"}
+                  </button>
+                </div>
               </div>
             </form>
           </section>
