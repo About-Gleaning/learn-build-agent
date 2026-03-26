@@ -26,8 +26,10 @@ from agent.tools.handlers import (
 )
 from agent.tools.question_tool import CUSTOM_OPTION_LABEL, run_question
 from agent.tools.read_file_tool import resolve_readable_file_path, run_read
+from agent.tools.skill_tool import run_load_skill
 from agent.tools.todo_manager import TodoManager
 from agent.tools.write_file_tool import run_write
+from agent.skills.runtime import SkillRegistry
 from agent.runtime.workspace import (
     build_plan_storage_path,
     build_session_storage_name,
@@ -704,6 +706,89 @@ def test_run_read_should_reject_other_session_runtime_file(tmp_path):
     assert result["metadata"]["error_code"] == "read_path_forbidden"
 
 
+def test_run_read_should_allow_skills_file_under_runtime_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    _set_test_session("skills-read")
+    skill_file = get_workspace().skills_dir / "demo-skill" / "references" / "rule.md"
+    skill_file.parent.mkdir(parents=True, exist_ok=True)
+    skill_file.write_text("skill reference", encoding="utf-8")
+
+    result = run_read(str(skill_file))
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "skill reference"
+
+
+def test_run_load_skill_should_return_structured_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    _set_test_session("skills-load")
+    skill_dir = get_workspace().skills_dir / "demo-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: demo\n---\n# Demo Skill\n请先阅读说明。\n",
+        encoding="utf-8",
+    )
+    registry = SkillRegistry(get_workspace().skills_dir)
+    registry.discover()
+
+    result = run_load_skill(name="demo-skill", registry=registry)
+
+    assert result["title"] == "Loaded skill: demo-skill"
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["name"] == "demo-skill"
+    assert result["metadata"]["dir"] == str(skill_dir.resolve())
+    assert result["output"].startswith("## Skill: demo-skill\nBase directory: ")
+    assert "# Demo Skill" in result["output"]
+
+
+def test_run_load_skill_should_reject_empty_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    _set_test_session("skills-load-empty")
+    registry = SkillRegistry(get_workspace().skills_dir)
+    registry.skills = []
+
+    result = run_load_skill(name="   ", registry=registry)
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "skill_name_invalid"
+
+
+def test_run_load_skill_should_match_name_case_insensitively(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    _set_test_session("skills-load-case")
+    skill_dir = get_workspace().skills_dir / "demo-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: Demo-Skill\ndescription: demo\n---\n# Demo Skill\n",
+        encoding="utf-8",
+    )
+    registry = SkillRegistry(get_workspace().skills_dir)
+    registry.discover()
+
+    result = run_load_skill(name="demo-skill", registry=registry)
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["name"] == "Demo-Skill"
+
+
+def test_run_load_skill_should_return_not_found_when_skill_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    _set_test_session("skills-load-missing")
+    registry = SkillRegistry(get_workspace().skills_dir)
+    registry.skills = []
+
+    result = run_load_skill(name="missing-skill", registry=registry)
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "skill_not_found"
+    assert result["metadata"]["name"] == "missing-skill"
+
+
 def test_resolve_readable_file_path_should_allow_workspace_absolute_path(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello", encoding="utf-8")
@@ -726,6 +811,23 @@ def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
     assert result["metadata"]["diagnostics"] == []
     assert result["metadata"]["diagnostics_status"] == "not_enabled"
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_run_write_should_allow_runtime_skills_file_after_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    _set_test_session("skills-write")
+    target = get_workspace().skills_dir / "demo-skill" / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+
+    read_result = run_read(str(target))
+    assert read_result["metadata"]["status"] == "completed"
+
+    result = run_write(str(target), "new")
+
+    assert result["metadata"]["status"] == "completed"
+    assert target.read_text(encoding="utf-8") == "new"
 
 
 def test_run_write_should_require_read_before_overwriting_existing_file(tmp_path):

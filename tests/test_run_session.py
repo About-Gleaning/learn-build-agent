@@ -1105,6 +1105,10 @@ def test_load_skill_tool_description_should_include_available_skills_without_pat
     assert "<name>python_development_guide</name>" in description
     assert "<description>提供 Python 开发规范、测试与性能优化建议。</description>" in description
     assert "/tmp/skills/python_development_guide" not in description
+    assert "每次只加载一个 skill" in description
+    assert load_skill_tool["function"]["parameters"]["required"] == ["name"]
+    assert "name" in load_skill_tool["function"]["parameters"]["properties"]
+    assert "skill_names" not in load_skill_tool["function"]["parameters"]["properties"]
 
 
 def test_load_skill_tool_description_should_show_empty_message_when_no_skills():
@@ -1115,6 +1119,61 @@ def test_load_skill_tool_description_should_show_empty_message_when_no_skills():
         load_skill_tool["function"]["description"]
         == "加载一个 skill，以获取完成某个特定任务的详细指导。目前没有可用的 skills。"
     )
+
+
+def test_get_skill_registry_should_read_runtime_home_skills_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    runtime_skill = get_workspace().skills_dir / "runtime-skill" / "SKILL.md"
+    runtime_skill.parent.mkdir(parents=True, exist_ok=True)
+    runtime_skill.write_text(
+        "---\nname: runtime-skill\ndescription: runtime only\n---\n# Runtime Skill\n",
+        encoding="utf-8",
+    )
+
+    registry = session_module._get_skill_registry()
+
+    assert [skill["name"] for skill in registry.list_briefs()] == ["runtime-skill"]
+
+
+def test_run_session_load_skill_tool_should_return_structured_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    skill_dir = get_workspace().skills_dir / "runtime-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: runtime-skill\ndescription: runtime only\n---\n# Runtime Skill\n按步骤执行。\n",
+        encoding="utf-8",
+    )
+    clear_session_memory()
+
+    call_state = {"count": 0, "tool_output": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        if call_state["count"] == 2:
+            call_state["tool_output"] = _last_tool_result_content(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_load_skill",
+                name="load_skill",
+                arguments='{"name":"runtime-skill"}',
+            )
+        else:
+            append_text_part(assistant, "已完成")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("加载 runtime skill", session_id="s_load_skill_result")
+
+    assert get_message_text(result) == "已完成"
+    assert "## Skill: runtime-skill" in call_state["tool_output"]
+    assert f"Base directory: {skill_dir.resolve()}" in call_state["tool_output"]
+    assert "# Runtime Skill" in call_state["tool_output"]
 
 
 def test_task_with_primary_agent_should_return_error(monkeypatch):

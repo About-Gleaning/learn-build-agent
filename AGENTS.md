@@ -42,15 +42,16 @@
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑；流式事件、`process_items`、`display_parts` 与响应摘要拼装统一放在 `runtime/stream_display.py`。
 - `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口；协议级转换统一收敛在 `adapters/llm/protocols.py`，厂商差异统一收敛在 `adapters/llm/vendors.py`，禁止继续把 `qwen` / `kimi` 等厂商分支散落回 `client.py` 或 `runtime/session.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model`（`primary`/`subagent`）和 `description`。
-- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，`write_file` 放 `tools/write_file_tool.py`，`edit_file` 放 `tools/edit_file_tool.py`，`glob` 放 `tools/glob_tool.py`，`grep` 放 `tools/grep_tool.py`，`question` 放 `tools/question_tool.py`，路径解析公共逻辑放 `tools/path_utils.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
+- 工具实现统一在 `tools/` 目录内分模块维护；bash 相关逻辑放 `tools/bash_tool.py`，`read_file` 放 `tools/read_file_tool.py`，`write_file` 放 `tools/write_file_tool.py`，`edit_file` 放 `tools/edit_file_tool.py`，`glob` 放 `tools/glob_tool.py`，`grep` 放 `tools/grep_tool.py`，`question` 放 `tools/question_tool.py`，`load_skill` 放 `tools/skill_tool.py`，路径解析公共逻辑放 `tools/path_utils.py`，其余通用工具默认放 `tools/handlers.py`，工具协议统一在 `tools/specs.py`。
 - 文件工具与 plan 模式拦截默认返回结构化结果，至少包含 `output` 与 `metadata.status`；失败场景应补充 `metadata.error_code`。
 - `glob` 的正式参数统一为 `pattern` 与可选 `path`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件，按文件修改时间倒序排列，最多返回 `100` 条。
 - `grep` 的正式参数统一为 `pattern` 与可选 `path`、`include`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围；结果返回命中的文件路径、行号与行内容，按命中文件修改时间倒序、同文件内按行号升序排列，最多返回 `100` 条。
-- `read_file` 的正式参数统一为 `file_path`，且必须使用绝对路径；允许读取的范围仅限当前工作区，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件，禁止跨 session 读取其他运行态数据。
-- `write_file` 的正式参数统一为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；对已存在文件，写入前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再写入。
+- `read_file` 的正式参数统一为 `file_path`，且必须使用绝对路径；允许读取的范围仅限当前工作区、`~/.my-agent/skills` 下的 skill 文件，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件，禁止跨 session 读取其他运行态数据。
+- `write_file` 的正式参数统一为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；允许写入当前工作区与 `~/.my-agent/skills`；对已存在文件，写入前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再写入。
 - `write_file` 当前返回 `metadata.filepath`、`metadata.exists`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language service 的统一入口，本期固定返回空数组与 `not_enabled`。
-- `edit_file` 的正式参数统一为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；编辑已有文件前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再编辑。
+- `edit_file` 的正式参数统一为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；允许编辑当前工作区与 `~/.my-agent/skills` 的文本文件；编辑已有文件前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再编辑。
 - `edit_file` 当前返回 `metadata.diff`、`metadata.filediff`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language server 的统一入口，本期固定返回空数组与 `not_enabled`。
+- `load_skill` 的正式参数统一为 `name`；工具会按名称精确加载单个 skill，并返回 `title/output/metadata` 结构，其中 `output` 必须包含 `## Skill: {name}`、`Base directory: {dir}` 与原始 `SKILL.md` 全文，禁止模型再通过 `glob`、`grep`、`bash` 自行搜索 skill 目录。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
 - 很多工具都会验证工作路径是否合法；相对路径解析、工作区越界校验、目录存在性校验等公共逻辑必须统一收敛到 `tools/path_utils.py`，禁止继续在各工具模块重复实现。
 - plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`，plan 模式下仅允许写入该文件。
@@ -60,7 +61,8 @@
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 停止当前会话；运行时必须按 `session_id` 管理停止标记，并在 loop 顶部优先检查，命中后以 `interrupted/cancelled` 统一收口。
 - `question` 工具用于向用户发起结构化问题；运行时必须按 `session_id` 管理待答问题，并通过独立的 Web 答题/拒绝接口恢复执行；Web 答题接口固定提交“每题 `answers[] + notes`”的结构化结果，恢复给 LLM 的输入必须明确区分选项与备注。
 - `question` 工具实现统一收敛在 `tools/question_tool.py`；问题项支持可选 `custom` 字段，默认 `true`，命中时由后端统一自动追加“不是以上任何选项”兜底项，禁止模型手写重复兜底选项。
-- skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，禁止继续在 agent prompt 中注入 `skills_catalog`。
+- `load_skill` 工具实现统一收敛在 `tools/skill_tool.py`；工具描述模板统一放在 `tools/load_skill.txt`；`runtime/session.py` 只做路由，禁止继续内联 skill 正文拼装逻辑。
+- skills 的可用目录统一通过 `load_skill` 工具描述动态暴露，skills 正式根目录固定为 `~/.my-agent/skills`（若配置 `MY_AGENT_HOME`，则使用对应目录下的 `skills/`），禁止继续在 agent prompt 中注入 `skills_catalog`。
 - 主 Agent 模式状态统一收敛在 `runtime/main_agent_mode.py`（若启用该模块），禁止散落存储。
 - 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
 - `task` 工具中的 subagent 名单与说明，必须从 `runtime/agents.py` 动态生成，禁止在 `specs.py` 或 `session.py` 中手写支持列表。
@@ -132,9 +134,11 @@
 
 ## 变更记录
 
+- 2026-03-26：新增独立 `src/agent/tools/skill_tool.py` 与 `load_skill.txt`，将 `load_skill` 重构为按 `name` 精确加载单个 skill 的独立工具；返回结构统一为 `title/output/metadata(name, dir)`，`output` 仅注入 `Base directory` 与原始 `SKILL.md`，避免模型再用 `glob`/`bash` 搜索 skill 目录。
 - 2026-03-26：新增独立 `src/agent/tools/question_tool.py`，将 `question` 工具从 `handlers.py` 拆分；问题项新增可选 `custom` 字段，默认 `true`，由后端统一自动追加“不是以上任何选项”兜底项，并同步补齐 runtime/Web/schema 透传与测试覆盖。
 - 2026-03-26：新增 `question` 工具与 `src/agent/tools/question.txt`，支持 Agent 在执行过程中发起结构化提问；运行时新增待答问题状态管理、Web 答题/拒绝接口与流式恢复链路，助手消息与 SSE `done` 事件同步透传 `question` 结构，用户拒绝回答时会以“用户拒绝”语义继续后续推理并与普通工具异常区分。
 - 2026-03-26：Web 前端补齐 `question_required` 交互：最新待答问题会切换输入区为 question composer，支持问题/选项/notes 三段式输入、上下左右键导航、`Tab` 焦点切换、`Shift+Enter` 备注换行，并将每题 `answers + notes` 以结构化 payload 提交到 question 恢复接口。
+- 2026-03-26：skills 正式根目录切换为 `~/.my-agent/skills`；`read_file` / `write_file` / `edit_file` 新增对 skills 目录的受控访问；同时修复 `kimi` 在 `chat_completions` 下插入 PDF 抽取上下文过早导致多工具调用 `tool_call_id` 与 `tool` 响应不成对的问题，并新增本地序列校验防止无效请求直接外呼。
 - 2026-03-26：新增独立 `src/agent/tools/write_file_tool.py` 与 `write_file.txt`，将 `write_file` 收敛为整文件覆盖写工具；正式参数切换为 `filePath/content`，新增“已有文件先 `read_file` 再写”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `filepath/exists/diagnostics_status` 结构化返回。
 - 2026-03-26：重构 `edit_file` 为独立 `src/agent/tools/edit_file_tool.py`，正式参数切换为 `filePath/oldString/newString/replaceAll`，新增“先读后改”强校验、基于 `mtime_ns` 的读后变更保护、保守多层文本匹配与 `diff/filediff/diagnostics_status` 结构化返回；同时新增 `src/agent/tools/file_edit_state.py` 记录当前 session 的文件读取/编辑时序状态。
 - 2026-03-25：新增 `src/agent/tools/grep_tool.py` 与 `grep` 工具，基于 ripgrep 在工作区内做内容正则搜索，支持 `pattern/path/include` 入参，结果按命中文件修改时间倒序、同文件内按行号升序返回，并统一复用结构化工具返回协议。

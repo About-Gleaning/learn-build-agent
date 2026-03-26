@@ -491,6 +491,41 @@ class ChatCompletionsAdapter(ProviderAdapter):
     def build_messages(self, messages: list[Message], *, client: OpenAI | None = None) -> list[dict[str, Any]]:
         return to_provider_messages(messages)
 
+    def validate_messages(self, provider_messages: list[dict[str, Any]]) -> None:
+        pending_tool_call_ids: list[str] = []
+        for provider_message in provider_messages:
+            role = stringify_text(provider_message.get("role"))
+            if pending_tool_call_ids:
+                if role != "tool":
+                    missing = ", ".join(pending_tool_call_ids)
+                    raise ValueError(
+                        "invalid_tool_message_sequence: assistant tool_calls 之后必须先连续提供全部 tool 响应，"
+                        f"缺失 tool_call_id={missing}"
+                    )
+                tool_call_id = stringify_text(provider_message.get("tool_call_id"))
+                if tool_call_id in pending_tool_call_ids:
+                    pending_tool_call_ids.remove(tool_call_id)
+                continue
+
+            if role != "assistant":
+                continue
+
+            raw_tool_calls = provider_message.get("tool_calls")
+            if not isinstance(raw_tool_calls, list):
+                continue
+            pending_tool_call_ids = [
+                stringify_text(tool_call.get("id"))
+                for tool_call in raw_tool_calls
+                if isinstance(tool_call, dict) and stringify_text(tool_call.get("id"))
+            ]
+
+        if pending_tool_call_ids:
+            missing = ", ".join(pending_tool_call_ids)
+            raise ValueError(
+                "invalid_tool_message_sequence: assistant tool_calls 缺少对应的 tool 响应，"
+                f"缺失 tool_call_id={missing}"
+            )
+
     def build_request(
         self,
         messages: list[Message],
@@ -498,9 +533,11 @@ class ChatCompletionsAdapter(ProviderAdapter):
         *,
         client: OpenAI | None = None,
     ) -> dict[str, Any]:
+        provider_messages = self.build_messages(messages, client=client)
+        self.validate_messages(provider_messages)
         return {
             "model": self.model,
-            "messages": self.build_messages(messages, client=client),
+            "messages": provider_messages,
             "tools": tools,
         }
 

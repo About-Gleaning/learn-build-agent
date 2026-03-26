@@ -44,6 +44,7 @@ from ..tools.handlers import (
 )
 from ..tools.question_tool import run_question
 from ..tools.read_file_tool import run_read
+from ..tools.skill_tool import run_load_skill
 from ..tools.specs import build_agent_tools, build_base_tools
 from ..tools.todo_manager import TodoManager
 from ..tools.webfetch import webfetch
@@ -69,10 +70,6 @@ from .workspace import get_workspace
 logger = logging.getLogger(__name__)
 
 MainAgentMode = Literal["build", "plan"]
-
-SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
-registry = SkillRegistry(SKILLS_ROOT)
-registry.discover()
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -163,6 +160,8 @@ class TaskToolRequest:
 PENDING_MODE_SWITCHES: dict[str, PendingModeSwitch] = {}
 PENDING_QUESTIONS: dict[str, PendingQuestion] = {}
 STOP_REQUESTED_SESSION_IDS: set[str] = set()
+_SKILL_REGISTRY: SkillRegistry | None = None
+_SKILL_REGISTRY_ROOT: Path | None = None
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
@@ -256,6 +255,22 @@ def _resolve_prompt_path(agent: str, vendor: str) -> Path:
     if candidate.exists():
         return candidate
     raise ValueError(f"未知的 prompt agent: {agent}")
+
+
+def _get_skill_registry() -> SkillRegistry:
+    global _SKILL_REGISTRY, _SKILL_REGISTRY_ROOT
+    skills_root = get_workspace().skills_dir.resolve()
+    if _SKILL_REGISTRY is not None and _SKILL_REGISTRY_ROOT == skills_root:
+        return _SKILL_REGISTRY
+
+    registry = SkillRegistry(skills_root)
+    try:
+        registry.discover()
+    except FileNotFoundError:
+        registry.skills = []
+    _SKILL_REGISTRY = registry
+    _SKILL_REGISTRY_ROOT = skills_root
+    return registry
 
 
 def _read_prompt_file(path: Path) -> str:
@@ -374,7 +389,7 @@ def _get_system_prompt_for_mode(
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
-    return build_agent_tools(mode, registry.list_briefs())
+    return build_agent_tools(mode, _get_skill_registry().list_briefs())
 
 
 def _ensure_system_prompt(messages: list[Message], prompt: str, session_id: str) -> list[Message]:
@@ -576,6 +591,7 @@ def _bootstrap_session(
     active_session_id = set_session_id(normalize_required_session_id(session_id))
     turn_started_at = utc_now_iso()
     mode_enabled = tools is None and system_prompt is None
+    registry = _get_skill_registry()
 
     initial_mode: MainAgentMode = "build"
     if mode in {"build", "plan"}:
@@ -935,6 +951,7 @@ def _resume_question_session(
 ) -> Message | Generator[dict[str, Any], None, None]:
     agent_kind = str(pending.get("agent_kind", "")).strip().lower()
     if agent_kind == "subagent":
+        registry = _get_skill_registry()
         provider_name = str(pending.get("provider", "")).strip()
         model_name = str(pending.get("model", "")).strip()
         runtime_agent = str(pending.get("resume_runtime_agent", "")).strip().lower() or "explore"
@@ -1612,7 +1629,7 @@ def subagent_loop(
     result = run_session(
         user_input=prompt,
         session_id=session_id,
-        tools=build_base_tools(registry.list_briefs()),
+        tools=build_base_tools(_get_skill_registry().list_briefs()),
         system_prompt=_call_build_system_prompt(
             agent=agent_name,
             model=(llm_config.model if llm_config else ""),
@@ -2094,6 +2111,7 @@ def _run_session_stream(
                     )
                     result = task_request.result
                     if task_request.should_execute:
+                        registry = _get_skill_registry()
                         delegated_message = yield from _run_session_stream(
                             task_request.prompt,
                             session_id=active_session_id,
@@ -2498,7 +2516,7 @@ def _build_tool_handlers(
         ),
         "plan_enter": lambda **kw: _run_plan_enter_tool(**kw),
         "plan_exit": lambda **kw: _run_plan_exit_tool(**kw),
-        "load_skill": lambda **kw: registry.build_skill_context(kw["skill_names"]),
+        "load_skill": lambda **kw: run_load_skill(name=kw["name"], registry=_get_skill_registry()),
     }
 
 

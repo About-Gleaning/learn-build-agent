@@ -302,46 +302,6 @@ class SkillRegistry:
         items = [skill.to_brief_dict() for skill in self.skills]
         return json.dumps(items, ensure_ascii=False, indent=2)
 
-    def build_skill_context(self, skill_names: List[str]) -> str:
-        """
-        根据 skill 名称列表，构建完整的 skill 上下文文本。
-
-        用途：
-        - 当模型已经选中某些 skill 后
-        - 再把这些 skill 的完整 SKILL.md 内容注入到下一轮上下文中
-        - 同时附带该 skill 目录中的其他文件清单，便于后续进一步读取或执行
-
-        参数：
-        - skill_names: 要加载的 skill 名称列表
-
-        返回：
-        - 拼接后的大文本，可直接注入模型上下文
-        """
-        sections: List[str] = []
-
-        for name in skill_names:
-            skill = self.get_skill(name)
-            if not skill:
-                continue
-
-            full_text = skill.load_full_content()
-            files = skill.list_local_files()
-
-            section = [
-                f"# Skill: {skill.name}",
-                f"Path: {skill.path}",
-                "",
-                "## Full SKILL.md",
-                full_text,
-                "",
-                "## Additional Local Files",
-                json.dumps(files, ensure_ascii=False, indent=2),
-            ]
-            sections.append("\n".join(section))
-
-        return "\n\n".join(sections)
-
-
 def parse_skill_markdown(raw: str) -> tuple[Dict[str, Any], str]:
     """
     解析 SKILL.md 的 frontmatter 和正文。

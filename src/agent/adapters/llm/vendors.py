@@ -235,6 +235,7 @@ class KimiChatCompletionsAdapter(ChatCompletionsAdapter):
             raise ValueError("kimi_file_extract_failed: 缺少 Moonshot 文件客户端。")
 
         provider_messages: list[dict[str, Any]] = []
+        pending_active_tool_contexts: list[dict[str, Any]] = []
         active_tool_suffix_start = _resolve_active_tool_suffix_start(messages)
         for index, message in enumerate(messages):
             message_provider_messages = to_provider_messages([message])
@@ -282,7 +283,16 @@ class KimiChatCompletionsAdapter(ChatCompletionsAdapter):
                     )
                     cached_contexts[attachment_key] = extracted_text
                 if extracted_text:
-                    provider_messages.append(_build_kimi_pdf_context_message(extracted_text))
+                    context_message = _build_kimi_pdf_context_message(extracted_text)
+                    # 当前轮 assistant 的多工具调用需要先连续返回全部 tool 响应，
+                    # 再追加 Kimi 文件抽取得到的参考上下文，避免破坏 tool_call 配对顺序。
+                    if allow_new_extraction:
+                        pending_active_tool_contexts.append(context_message)
+                    else:
+                        provider_messages.append(context_message)
+
+        if pending_active_tool_contexts:
+            provider_messages.extend(pending_active_tool_contexts)
 
         return provider_messages
 

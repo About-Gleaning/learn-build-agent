@@ -1606,6 +1606,136 @@ def test_create_chat_completion_should_replay_reasoning_only_assistant_in_reques
     assert provider_messages[1]["reasoning_content"] == "先确认当前工作目录。"
 
 
+def test_create_chat_completion_should_reject_missing_tool_response_before_non_tool_message(monkeypatch):
+    session_id = "s_invalid_tool_sequence"
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "读取 PDF")
+
+    assistant_msg = create_message("assistant", session_id)
+    append_tool_call_part(assistant_msg, tool_call_id="call_pdf", name="read_file", arguments='{"file_path":"a.pdf"}')
+    append_tool_call_part(assistant_msg, tool_call_id="call_rule", name="read_file", arguments='{"file_path":"b.md"}')
+
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"a.pdf"}',
+        output={
+            "output": "PDF read successfully",
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": session_id,
+                    "messageID": tool_msg["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+    )
+
+    synthetic_user = create_message("user", session_id)
+    append_text_part(synthetic_user, KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "抽取内容")
+
+    message = create_chat_completion(
+        [user_msg, assistant_msg, tool_msg, synthetic_user],
+        tools=[],
+        llm_config=_build_kimi_config(),
+    )
+
+    assert message["info"]["status"] == "failed"
+    assert message["info"]["error"]["code"] == "api_error"
+    assert "invalid_tool_message_sequence" in message["info"]["error"]["message"]
+
+
+def test_kimi_build_messages_should_defer_pdf_context_until_all_active_tool_results_finish(monkeypatch):
+    captured_payload: dict[str, object] = {}
+    session_id = "s_kimi_multi_tool"
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "处理这个 PDF 和模板")
+
+    assistant_msg = create_message("assistant", session_id)
+    append_tool_call_part(assistant_msg, tool_call_id="call_pdf", name="read_file", arguments='{"file_path":"demo.pdf"}')
+    append_tool_call_part(
+        assistant_msg,
+        tool_call_id="call_template",
+        name="read_file",
+        arguments='{"file_path":"rule.md"}',
+    )
+
+    pdf_tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        pdf_tool_msg,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.pdf"}',
+        output={
+            "output": "PDF read successfully",
+            "attachments": [
+                {
+                    "id": "att_pdf",
+                    "sessionID": session_id,
+                    "messageID": pdf_tool_msg["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+    )
+
+    failed_tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        failed_tool_msg,
+        tool_call_id="call_template",
+        name="read_file",
+        status="failed",
+        arguments='{"file_path":"rule.md"}',
+        output={
+            "output": "Error: read_file 路径超出允许范围: /tmp/rule.md",
+            "metadata": {"status": "failed", "error_code": "read_path_forbidden"},
+        },
+    )
+
+    def _capture_chat_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_capture_chat_create)),
+        responses=SimpleNamespace(create=lambda **kwargs: _build_responses_text_response("unused")),
+        files=SimpleNamespace(
+            create=lambda **kwargs: SimpleNamespace(id="file_pdf_1"),
+            content=lambda **kwargs: SimpleNamespace(text="这是从 PDF 抽取出来的内容"),
+            delete=lambda **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
+    monkeypatch.setattr(vendors_module, "_spawn_kimi_cleanup", lambda *args, **kwargs: None)
+
+    message = create_chat_completion(
+        [user_msg, assistant_msg, pdf_tool_msg, failed_tool_msg],
+        tools=[],
+        llm_config=_build_kimi_config(),
+    )
+
+    assert message["info"]["status"] == "completed"
+    provider_messages = captured_payload["messages"]
+    assert provider_messages[1]["role"] == "assistant"
+    assert provider_messages[2]["role"] == "tool"
+    assert provider_messages[2]["tool_call_id"] == "call_pdf"
+    assert provider_messages[3]["role"] == "tool"
+    assert provider_messages[3]["tool_call_id"] == "call_template"
+    assert provider_messages[4]["role"] == "user"
+    assert provider_messages[4]["content"] == KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "这是从 PDF 抽取出来的内容"
+
+
 def test_logging_hook_should_log_latest_message(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 

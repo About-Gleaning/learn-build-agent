@@ -28,6 +28,7 @@ WRITE_FILE_DESC_FILE = Path(__file__).with_name("write_file.txt")
 WRITE_FILE_TOOL_DESCRIPTION = WRITE_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 QUESTION_DESC_FILE = Path(__file__).with_name("question.txt")
 QUESTION_TOOL_DESCRIPTION = QUESTION_DESC_FILE.read_text(encoding="utf-8").strip()
+LOAD_SKILL_DESC_FILE = Path(__file__).with_name("load_skill.txt")
 
 
 def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = None) -> str:
@@ -54,17 +55,8 @@ def _build_load_skill_tool_description(skills: list[dict[str, Any]] | None = Non
     if not skill_lines:
         return "加载一个 skill，以获取完成某个特定任务的详细指导。目前没有可用的 skills。"
 
-    return "\n".join(
-        [
-            "加载一个 skill，以获取完成某个特定任务的详细指导。",
-            "Skills 提供专门的知识和分步骤的指导。",
-            "当某个任务与某个 skill 的描述相匹配时，应使用它。",
-            "这里只列出了当前可用的 skills：",
-            "<available_skills>",
-            *skill_lines,
-            "</available_skills>",
-        ]
-    )
+    template = LOAD_SKILL_DESC_FILE.read_text(encoding="utf-8").strip()
+    return template.replace("{available_skills}", "\n".join(skill_lines))
 
 def _build_subagent_listing() -> str:
     subagents = get_subagents()
@@ -386,13 +378,12 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "skill_names": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "要加载的 skill 名称列表",
+                        "name": {
+                            "type": "string",
+                            "description": "要加载的 skill 名称",
                         }
                     },
-                    "required": ["skill_names"],
+                    "required": ["name"],
                 },
             },
         },

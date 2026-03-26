@@ -7,7 +7,7 @@ from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path, get_workspace
 from .file_edit_state import get_file_state, record_file_edit
 from .handlers import build_tool_failure
-from .path_utils import resolve_workspace_path
+from .path_utils import resolve_workspace_or_skills_path
 
 
 def _resolve_write_target(file_path: str) -> Path:
@@ -15,15 +15,17 @@ def _resolve_write_target(file_path: str) -> Path:
     plan_path = build_plan_storage_path(get_session_id())
     if raw_path.is_absolute() and raw_path.resolve() == plan_path:
         return plan_path
-    return resolve_workspace_path(file_path)
+    return resolve_workspace_or_skills_path(file_path)
 
 
 def _build_write_title(target: Path) -> str:
-    workspace_root = get_workspace().root.resolve()
-    try:
-        return str(target.relative_to(workspace_root))
-    except ValueError:
-        return str(target)
+    workspace = get_workspace()
+    for base in (workspace.root.resolve(), workspace.skills_dir.resolve()):
+        try:
+            return str(target.relative_to(base))
+        except ValueError:
+            continue
+    return str(target)
 
 
 def _build_success_result(target: Path, *, existed_before: bool) -> dict[str, Any]:
@@ -78,7 +80,7 @@ def run_write(file_path: str, content: str) -> dict[str, Any]:
         return _build_success_result(target, existed_before=existed_before)
     except ValueError as exc:
         message = str(exc)
-        error_code = "write_path_forbidden" if "超出工作区范围" in message else "write_failed"
+        error_code = "write_path_forbidden" if "超出允许范围" in message else "write_failed"
         return build_tool_failure(
             f"Error: {message}",
             error_code=error_code,
