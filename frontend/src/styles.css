@@ -148,6 +148,39 @@ select:focus-visible {
   color: var(--brand);
 }
 
+.session-load-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(9, 18, 29, 0.92);
+  flex-wrap: wrap;
+}
+
+.session-load-label,
+.session-load-hint {
+  color: var(--ink-subtle);
+  font-size: 12px;
+}
+
+.session-load-input {
+  flex: 1 1 280px;
+  min-width: 220px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: rgba(8, 18, 29, 0.94);
+  color: var(--ink);
+}
+
+.session-load-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .terminal-alert {
   display: flex;
   align-items: flex-start;

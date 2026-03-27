@@ -361,6 +361,28 @@ def test_chat_stream_should_validate_session_id():
     assert resp.status_code == 422
 
 
+def test_session_routes_should_validate_session_id():
+    app = create_app()
+    client = TestClient(app)
+
+    invalid_session_id = "invalid id"
+
+    for method, path, kwargs in [
+        ("GET", f"/api/sessions/{invalid_session_id}/messages?limit=20", {}),
+        ("POST", f"/api/sessions/{invalid_session_id}/stop", {}),
+        ("DELETE", f"/api/sessions/{invalid_session_id}", {}),
+        ("POST", f"/api/sessions/{invalid_session_id}/mode-switch", {"json": {"action": "confirm"}}),
+        ("POST", f"/api/sessions/{invalid_session_id}/mode-switch/stream", {"json": {"action": "confirm"}}),
+        ("POST", f"/api/sessions/{invalid_session_id}/questions/question_1/answer", {"json": {"answers": []}}),
+        ("POST", f"/api/sessions/{invalid_session_id}/questions/question_1/answer/stream", {"json": {"answers": []}}),
+        ("POST", f"/api/sessions/{invalid_session_id}/questions/question_1/reject", {}),
+        ("POST", f"/api/sessions/{invalid_session_id}/questions/question_1/reject/stream", {}),
+    ]:
+        resp = client.request(method, path, **kwargs)
+        assert resp.status_code == 400
+        assert "session_id 格式非法" in resp.json()["detail"]
+
+
 def test_apply_mode_switch_should_return_message(monkeypatch):
     app = create_app()
     client = TestClient(app)

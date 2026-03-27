@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+import re
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,17 @@ from .schemas import (
     StopSessionVO,
 )
 from .serializers import message_to_vo, split_stream_event, sse_event
+
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _normalize_session_id_or_raise(session_id: str) -> str:
+    normalized_id = (session_id or "").strip()
+    if not normalized_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if not SESSION_ID_PATTERN.fullmatch(normalized_id):
+        raise HTTPException(status_code=400, detail="session_id 格式非法，仅支持字母、数字、下划线和中划线")
+    return normalized_id
 
 
 def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
@@ -180,17 +192,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/stop", response_model=StopSessionVO)
     def stop_session(session_id: str) -> StopSessionVO:
-        normalized_id = (session_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        normalized_id = _normalize_session_id_or_raise(session_id)
         session_runtime.request_session_stop(normalized_id)
         return StopSessionVO(session_id=normalized_id)
 
     @app.get("/api/sessions/{session_id}/messages", response_model=SessionMessagesVO)
     def get_session_messages(session_id: str, limit: int = Query(default=50, ge=1, le=200)) -> SessionMessagesVO:
-        normalized_id = (session_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        normalized_id = _normalize_session_id_or_raise(session_id)
 
         messages = session_runtime.SESSION_MEMORY_STORE.load(normalized_id)
         selected = messages[-limit:]
@@ -201,9 +209,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/mode-switch", response_model=ModeSwitchActionVO)
     def apply_mode_switch(session_id: str, req: ModeSwitchActionReq) -> ModeSwitchActionVO:
-        normalized_id = (session_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        normalized_id = _normalize_session_id_or_raise(session_id)
         try:
             message = session_runtime.apply_mode_switch_action(normalized_id, req.action)
         except ValueError as exc:
@@ -220,9 +226,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/mode-switch/stream")
     def apply_mode_switch_stream(session_id: str, req: ModeSwitchActionReq) -> StreamingResponse:
-        normalized_id = (session_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        normalized_id = _normalize_session_id_or_raise(session_id)
         return StreamingResponse(
             _stream_mode_switch(normalized_id, req),
             media_type="text/event-stream",
@@ -235,10 +239,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/questions/{request_id}/answer", response_model=QuestionActionVO)
     def apply_question_answer(session_id: str, request_id: str, req: QuestionAnswerReq) -> QuestionActionVO:
-        normalized_id = (session_id or "").strip()
+        normalized_id = _normalize_session_id_or_raise(session_id)
         normalized_request_id = (request_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
         if not normalized_request_id:
             raise HTTPException(status_code=400, detail="request_id 不能为空")
         try:
@@ -258,10 +260,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/questions/{request_id}/answer/stream")
     def apply_question_answer_stream(session_id: str, request_id: str, req: QuestionAnswerReq) -> StreamingResponse:
-        normalized_id = (session_id or "").strip()
+        normalized_id = _normalize_session_id_or_raise(session_id)
         normalized_request_id = (request_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
         if not normalized_request_id:
             raise HTTPException(status_code=400, detail="request_id 不能为空")
         return StreamingResponse(
@@ -276,10 +276,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/questions/{request_id}/reject", response_model=QuestionActionVO)
     def apply_question_reject(session_id: str, request_id: str) -> QuestionActionVO:
-        normalized_id = (session_id or "").strip()
+        normalized_id = _normalize_session_id_or_raise(session_id)
         normalized_request_id = (request_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
         if not normalized_request_id:
             raise HTTPException(status_code=400, detail="request_id 不能为空")
         try:
@@ -298,10 +296,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/questions/{request_id}/reject/stream")
     def apply_question_reject_stream(session_id: str, request_id: str) -> StreamingResponse:
-        normalized_id = (session_id or "").strip()
+        normalized_id = _normalize_session_id_or_raise(session_id)
         normalized_request_id = (request_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
         if not normalized_request_id:
             raise HTTPException(status_code=400, detail="request_id 不能为空")
         return StreamingResponse(
@@ -316,9 +312,7 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/sessions/{session_id}", response_model=SessionClearedVO)
     def clear_session(session_id: str) -> SessionClearedVO:
-        normalized_id = (session_id or "").strip()
-        if not normalized_id:
-            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        normalized_id = _normalize_session_id_or_raise(session_id)
         session_runtime.clear_session_memory(normalized_id)
         return SessionClearedVO(session_id=normalized_id)
 

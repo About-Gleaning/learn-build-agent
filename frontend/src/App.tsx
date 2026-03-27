@@ -250,6 +250,7 @@ type QuestionFocusTarget = "options" | "notes";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "http://127.0.0.1:8000";
 const AUTO_SCROLL_THRESHOLD = 56;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function buildId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -259,6 +260,10 @@ function buildSessionId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 10);
   return `s_${ts}_${rand}`;
+}
+
+function isValidSessionId(sessionId: string): boolean {
+  return SESSION_ID_PATTERN.test(sessionId);
 }
 
 function buildProviderModelKey(provider: string, model: string): string {
@@ -779,6 +784,19 @@ async function loadHistory(sessionId: string): Promise<UiMessage[]> {
       : null,
     question: normalizeQuestion(msg.question),
   }));
+}
+
+function deriveSessionRuntime(history: UiMessage[]): {
+  mode: AgentName | null;
+  providerModelKey: string;
+} {
+  const assistantMessages = [...history].reverse().filter((msg) => msg.role === "assistant");
+  const latestAssistant = assistantMessages.find((msg) => msg.agent === "build" || msg.agent === "plan") || null;
+  const latestRuntimeMessage = assistantMessages.find((msg) => msg.provider && msg.model) || null;
+  return {
+    mode: latestAssistant && (latestAssistant.agent === "build" || latestAssistant.agent === "plan") ? latestAssistant.agent : null,
+    providerModelKey: latestRuntimeMessage ? buildProviderModelKey(latestRuntimeMessage.provider, latestRuntimeMessage.model) : "",
+  };
 }
 
 async function applyModeSwitchAction(params: {
@@ -1556,7 +1574,10 @@ function renderQuestionPrompt(params: { message: UiMessage; isLatest: boolean })
 }
 
 export function App() {
-  const [sessionId] = useState(() => buildSessionId());
+  const [sessionId, setSessionId] = useState(() => buildSessionId());
+  const [sessionLoadDraft, setSessionLoadDraft] = useState("");
+  const [isSessionLoadOpen, setIsSessionLoadOpen] = useState(false);
+  const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [error, setError] = useState("");
@@ -1599,8 +1620,8 @@ export function App() {
       : null;
   const activeQuestion = latestPendingQuestionMessage?.question || null;
   const canSubmit = useMemo(
-    () => input.trim().length > 0 && !activeQuestion && !isStreaming && !isApplyingModeSwitch && !isStopping,
-    [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping],
+    () => input.trim().length > 0 && !activeQuestion && !isStreaming && !isApplyingModeSwitch && !isStopping && !isLoadingSession,
+    [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping, isLoadingSession],
   );
 
   const modeDefaults = useMemo(() => {
@@ -1745,15 +1766,96 @@ export function App() {
     questionOptionsRef.current?.focus();
   }, [activeQuestion, questionCursor, questionFocus]);
 
-  const refreshHistory = async () => {
+  const isSessionInteractionLocked = isRuntimeBusy || isLoadingSession;
+
+  const resetTransientUiState = () => {
+    setError("");
+    setInput("");
+    setQuestionDrafts([]);
+    setQuestionCursor(0);
+    setQuestionFocus("options");
+    setQuestionRequestId("");
+    setCopiedMessageId("");
+    setActiveProvider("");
+    setActiveModel("");
+    setIsStopping(false);
+    setReasoningCollapsedState({});
+    activeTurnRef.current = null;
+    activeStreamControllerRef.current = null;
+  };
+
+  const applySessionRuntimeFromHistory = (history: UiMessage[]) => {
+    const derivedRuntime = deriveSessionRuntime(history);
+    if (derivedRuntime.mode) {
+      setMode(derivedRuntime.mode);
+    }
+    if (derivedRuntime.providerModelKey && providerModelKeys.includes(derivedRuntime.providerModelKey)) {
+      setProviderModelKey(derivedRuntime.providerModelKey);
+    }
+  };
+
+  const refreshHistory = async (targetSessionId = sessionId) => {
     setError("");
     try {
-      const history = await loadHistory(sessionId);
+      const history = await loadHistory(targetSessionId);
       startTransition(() => {
         setMessages(filterConversationMessages(history));
       });
     } catch (err) {
       setError((err as Error).message || "历史加载失败");
+    }
+  };
+
+  const openSessionLoadPanel = () => {
+    if (isSessionInteractionLocked || isQuestionMode) {
+      return;
+    }
+    setSessionLoadDraft(sessionId);
+    setIsSessionLoadOpen(true);
+    setError("");
+  };
+
+  const closeSessionLoadPanel = () => {
+    if (isLoadingSession) {
+      return;
+    }
+    setIsSessionLoadOpen(false);
+    setSessionLoadDraft("");
+  };
+
+  const handleSessionLoad = async () => {
+    if (isSessionInteractionLocked || isQuestionMode) {
+      return;
+    }
+    const nextSessionId = sessionLoadDraft.trim();
+    if (!nextSessionId) {
+      setError("sessionId 不能为空");
+      return;
+    }
+    if (!isValidSessionId(nextSessionId)) {
+      setError("sessionId 格式非法，仅支持字母、数字、下划线和中划线");
+      return;
+    }
+
+    setIsLoadingSession(true);
+    setShouldFollow(true);
+    resetTransientUiState();
+    try {
+      const history = filterConversationMessages(await loadHistory(nextSessionId));
+      startTransition(() => {
+        setSessionId(nextSessionId);
+        setMessages(history);
+      });
+      applySessionRuntimeFromHistory(history);
+      setIsSessionLoadOpen(false);
+      setSessionLoadDraft("");
+      if (history.length === 0) {
+        setError(`session ${nextSessionId} 暂无历史记录`);
+      }
+    } catch (err) {
+      setError((err as Error).message || "历史加载失败");
+    } finally {
+      setIsLoadingSession(false);
     }
   };
 
@@ -1909,7 +2011,7 @@ export function App() {
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || isStreaming) {
+    if (!trimmed || isStreaming || isLoadingSession) {
       return;
     }
 
@@ -2106,7 +2208,7 @@ export function App() {
   };
 
   const handleModeSwitchAction = async (action: "confirm" | "cancel") => {
-    if (isStreaming || isApplyingModeSwitch) {
+    if (isStreaming || isApplyingModeSwitch || isLoadingSession) {
       return;
     }
     setError("");
@@ -2266,7 +2368,7 @@ export function App() {
   };
 
   const handleQuestionAction = async (action: "answer" | "reject") => {
-    if (!activeQuestion || isStreaming || isApplyingModeSwitch) {
+    if (!activeQuestion || isStreaming || isApplyingModeSwitch || isLoadingSession) {
       return;
     }
     if (action === "answer") {
@@ -2678,10 +2780,63 @@ export function App() {
             <div className="terminal-topbar-actions">
               <span className="terminal-topbar-item">{currentRuntimeSummary}</span>
               <span className={`terminal-topbar-item ${isStreaming ? "is-live" : ""}`}>
-                {isStreaming ? "streaming" : isApplyingModeSwitch ? "switching" : "idle"}
+                {isLoadingSession ? "loading-session" : isStreaming ? "streaming" : isApplyingModeSwitch ? "switching" : "idle"}
               </span>
+              <button
+                type="button"
+                className="plain-btn terminal-inline-btn"
+                onClick={isSessionLoadOpen ? closeSessionLoadPanel : openSessionLoadPanel}
+                disabled={isSessionInteractionLocked || isQuestionMode}
+              >
+                {isLoadingSession ? "session-loading..." : isSessionLoadOpen ? "取消加载" : "session-load"}
+              </button>
             </div>
           </header>
+
+          {isSessionLoadOpen ? (
+            <div className="session-load-panel" aria-label="会话加载面板">
+              <label className="session-load-label" htmlFor="session-load-input">
+                sessionId
+              </label>
+              <input
+                id="session-load-input"
+                className="session-load-input"
+                value={sessionLoadDraft}
+                onChange={(e) => setSessionLoadDraft(e.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void handleSessionLoad();
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeSessionLoadPanel();
+                  }
+                }}
+                placeholder="输入要加载的 sessionId"
+                disabled={isLoadingSession}
+              />
+              <span className="session-load-hint">仅支持字母、数字、下划线和中划线</span>
+              <div className="session-load-actions">
+                <button
+                  type="button"
+                  className="plain-btn terminal-inline-btn"
+                  onClick={closeSessionLoadPanel}
+                  disabled={isLoadingSession}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="plain-btn terminal-inline-btn"
+                  onClick={() => void handleSessionLoad()}
+                  disabled={isLoadingSession}
+                >
+                  {isLoadingSession ? "加载中..." : "加载会话"}
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           {error ? (
             <div className="terminal-alert" role="alert">
@@ -2764,7 +2919,7 @@ export function App() {
                   id="agent-mode"
                   value={mode}
                   onChange={(e) => setMode(e.target.value as AgentName)}
-                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
                   className="terminal-select"
                 >
                   {agentOptions.map((item) => (
@@ -2781,7 +2936,7 @@ export function App() {
                   id="provider-name"
                   value={providerModelKey}
                   onChange={(e) => setProviderModelKey(e.target.value)}
-                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
                   className="terminal-select"
                 >
                   {providerModelOptions.map((item) => (
@@ -2799,7 +2954,7 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
-                  disabled={isApplyingModeSwitch || isStopping || isQuestionMode}
+                  disabled={isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
                   className="plain-btn terminal-inline-btn"
                 >
                 {reasoningDefaultCollapsed ? "思考默认收起" : "思考默认展开"}
@@ -2807,7 +2962,7 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => void refreshRuntimeOptions()}
-                  disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode}
+                  disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
                   className="plain-btn terminal-inline-btn"
                 >
                 {isLoadingOptions ? "刷新中..." : "刷新配置"}
@@ -2835,7 +2990,7 @@ export function App() {
                           type="button"
                           className={`question-nav-btn ${index === questionCursor ? "is-active" : ""} ${isDone ? "is-done" : ""}`}
                           onClick={() => setQuestionCursor(index)}
-                          disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                          disabled={isStreaming || isApplyingModeSwitch || isStopping || isLoadingSession}
                         >
                           {index + 1}. {item.header || `问题 ${index + 1}`}
                         </button>
@@ -2866,7 +3021,7 @@ export function App() {
                               type="button"
                               className={`question-option ${isActive ? "is-active" : ""} ${isSelected ? "is-selected" : ""}`}
                               onClick={() => handleQuestionOptionClick(optionIndex)}
-                              disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                              disabled={isStreaming || isApplyingModeSwitch || isStopping || isLoadingSession}
                             >
                               <div className="question-option-top">
                                 <strong>{option.label}</strong>
@@ -2891,7 +3046,7 @@ export function App() {
                         onKeyDown={handleQuestionNotesKeyDown}
                         placeholder="可选备注；Tab 切回选项，Shift+Enter 换行。"
                         rows={6}
-                        disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                        disabled={isStreaming || isApplyingModeSwitch || isStopping || isLoadingSession}
                         aria-label="备注输入框"
                       />
                     </div>
@@ -2906,7 +3061,7 @@ export function App() {
                     rows={3}
                     onKeyDown={onComposerKeyDown}
                     aria-label="消息输入框"
-                    disabled={isApplyingModeSwitch || isStopping}
+                    disabled={isApplyingModeSwitch || isStopping || isLoadingSession}
                   />
                 </div>
               )}
@@ -2921,7 +3076,7 @@ export function App() {
                     <button
                       type="button"
                       className="plain-btn"
-                      disabled={isStreaming || isApplyingModeSwitch || isStopping}
+                      disabled={isStreaming || isApplyingModeSwitch || isStopping || isLoadingSession}
                       onClick={() => void handleQuestionAction("reject")}
                     >
                       拒绝回答
@@ -2929,7 +3084,13 @@ export function App() {
                   ) : null}
                   <button
                     type={isStreaming || isApplyingModeSwitch ? "button" : isQuestionMode ? "button" : "submit"}
-                    disabled={isStreaming || isApplyingModeSwitch ? isStopping : isQuestionMode ? false : !canSubmit}
+                    disabled={
+                      isStreaming || isApplyingModeSwitch
+                        ? isStopping || isLoadingSession
+                        : isQuestionMode
+                          ? isLoadingSession
+                          : !canSubmit
+                    }
                     onClick={
                       isStreaming || isApplyingModeSwitch
                         ? () => void handleStopCurrentRun()
