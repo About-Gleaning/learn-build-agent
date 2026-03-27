@@ -187,6 +187,40 @@ def test_inmemory_session_memory_store_should_not_split_tool_chain():
     assert [message["info"]["role"] for message in loaded] == ["user", "assistant", "tool"]
 
 
+def test_inmemory_session_memory_store_should_trim_by_max_messages():
+    session_id = "s_memory_trim"
+    store = InMemorySessionMemoryStore(max_messages=2)
+
+    first_user = create_message("user", session_id, status="completed")
+    append_text_part(first_user, "第一问")
+    second_user = create_message("user", session_id, status="completed")
+    append_text_part(second_user, "第二问")
+    third_user = create_message("user", session_id, status="completed")
+    append_text_part(third_user, "第三问")
+
+    store.save(session_id, [first_user, second_user, third_user])
+    loaded = store.load(session_id)
+
+    assert [get_message_text(message) for message in loaded] == ["第二问", "第三问"]
+
+
+def test_inmemory_session_memory_store_should_not_trim_when_disabled():
+    session_id = "s_memory_no_trim"
+    store = InMemorySessionMemoryStore(max_messages=2, trim_enabled=False)
+
+    first_user = create_message("user", session_id, status="completed")
+    append_text_part(first_user, "第一问")
+    second_user = create_message("user", session_id, status="completed")
+    append_text_part(second_user, "第二问")
+    third_user = create_message("user", session_id, status="completed")
+    append_text_part(third_user, "第三问")
+
+    store.save(session_id, [first_user, second_user, third_user])
+    loaded = store.load(session_id)
+
+    assert [get_message_text(message) for message in loaded] == ["第一问", "第二问", "第三问"]
+
+
 def test_normalize_history_prefix_should_prepend_synthetic_user_for_tool_prefix():
     session_id = "s_prefix_tool"
     tool_message = create_message("tool", session_id, status="completed")

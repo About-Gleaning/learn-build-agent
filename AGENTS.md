@@ -75,6 +75,7 @@
 - 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
 - 日志文件统一写入 `~/.my-agent/logs/app-YYYY-MM-dd.log`，并使用追加模式保留历史内容；如配置 `MY_AGENT_HOME`，则写入对应目录。
 - 日志截断策略必须统一读取 `project_runtime.json -> logging`；默认 `truncate_enabled=false`，即不截断普通日志文本，但仍保留换行转义与敏感信息脱敏。
+- 会话历史条数裁剪策略必须统一读取 `project_runtime.json -> session_memory`；默认 `trim_enabled=true`、`max_messages=24`，即最多保留最近 `24` 条非 `system` 消息。
 - `build` 主模式的提示词文件必须按厂商 `vendor` 选择，命名统一为 `build.<vendor>.txt`；厂商归属在 `src/agent/config/llm_runtime.json` 中显式声明，缺省时回退 `build.default.txt`。
 - `llm_runtime.json` 的 provider 配置必须采用“厂商公共配置 + 多模型列表”结构：显式声明 `default_model`、`models` 与 `api_mode`；`agent_defaults` 必须显式声明 `provider + model`，禁止继续使用“一个 provider 绑定一个 model”的旧结构。
 - `api_mode` 当前支持 `responses` 与 `chat_completions`；其中 `responses` 已接入真实 `/v1/responses` 调用链，覆盖非流式、流式、函数工具调用与工具结果回灌，仍保持仓库侧显式维护消息历史，不引入 `previous_response_id` 隐式会话状态。
@@ -85,6 +86,7 @@
 - `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
 - `project_runtime.json` 中的 `file_extraction` 也必须采用 `default + vendors` 结构；当前默认仅开放 `.pdf`，并统一使用 `cleanup_mode=async_delete` 做远端异步清理。
 - `project_runtime.json` 中的 `agent_loop.max_rounds` 是主 Agent 循环的统一兜底阈值；命中上限后必须以 `finish_reason=error` 收口，禁止继续无限空转。
+- `project_runtime.json` 中的 `session_memory` 负责会话历史按消息条数的裁剪策略；`trim_enabled=false` 仅关闭条数裁剪，不关闭 compaction checkpoint 收口与非法前缀修复。
 - `compaction.tool_result_keep_recent` 的计数口径统一按 `role=tool` 消息数量计算，默认保留最近 `3` 条不压缩。
 - 当前可配置的压缩关键参数包括：`tool_result_prune_enabled`、`tool_result_keep_recent`、`tool_result_prune_min_chars`、`summary_trigger_threshold`、`summary_max_tokens`、`tool_output_max_lines`、`tool_output_max_bytes`。
 - LLM 响应转换后的 assistant message 必须统一写入标准化 `finish_reason`；session loop 只允许基于该字段决定继续或停止，禁止继续直接用“是否存在 tool_call”充当终止规则。
@@ -135,6 +137,7 @@
 
 ## 变更记录
 
+- 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 未按阈值裁剪、与 `FileSessionMemoryStore` 行为不一致的问题。
 - 2026-03-27：增强 session 历史恢复链路；`session_memory` 在读取历史时会为非法前缀自动补齐 synthetic user 锚点，`runtime/session.py` 新增对“首条 assistant(tool_calls)”“首条 tool”“中间孤儿 tool”的统一修理逻辑：孤儿 `tool` 会补 synthetic assistant(tool_calls) 作为上下文锚点，缺失的 tool result 会补“具体情况未知”的 synthetic tool 占位结果；`chat_completions` 协议层同时收紧校验，若仍出现未修理的孤儿 `tool`，会在本地直接报 `invalid_tool_message_sequence`，避免继续外发非法消息序列。
 - 2026-03-26：新增 `project_runtime.logging` 配置，统一控制日志文本是否截断与截断长度；默认关闭截断，仅保留换行转义与敏感信息脱敏，便于排查超长 tool 参数与模型返回内容。
 - 2026-03-26：新增独立 `src/agent/tools/skill_tool.py` 与 `load_skill.txt`，将 `load_skill` 重构为按 `name` 精确加载单个 skill 的独立工具；返回结构统一为 `title/output/metadata(name, dir)`，`output` 仅注入 `Base directory` 与原始 `SKILL.md`，避免模型再用 `glob`/`bash` 搜索 skill 目录。

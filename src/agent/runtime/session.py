@@ -12,7 +12,13 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..config.logging_setup import build_log_extra, sanitize_log_text
-from ..config.settings import ResolvedLLMConfig, resolve_agent_loop_settings, resolve_llm_config, resolve_subagent_loop_settings
+from ..config.settings import (
+    ResolvedLLMConfig,
+    resolve_agent_loop_settings,
+    resolve_llm_config,
+    resolve_session_memory_settings,
+    resolve_subagent_loop_settings,
+)
 from ..core.context import set_session_id
 from ..core.message import (
     DisplayPart,
@@ -74,7 +80,15 @@ MainAgentMode = Literal["build", "plan"]
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 TODO = TodoManager()
-SESSION_MEMORY_STORE: SessionMemoryStore = FileSessionMemoryStore(max_messages=24)
+def _build_default_session_memory_store() -> SessionMemoryStore:
+    settings = resolve_session_memory_settings()
+    return FileSessionMemoryStore(
+        max_messages=settings.max_messages,
+        trim_enabled=settings.trim_enabled,
+    )
+
+
+SESSION_MEMORY_STORE: SessionMemoryStore = _build_default_session_memory_store()
 ModeSwitchAction = Literal["confirm", "cancel"]
 
 

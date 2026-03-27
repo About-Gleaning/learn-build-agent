@@ -43,6 +43,8 @@ DEFAULT_AGENT_LOOP_MAX_ROUNDS = 8
 DEFAULT_SUBAGENT_LOOP_MAX_ROUNDS = 15
 DEFAULT_LOG_TRUNCATE_ENABLED = False
 DEFAULT_LOG_TRUNCATE_LIMIT = 500
+DEFAULT_SESSION_MEMORY_TRIM_ENABLED = True
+DEFAULT_SESSION_MEMORY_MAX_MESSAGES = 24
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ class ProjectRuntimeSettings:
     agent_loop: "AgentLoopSettings"
     subagent_loop: "SubagentLoopSettings"
     logging: "LoggingSettings"
+    session_memory: "SessionMemorySettings"
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,12 @@ class SubagentLoopSettings:
 class LoggingSettings:
     truncate_enabled: bool = DEFAULT_LOG_TRUNCATE_ENABLED
     truncate_limit: int = DEFAULT_LOG_TRUNCATE_LIMIT
+
+
+@dataclass(frozen=True)
+class SessionMemorySettings:
+    trim_enabled: bool = DEFAULT_SESSION_MEMORY_TRIM_ENABLED
+    max_messages: int = DEFAULT_SESSION_MEMORY_MAX_MESSAGES
 
 
 @dataclass(frozen=True)
@@ -437,6 +446,20 @@ def _load_project_logging_settings(raw_logging: Any) -> LoggingSettings:
     return LoggingSettings(truncate_enabled=truncate_enabled, truncate_limit=truncate_limit)
 
 
+def _load_project_session_memory_settings(raw_session_memory: Any) -> SessionMemorySettings:
+    if raw_session_memory is None:
+        return SessionMemorySettings()
+    if not isinstance(raw_session_memory, dict):
+        raise ValueError("project_runtime.session_memory 必须是对象。")
+
+    raw_trim_enabled = raw_session_memory.get("trim_enabled", DEFAULT_SESSION_MEMORY_TRIM_ENABLED)
+    trim_enabled = _parse_bool(raw_trim_enabled, field_name="session_memory.trim_enabled")
+
+    raw_max_messages = raw_session_memory.get("max_messages", DEFAULT_SESSION_MEMORY_MAX_MESSAGES)
+    max_messages = _parse_positive_int(raw_max_messages, field_name="session_memory.max_messages")
+    return SessionMemorySettings(trim_enabled=trim_enabled, max_messages=max_messages)
+
+
 def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
     if not isinstance(raw_providers, dict) or not raw_providers:
         raise ValueError("LLM 配置缺少 providers，且至少要配置一个厂商。")
@@ -531,6 +554,7 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
     agent_loop = _load_project_agent_loop_settings(payload.get("agent_loop"))
     subagent_loop = _load_project_subagent_loop_settings(payload.get("subagent_loop"))
     logging_settings = _load_project_logging_settings(payload.get("logging"))
+    session_memory = _load_project_session_memory_settings(payload.get("session_memory"))
     return ProjectRuntimeSettings(
         compaction_default=compaction_default,
         compaction_vendors=compaction_vendors,
@@ -539,6 +563,7 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
         agent_loop=agent_loop,
         subagent_loop=subagent_loop,
         logging=logging_settings,
+        session_memory=session_memory,
     )
 
 
@@ -568,6 +593,10 @@ def resolve_subagent_loop_settings() -> SubagentLoopSettings:
 
 def resolve_logging_settings() -> LoggingSettings:
     return get_project_runtime_settings().logging
+
+
+def resolve_session_memory_settings() -> SessionMemorySettings:
+    return get_project_runtime_settings().session_memory
 
 
 def clear_runtime_settings_cache() -> None:

@@ -3075,6 +3075,8 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.subagent_loop.max_rounds == 15
         assert settings.logging.truncate_enabled is False
         assert settings.logging.truncate_limit == 500
+        assert settings.session_memory.trim_enabled is True
+        assert settings.session_memory.max_messages == 24
     finally:
         clear_runtime_settings_cache()
 
@@ -3223,6 +3225,30 @@ def test_get_project_runtime_settings_should_read_logging_config(tmp_path, monke
         clear_runtime_settings_cache()
 
 
+def test_get_project_runtime_settings_should_read_session_memory_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": false,
+            "max_messages": 128
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.session_memory.trim_enabled is False
+        assert settings.session_memory.max_messages == 128
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_resolve_file_extraction_settings_should_merge_vendor_override(tmp_path, monkeypatch):
     config_path = tmp_path / "project_runtime.json"
     config_path.write_text(
@@ -3357,6 +3383,56 @@ def test_get_project_runtime_settings_should_reject_non_positive_logging_limit(t
         clear_runtime_settings_cache()
 
 
+def test_get_project_runtime_settings_should_reject_invalid_session_memory_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": "yes",
+            "max_messages": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 session_memory 配置抛出异常")
+    except ValueError as exc:
+        assert "session_memory.trim_enabled" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_non_positive_session_memory_limit(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": true,
+            "max_messages": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 session_memory.max_messages 配置抛出异常")
+    except ValueError as exc:
+        assert "session_memory.max_messages" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_resolve_compaction_settings_should_merge_vendor_override(tmp_path, monkeypatch):
     config_path = tmp_path / "project_runtime.json"
     config_path.write_text(
@@ -3441,6 +3517,43 @@ def test_clear_runtime_settings_cache_should_clear_project_runtime_cache(tmp_pat
         refreshed = get_project_runtime_settings()
         assert refreshed.compaction_default.tool_result_keep_recent == 4
     finally:
+        clear_runtime_settings_cache()
+
+
+def test_build_default_session_memory_store_should_follow_project_runtime_settings(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": false,
+            "max_messages": 2
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        store = session_module._build_default_session_memory_store()
+        configure_session_memory_store(store)
+        clear_session_memory("s_default_store")
+
+        first_user = create_message("user", "s_default_store", status="completed")
+        append_text_part(first_user, "第一问")
+        second_user = create_message("user", "s_default_store", status="completed")
+        append_text_part(second_user, "第二问")
+        third_user = create_message("user", "s_default_store", status="completed")
+        append_text_part(third_user, "第三问")
+
+        session_module.SESSION_MEMORY_STORE.save("s_default_store", [first_user, second_user, third_user])
+        loaded = session_module.SESSION_MEMORY_STORE.load("s_default_store")
+
+        assert [get_message_text(message) for message in loaded] == ["第一问", "第二问", "第三问"]
+    finally:
+        configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
         clear_runtime_settings_cache()
 
 

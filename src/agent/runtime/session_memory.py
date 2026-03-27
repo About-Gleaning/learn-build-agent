@@ -52,8 +52,9 @@ def normalize_history_prefix(messages: list[Message]) -> list[Message]:
 class InMemorySessionMemoryStore(SessionMemoryStore):
     """默认内存记忆实现，适合单进程场景。"""
 
-    def __init__(self, max_messages: int = 24) -> None:
+    def __init__(self, max_messages: int = 24, *, trim_enabled: bool = True) -> None:
         self._max_messages = max_messages
+        self._trim_enabled = trim_enabled
         self._store: dict[str, list[Message]] = {}
 
     def load(self, session_id: str) -> list[Message]:
@@ -62,8 +63,11 @@ class InMemorySessionMemoryStore(SessionMemoryStore):
         return deepcopy(normalize_history_prefix(trimmed))
 
     def save(self, session_id: str, messages: list[Message]) -> None:
-        non_system_messages = [msg for msg in messages if get_role(msg) != "system"]
-        trimmed_messages = trim_messages_by_compaction_checkpoint(non_system_messages)
+        trimmed_messages = _prepare_messages_for_storage(
+            messages,
+            max_messages=self._max_messages,
+            trim_enabled=self._trim_enabled,
+        )
         self._store[session_id] = deepcopy(trimmed_messages)
 
     def clear(self, session_id: str | None = None) -> None:
@@ -77,9 +81,10 @@ class InMemorySessionMemoryStore(SessionMemoryStore):
 class FileSessionMemoryStore(SessionMemoryStore):
     """按工作区落盘的会话记忆实现，便于 CLI/Web 重启后继续读取历史。"""
 
-    def __init__(self, base_dir: Path | None = None, max_messages: int = 24) -> None:
+    def __init__(self, base_dir: Path | None = None, max_messages: int = 24, *, trim_enabled: bool = True) -> None:
         self._base_dir = base_dir
         self._max_messages = max_messages
+        self._trim_enabled = trim_enabled
 
     def _storage_dir(self) -> Path:
         return (self._base_dir or get_workspace().sessions_dir).resolve()
@@ -107,10 +112,11 @@ class FileSessionMemoryStore(SessionMemoryStore):
         return deepcopy(normalize_history_prefix(trimmed))
 
     def save(self, session_id: str, messages: list[Message]) -> None:
-        non_system_messages = [msg for msg in messages if get_role(msg) != "system"]
-        trimmed_messages = trim_messages_by_compaction_checkpoint(non_system_messages)
-        if self._max_messages > 0:
-            trimmed_messages = trimmed_messages[-self._max_messages :]
+        trimmed_messages = _prepare_messages_for_storage(
+            messages,
+            max_messages=self._max_messages,
+            trim_enabled=self._trim_enabled,
+        )
         file_path = self._session_file(session_id)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(json.dumps(trimmed_messages, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -125,3 +131,13 @@ class FileSessionMemoryStore(SessionMemoryStore):
                 file_path.unlink(missing_ok=True)
             return
         self._session_file(normalized).unlink(missing_ok=True)
+
+
+def _prepare_messages_for_storage(messages: list[Message], *, max_messages: int, trim_enabled: bool) -> list[Message]:
+    """统一收敛持久化前的历史裁剪，保证内存/文件存储行为一致。"""
+
+    non_system_messages = [msg for msg in messages if get_role(msg) != "system"]
+    trimmed_messages = trim_messages_by_compaction_checkpoint(non_system_messages)
+    if trim_enabled:
+        trimmed_messages = trimmed_messages[-max_messages:]
+    return trimmed_messages
