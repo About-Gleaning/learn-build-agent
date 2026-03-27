@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from collections.abc import Generator
@@ -14,9 +15,7 @@ from ...core.message import (
     estimate_message_size,
     extract_reasoning_content,
     extract_tool_calls,
-    get_role,
     normalize_error,
-    to_provider_messages,
 )
 from .protocols import ProviderAdapter, normalize_responses_tools
 from .vendors import build_provider_adapter
@@ -67,14 +66,11 @@ class LoggingHook(LLMHook):
         super().__init__(name="logging", fail_fast=fail_fast)
 
     def before_call(self, ctx: HookContext) -> None:
-        latest_message = _build_latest_message_preview(ctx.get("source_messages", []))
-        attachments_preview = _build_request_attachments_preview(ctx.get("source_messages", []))
         log_extra = build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", ""))
-        fields = [f"api_mode={ctx.get('api_mode', 'unknown')}"]
-        if latest_message is not None:
-            fields.append(f"latest_message={latest_message}")
-        if attachments_preview:
-            fields.append(f"attachments={attachments_preview}")
+        fields = [
+            f"api_mode={ctx.get('api_mode', 'unknown')}",
+            _build_request_messages_log_field(ctx.get("request_payload", {}), ctx.get("api_mode", "")),
+        ]
         logger.info("llm.request %s", " ".join(fields), extra=log_extra)
 
     def after_call(self, ctx: HookContext, message: Message) -> None:
@@ -96,43 +92,35 @@ class LoggingHook(LLMHook):
         )
 
 
-def _build_latest_message_preview(messages: list[Message]) -> str | None:
-    if not messages:
-        return None
-
-    latest_message = messages[-1]
-    if get_role(latest_message) != "user":
-        return None
-
-    for part in reversed(latest_message.get("parts", [])):
-        if part.get("type") != "text":
-            continue
-        content = str(part.get("content", "")).strip()
-        if content:
-            return sanitize_log_text(content)
-    return ""
-
-
-def _build_request_attachments_preview(messages: list[Message]) -> str:
-    summaries: list[str] = []
-    for provider_message in to_provider_messages(messages):
-        role = sanitize_log_text(str(provider_message.get("role", "")).strip() or "unknown", limit=30)
-        raw_attachments = provider_message.get("attachments")
-        if not isinstance(raw_attachments, list):
-            continue
-        for attachment in raw_attachments:
-            if not isinstance(attachment, dict):
+def _sanitize_request_log_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key)
+            if normalized_key == "file_data" and isinstance(item, str):
+                sanitized[normalized_key] = f"[omitted_file_data length={len(item)}]"
                 continue
-            attachment_type = sanitize_log_text(str(attachment.get("type", "")).strip() or "unknown", limit=30)
-            mime = sanitize_log_text(str(attachment.get("mime", "")).strip() or attachment_type, limit=60)
-            filename = sanitize_log_text(str(attachment.get("filename", "")).strip() or "unnamed", limit=80)
-            summaries.append(f"{role}:{mime}:{filename}")
+            if normalized_key == "url" and isinstance(item, str) and item.startswith("data:"):
+                mime = item.split(";", 1)[0][5:] or "unknown"
+                sanitized[normalized_key] = f"[omitted_data_url mime={mime} length={len(item)}]"
+                continue
+            sanitized[normalized_key] = _sanitize_request_log_payload(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_request_log_payload(item) for item in value]
+    return value
 
-    if not summaries:
-        return ""
-    if len(summaries) <= 3:
-        return ",".join(summaries)
-    return ",".join(summaries[:3]) + f",+{len(summaries) - 3} more"
+
+def _build_request_messages_log_field(request_payload: dict[str, Any], api_mode: str) -> str:
+    payload_key = "input" if str(api_mode).strip() == "responses" else "messages"
+    payload = request_payload.get(payload_key, [])
+    serialized = json.dumps(
+        _sanitize_request_log_payload(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"{payload_key}={sanitize_log_text(serialized)}"
 
 
 def _build_response_preview(message: Message) -> str:

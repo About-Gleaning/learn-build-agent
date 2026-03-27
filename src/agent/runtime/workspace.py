@@ -14,6 +14,7 @@ class WorkspaceRuntime:
     root: Path
     launch_mode: str
     runtime_home: Path
+    skills_dir: Path
     workspaces_root: Path
     workspace_id: str
     workspace_home: Path
@@ -50,6 +51,13 @@ def _build_workspace_id(root: Path) -> str:
     return digest[:16]
 
 
+def _resolve_runtime_home() -> Path:
+    runtime_home = os.getenv("MY_AGENT_HOME")
+    if runtime_home:
+        return Path(runtime_home).expanduser().resolve()
+    return DEFAULT_RUNTIME_HOME.resolve()
+
+
 def build_session_storage_name(session_id: str, *, suffix: str = "") -> str:
     normalized_session_id = (session_id or "").strip()
     if not normalized_session_id:
@@ -72,13 +80,14 @@ def build_plan_storage_path(session_id: str) -> Path:
 
 def _build_workspace_runtime(root: Path, *, launch_mode: str) -> WorkspaceRuntime:
     workspace_id = _build_workspace_id(root)
-    runtime_home = DEFAULT_RUNTIME_HOME.resolve()
+    runtime_home = _resolve_runtime_home()
     workspaces_root = (runtime_home / "workspaces").resolve()
     workspace_home = (workspaces_root / workspace_id).resolve()
     return WorkspaceRuntime(
         root=root,
         launch_mode=launch_mode,
         runtime_home=runtime_home,
+        skills_dir=(runtime_home / "skills").resolve(),
         workspaces_root=workspaces_root,
         workspace_id=workspace_id,
         workspace_home=workspace_home,

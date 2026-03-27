@@ -1,5 +1,7 @@
 import pytest
 
+import agent.config.logging_setup as logging_setup_module
+from agent.config.settings import LoggingSettings
 from agent.core.context import get_session_id
 from agent.config.settings import clear_runtime_settings_cache
 from agent.runtime.compaction import TOOL_OUTPUT_MAX_BYTES
@@ -271,6 +273,33 @@ def test_tool_logging_hook_should_log_agent_model_args_and_result(caplog):
     assert "tool.request tool=demo_tool args={\"value\":\"ok\"}" in caplog.text
     assert "tool.response tool=demo_tool result=result:ok" in caplog.text
     assert any(record.agent == "build" and record.model == "demo-model" for record in caplog.records)
+
+
+def test_tool_logging_hook_should_not_truncate_long_arguments_when_disabled(caplog, monkeypatch):
+    executor = ToolExecutor({"demo_tool": lambda value: f"len:{len(value)}"})
+    long_value = "x" * 800
+    arguments = '{"value":"' + long_value + '"}'
+    monkeypatch.setattr(
+        logging_setup_module,
+        "resolve_logging_settings",
+        lambda: LoggingSettings(truncate_enabled=False, truncate_limit=500),
+    )
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "demo_tool",
+            arguments,
+            session_id="s_long_args",
+            tool_call_id="call_long_args",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert "...<truncated>" not in caplog.text
+    assert f'args={{"value":"{long_value}"}}' in caplog.text
 
 
 def test_tool_logging_hook_should_log_truncation_file_path(caplog, tmp_path):

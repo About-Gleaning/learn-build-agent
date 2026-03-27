@@ -10,7 +10,7 @@ from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path
 from .file_edit_state import get_file_state, record_file_edit
 from .handlers import build_tool_failure
-from .path_utils import resolve_workspace_path
+from .path_utils import resolve_workspace_or_skills_path
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ def _resolve_edit_target(file_path: str) -> Path:
     plan_path = build_plan_storage_path(get_session_id())
     if raw_path.is_absolute() and raw_path.resolve() == plan_path:
         return plan_path
-    return resolve_workspace_path(file_path)
+    return resolve_workspace_or_skills_path(file_path)
 
 
 def _detect_binary_file(target: Path) -> bool:
@@ -306,7 +306,7 @@ def run_edit(
         return _build_success_result(target, before, after)
     except ValueError as exc:
         message = str(exc)
-        error_code = "edit_path_forbidden" if "超出工作区范围" in message else "edit_failed"
+        error_code = "edit_path_forbidden" if "超出允许范围" in message else "edit_failed"
         return build_tool_failure(f"Error: {message}", error_code=error_code, error_type=type(exc).__name__)
     except Exception as exc:
         return build_tool_failure(f"Error: {exc}", error_code="edit_failed", error_type=type(exc).__name__)

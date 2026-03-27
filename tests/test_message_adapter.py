@@ -162,3 +162,25 @@ def test_to_provider_messages_should_include_tool_attachments_without_changing_c
     assert provider_messages[0]["role"] == "tool"
     assert provider_messages[0]["content"] == "PDF read successfully"
     assert provider_messages[0]["attachments"][0]["mime"] == "application/pdf"
+
+
+def test_to_provider_messages_should_include_failed_tool_with_tool_call_id():
+    session_id = "s_tool_failed"
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_failed",
+        name="read_file",
+        status="failed",
+        arguments='{"file_path":"/tmp/forbidden.md"}',
+        output={
+            "output": "Error: read_file 路径超出允许范围: /tmp/forbidden.md",
+            "metadata": {"status": "failed", "error_code": "read_path_forbidden"},
+        },
+    )
+
+    provider_messages = to_provider_messages([tool_msg])
+
+    assert provider_messages[0]["role"] == "tool"
+    assert provider_messages[0]["tool_call_id"] == "call_failed"
+    assert "路径超出允许范围" in provider_messages[0]["content"]

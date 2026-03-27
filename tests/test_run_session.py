@@ -35,12 +35,14 @@ from agent.runtime.session_memory import InMemorySessionMemoryStore, SessionMemo
 from agent.core.message import (
     append_reasoning_part,
     append_text_part,
+    append_tool_part,
     append_tool_call_part,
     create_error_message,
     create_message,
     get_message_text,
     to_provider_messages,
 )
+from agent.adapters.llm.vendors import build_provider_adapter
 
 
 def _last_tool_result_content(messages):
@@ -1105,6 +1107,10 @@ def test_load_skill_tool_description_should_include_available_skills_without_pat
     assert "<name>python_development_guide</name>" in description
     assert "<description>提供 Python 开发规范、测试与性能优化建议。</description>" in description
     assert "/tmp/skills/python_development_guide" not in description
+    assert "每次只加载一个 skill" in description
+    assert load_skill_tool["function"]["parameters"]["required"] == ["name"]
+    assert "name" in load_skill_tool["function"]["parameters"]["properties"]
+    assert "skill_names" not in load_skill_tool["function"]["parameters"]["properties"]
 
 
 def test_load_skill_tool_description_should_show_empty_message_when_no_skills():
@@ -1115,6 +1121,61 @@ def test_load_skill_tool_description_should_show_empty_message_when_no_skills():
         load_skill_tool["function"]["description"]
         == "加载一个 skill，以获取完成某个特定任务的详细指导。目前没有可用的 skills。"
     )
+
+
+def test_get_skill_registry_should_read_runtime_home_skills_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    runtime_skill = get_workspace().skills_dir / "runtime-skill" / "SKILL.md"
+    runtime_skill.parent.mkdir(parents=True, exist_ok=True)
+    runtime_skill.write_text(
+        "---\nname: runtime-skill\ndescription: runtime only\n---\n# Runtime Skill\n",
+        encoding="utf-8",
+    )
+
+    registry = session_module._get_skill_registry()
+
+    assert [skill["name"] for skill in registry.list_briefs()] == ["runtime-skill"]
+
+
+def test_run_session_load_skill_tool_should_return_structured_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    configure_workspace(tmp_path / "workspace")
+    skill_dir = get_workspace().skills_dir / "runtime-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: runtime-skill\ndescription: runtime only\n---\n# Runtime Skill\n按步骤执行。\n",
+        encoding="utf-8",
+    )
+    clear_session_memory()
+
+    call_state = {"count": 0, "tool_output": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        if call_state["count"] == 2:
+            call_state["tool_output"] = _last_tool_result_content(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_load_skill",
+                name="load_skill",
+                arguments='{"name":"runtime-skill"}',
+            )
+        else:
+            append_text_part(assistant, "已完成")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("加载 runtime skill", session_id="s_load_skill_result")
+
+    assert get_message_text(result) == "已完成"
+    assert "## Skill: runtime-skill" in call_state["tool_output"]
+    assert f"Base directory: {skill_dir.resolve()}" in call_state["tool_output"]
+    assert "# Runtime Skill" in call_state["tool_output"]
 
 
 def test_task_with_primary_agent_should_return_error(monkeypatch):
@@ -1606,6 +1667,363 @@ def test_run_session_should_use_configured_memory_store(monkeypatch):
         assert get_message_text(result) == "ok"
     finally:
         configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+
+
+def test_run_session_should_recover_incomplete_tool_calls_before_continue(monkeypatch):
+    session_id = "s_recover_tool_call"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "读取这个 PDF")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    assistant_message["info"]["agent"] = "build"
+    assistant_message["info"]["model"] = "kimi-k2.5"
+    assistant_message["info"]["provider"] = "kimi"
+    append_text_part(assistant_message, "我先读取 PDF。")
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_pdf",
+        name="read_file",
+        arguments='{"file_path":"demo.pdf"}',
+    )
+    store.save(session_id, [user_message, assistant_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    tool_messages = [msg for msg in captured_provider_messages if msg.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["tool_call_id"] == "call_pdf"
+    assert "系统恢复提示" in str(tool_messages[0]["content"])
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+
+    persisted_history = store.load(session_id)
+    recovered_messages = [msg for msg in persisted_history if msg["info"].get("role") == "tool"]
+    assert len(recovered_messages) == 1
+    recovered_output = recovered_messages[0]["parts"][0]["state"]["output"]
+    assert recovered_output["metadata"]["error_code"] == "missing_tool_result_context"
+    assert recovered_output["metadata"]["recovered"] is True
+    assert recovered_output["metadata"]["synthetic"] is True
+
+
+def test_run_session_should_insert_missing_tool_results_before_next_non_tool_message(monkeypatch):
+    session_id = "s_recover_partial_tool_call"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    first_user = create_message("user", session_id, status="completed")
+    append_text_part(first_user, "同时读取 PDF 和模板")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    assistant_message["info"]["agent"] = "build"
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_pdf",
+        name="read_file",
+        arguments='{"file_path":"demo.pdf"}',
+    )
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_template",
+        name="read_file",
+        arguments='{"file_path":"rule.md"}',
+    )
+    tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        tool_message,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.pdf"}',
+        output={"output": "PDF read successfully", "metadata": {"status": "completed"}},
+    )
+    interrupted_user = create_message("user", session_id, status="completed")
+    append_text_part(interrupted_user, "继续")
+    store.save(session_id, [first_user, assistant_message, tool_message, interrupted_user])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    run_session("再次继续", session_id=session_id)
+
+    roles = [str(msg.get("role")) for msg in captured_provider_messages]
+    assert roles.count("tool") == 2
+    template_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == "call_template"
+    )
+    interrupted_user_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "user" and msg.get("content") == "继续"
+    )
+    assert template_index < interrupted_user_index
+    assert "系统恢复提示" in str(captured_provider_messages[template_index]["content"])
+
+
+def test_run_session_should_not_duplicate_recovered_tool_messages(monkeypatch):
+    session_id = "s_recover_tool_call_once"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "读取文件")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_read",
+        name="read_file",
+        arguments='{"file_path":"demo.txt"}',
+    )
+    store.save(session_id, [user_message, assistant_message])
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    run_session("继续", session_id=session_id)
+    run_session("再继续", session_id=session_id)
+
+    persisted_history = store.load(session_id)
+    recovered_messages = [
+        msg
+        for msg in persisted_history
+        if msg["info"].get("role") == "tool"
+        and msg["parts"][0]["state"]["output"]["metadata"].get("error_code") == "missing_tool_result_context"
+    ]
+    assert len(recovered_messages) == 1
+
+
+def test_run_session_should_repair_assistant_tool_calls_prefix(monkeypatch):
+    session_id = "s_prefix_assistant_tool_calls"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    assistant_message["info"]["agent"] = "build"
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_prefix",
+        name="read_file",
+        arguments='{"file_path":"demo.txt"}',
+    )
+    store.save(session_id, [assistant_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+    tool_messages = [msg for msg in captured_provider_messages if msg.get("role") == "tool"]
+    assert any(msg.get("tool_call_id") == "call_prefix" for msg in tool_messages)
+    assert any("tool result 已缺失" in str(msg.get("content", "")) for msg in tool_messages)
+
+
+def test_run_session_should_repair_tool_prefix_with_synthetic_assistant(monkeypatch):
+    session_id = "s_prefix_tool_orphan"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        tool_message,
+        tool_call_id="call_orphan",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.txt"}',
+        output={"output": "hello", "metadata": {"status": "completed"}},
+    )
+    store.save(session_id, [tool_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+    assistant_index = next(index for index, msg in enumerate(captured_provider_messages) if msg.get("role") == "assistant")
+    assert captured_provider_messages[assistant_index]["tool_calls"][0]["id"] == "call_orphan"
+    assert captured_provider_messages[assistant_index + 1]["role"] == "tool"
+    assert captured_provider_messages[assistant_index + 1]["tool_call_id"] == "call_orphan"
+
+
+def test_run_session_should_repair_midstream_orphan_tool(monkeypatch):
+    session_id = "s_midstream_tool_orphan"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "第一问")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    append_text_part(assistant_message, "第一答")
+    orphan_tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        orphan_tool_message,
+        tool_call_id="call_mid",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.txt"}',
+        output={"output": "mid", "metadata": {"status": "completed"}},
+    )
+    store.save(session_id, [user_message, assistant_message, orphan_tool_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+    tool_index = next(index for index, msg in enumerate(captured_provider_messages) if msg.get("role") == "tool")
+    assert captured_provider_messages[tool_index - 1]["role"] == "assistant"
+    assert captured_provider_messages[tool_index - 1]["tool_calls"][0]["id"] == "call_mid"
+
+
+def test_run_session_should_preserve_previous_pending_tool_calls_before_repairing_orphan_tool(monkeypatch):
+    session_id = "s_orphan_tool_should_not_override_pending"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "先读取文件再继续")
+
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    assistant_message["info"]["agent"] = "build"
+    assistant_message["info"]["model"] = "kimi-k2.5"
+    assistant_message["info"]["provider"] = "kimi"
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_pending",
+        name="read_file",
+        arguments='{"file_path":"pending.txt"}',
+    )
+
+    orphan_tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        orphan_tool_message,
+        tool_call_id="call_orphan_mix",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"orphan.txt"}',
+        output={"output": "orphan content", "metadata": {"status": "completed"}},
+    )
+
+    interrupted_user = create_message("user", session_id, status="completed")
+    append_text_part(interrupted_user, "继续")
+    store.save(session_id, [user_message, assistant_message, orphan_tool_message, interrupted_user])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("再次继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+
+    pending_tool_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == "call_pending"
+    )
+    orphan_assistant_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "assistant"
+        and msg.get("tool_calls")
+        and msg["tool_calls"][0]["id"] == "call_orphan_mix"
+    )
+    orphan_tool_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == "call_orphan_mix"
+    )
+    continue_user_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "user" and msg.get("content") == "继续"
+    )
+
+    assert pending_tool_index < orphan_assistant_index < orphan_tool_index < continue_user_index
+    assert "系统恢复提示" in str(captured_provider_messages[pending_tool_index]["content"])
+
+    persisted_history = store.load(session_id)
+    recovered_tool_ids = [
+        str(part["state"].get("tool_call_id", ""))
+        for message in persisted_history
+        if message["info"].get("role") == "tool"
+        for part in message.get("parts", [])
+        if part.get("type") == "tool"
+        and isinstance(part.get("state"), dict)
+        and isinstance(part["state"].get("output"), dict)
+        and part["state"]["output"].get("metadata", {}).get("error_code") == "missing_tool_result_context"
+    ]
+    assert "call_pending" in recovered_tool_ids
+    assert "call_orphan_mix" not in recovered_tool_ids
 
 
 def test_workspace_should_store_session_history_in_global_sessions_dir(tmp_path):
@@ -2654,6 +3072,11 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.file_extraction_default.cleanup_mode == "async_delete"
         assert settings.file_extraction_vendors == {}
         assert settings.agent_loop.max_rounds == 8
+        assert settings.subagent_loop.max_rounds == 15
+        assert settings.logging.truncate_enabled is False
+        assert settings.logging.truncate_limit == 500
+        assert settings.session_memory.trim_enabled is True
+        assert settings.session_memory.max_messages == 24
     finally:
         clear_runtime_settings_cache()
 
@@ -2778,6 +3201,54 @@ def test_get_project_runtime_settings_should_read_agent_loop_config(tmp_path, mo
         clear_runtime_settings_cache()
 
 
+def test_get_project_runtime_settings_should_read_logging_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "truncate_enabled": true,
+            "truncate_limit": 2048
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.logging.truncate_enabled is True
+        assert settings.logging.truncate_limit == 2048
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_read_session_memory_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": false,
+            "max_messages": 128
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.session_memory.trim_enabled is False
+        assert settings.session_memory.max_messages == 128
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_resolve_file_extraction_settings_should_merge_vendor_override(tmp_path, monkeypatch):
     config_path = tmp_path / "project_runtime.json"
     config_path.write_text(
@@ -2858,6 +3329,106 @@ def test_get_project_runtime_settings_should_reject_non_positive_max_rounds(tmp_
         raise AssertionError("期望非法 max_rounds 配置抛出异常")
     except ValueError as exc:
         assert "max_rounds" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_invalid_logging_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "truncate_enabled": "yes",
+            "truncate_limit": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.truncate_enabled" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_non_positive_logging_limit(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "truncate_enabled": true,
+            "truncate_limit": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging.truncate_limit 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.truncate_limit" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_invalid_session_memory_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": "yes",
+            "max_messages": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 session_memory 配置抛出异常")
+    except ValueError as exc:
+        assert "session_memory.trim_enabled" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_non_positive_session_memory_limit(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": true,
+            "max_messages": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 session_memory.max_messages 配置抛出异常")
+    except ValueError as exc:
+        assert "session_memory.max_messages" in str(exc)
     finally:
         clear_runtime_settings_cache()
 
@@ -2946,6 +3517,43 @@ def test_clear_runtime_settings_cache_should_clear_project_runtime_cache(tmp_pat
         refreshed = get_project_runtime_settings()
         assert refreshed.compaction_default.tool_result_keep_recent == 4
     finally:
+        clear_runtime_settings_cache()
+
+
+def test_build_default_session_memory_store_should_follow_project_runtime_settings(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "session_memory": {
+            "trim_enabled": false,
+            "max_messages": 2
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        store = session_module._build_default_session_memory_store()
+        configure_session_memory_store(store)
+        clear_session_memory("s_default_store")
+
+        first_user = create_message("user", "s_default_store", status="completed")
+        append_text_part(first_user, "第一问")
+        second_user = create_message("user", "s_default_store", status="completed")
+        append_text_part(second_user, "第二问")
+        third_user = create_message("user", "s_default_store", status="completed")
+        append_text_part(third_user, "第三问")
+
+        session_module.SESSION_MEMORY_STORE.save("s_default_store", [first_user, second_user, third_user])
+        loaded = session_module.SESSION_MEMORY_STORE.load("s_default_store")
+
+        assert [get_message_text(message) for message in loaded] == ["第一问", "第二问", "第三问"]
+    finally:
+        configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
         clear_runtime_settings_cache()
 
 

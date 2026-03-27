@@ -48,11 +48,13 @@ src/
       grep_tool.py                # grep 工具实现与内容正则搜索
       glob_tool.py                # glob 工具实现与文件匹配排序
       handlers.py                 # 通用工具结果构造与 plan 相关工具实现
+      skill_tool.py               # load_skill 工具实现与 skill 正文加载
       path_utils.py               # 工具公共路径解析与工作区目录校验
       question_tool.py            # question 工具实现与问题结构归一化
       read_file_tool.py           # read_file 工具实现与读取白名单校验
       write_file_tool.py          # write_file 工具实现与整文件覆盖写入
       specs.py                    # 工具协议定义
+      load_skill.txt              # load_skill 工具描述模板
       question.txt                # question 工具描述模板
       todo_manager.py             # todo 状态管理与持久化
       task.txt                    # task 工具描述模板（含 {agents} 占位）
@@ -94,9 +96,10 @@ pnpm dev
 - 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
 - `glob` 的正式参数为 `pattern` 与可选 `path`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件。
 - `grep` 的正式参数为 `pattern` 与可选 `path`、`include`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围，结果返回命中的文件路径、行号与行内容。
-- `read_file` 的正式参数为 `file_path`，且必须传绝对路径；同时仅允许读取当前工作区内文件，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件。
-- `write_file` 的正式参数为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析。若目标文件已存在，写入前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
-- `edit_file` 的正式参数为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；编辑已有文件前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
+- `read_file` 的正式参数为 `file_path`，且必须传绝对路径；同时仅允许读取当前工作区内文件、`~/.my-agent/skills` 下的 skill 文件，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件。
+- `write_file` 的正式参数为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；允许写入当前工作区与 `~/.my-agent/skills`。若目标文件已存在，写入前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
+- `edit_file` 的正式参数为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；允许编辑当前工作区与 `~/.my-agent/skills` 的文本文件；编辑已有文件前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
+- `load_skill` 的正式参数为 `name`；工具会按名称精确加载单个 skill，返回 `Loaded skill: <name>` 标题、`Base directory` 与原始 `SKILL.md` 全文，避免模型再通过 `glob`/`bash` 自行扫描 skill 目录。
 - `write_file` 会返回结构化 `filepath/exists/diagnostics`；当前 `diagnostics` 仅预留扩展入口，固定返回空数组与 `diagnostics_status=not_enabled`。
 - `edit_file` 会返回结构化 `diff/filediff/diagnostics`；当前 `diagnostics` 仅预留扩展入口，固定返回空数组与 `diagnostics_status=not_enabled`。
 - 运行态数据默认落到 `~/.my-agent/`：
@@ -131,13 +134,13 @@ pnpm dev
 - 新增 agent 时，必须先在 `src/agent/runtime/agents.py` 注册名称、类型和场景描述。
 - `task` 工具描述模板放在 `src/agent/tools/task.txt`，通过 `{agents}` 占位动态注入所有 subagent 的名称和说明。
 - `bash` 工具描述模板放在 `src/agent/tools/bash.txt`；当工具描述较长时，优先拆到独立 `.txt` 模板文件，避免继续内联在 `specs.py` 中。
-- skills 的可用目录通过 `load_skill` 工具描述动态暴露，不再通过 `explore` prompt 注入 `skills_catalog`。
+- skills 的可用目录通过 `load_skill` 工具描述动态暴露，不再通过 `explore` prompt 注入 `skills_catalog`；skills 正式根目录固定为 `~/.my-agent/skills`（若设置 `MY_AGENT_HOME`，则使用对应目录下的 `skills/`）。
 
 ## 扩展指南
 
 ### 1) 新增工具
 
-1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，`read_file` 放在 `src/agent/tools/read_file_tool.py`，`write_file` 放在 `src/agent/tools/write_file_tool.py`，`edit_file` 放在 `src/agent/tools/edit_file_tool.py`，`glob` 放在 `src/agent/tools/glob_tool.py`，`grep` 放在 `src/agent/tools/grep_tool.py`，`question` 放在 `src/agent/tools/question_tool.py`，路径解析公共逻辑放在 `src/agent/tools/path_utils.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
+1. 在 `src/agent/tools/` 下对应模块增加实现；bash 相关逻辑统一放在 `src/agent/tools/bash_tool.py`，`read_file` 放在 `src/agent/tools/read_file_tool.py`，`write_file` 放在 `src/agent/tools/write_file_tool.py`，`edit_file` 放在 `src/agent/tools/edit_file_tool.py`，`glob` 放在 `src/agent/tools/glob_tool.py`，`grep` 放在 `src/agent/tools/grep_tool.py`，`question` 放在 `src/agent/tools/question_tool.py`，`load_skill` 放在 `src/agent/tools/skill_tool.py`，路径解析公共逻辑放在 `src/agent/tools/path_utils.py`，其余通用工具默认放在 `src/agent/tools/handlers.py`。
 2. 在 `src/agent/tools/specs.py` 增加或调整 JSON Schema；若工具描述较长，优先拆到独立 `.txt` 模板文件。
 3. 在 `src/agent/runtime/session.py` 的工具映射中注册（仅路由）。
 4. 工具返回优先保持结构化结果，至少稳定返回 `output` 与 `metadata.status`，避免继续扩散 `"Error: ..."` 裸字符串协议。
@@ -178,6 +181,9 @@ pnpm dev
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止在业务代码里继续扩散硬编码常量。
 - 当前 `compaction` 采用 `default + vendors` 结构：优先读取当前模型厂商 `vendor` 的局部覆盖配置，未命中时回退 `default`。
 - 当前 `file_extraction` 也采用 `default + vendors` 结构；本次默认仅开放 `.pdf`，并使用 `cleanup_mode=async_delete` 做远端异步清理。
+- 当前 `logging` 负责日志截断策略；默认 `truncate_enabled=false`，即不截断普通日志文本，但仍保留换行转义与敏感信息脱敏。
+- 当前 `session_memory` 负责会话历史按消息条数裁剪策略；默认 `trim_enabled=true`、`max_messages=24`，即最多保留最近 24 条非 `system` 消息。
+- `session_memory.trim_enabled=false` 仅关闭按条数裁剪，不关闭基于 compaction checkpoint 的历史收口与非法前缀修复。
 - 当前支持的压缩参数包括：
   - `tool_result_prune_enabled`
   - `tool_result_keep_recent`
@@ -225,13 +231,19 @@ pnpm dev
 - 异常链路保留 `warning/error/exception`，用于定位失败原因。
 - 日志单行格式统一为：时间（到秒）、级别、当前 agent、当前 model、关键信息。
 - `agent`、`model` 等上下文字段必须由程序显式传递，禁止依赖 LLM 推断或补全。
+- 日志是否截断必须走 `project_runtime.json -> logging` 配置，禁止在调用点重新硬编码长度策略；默认不启用截断。
+- 会话历史是否裁剪必须走 `project_runtime.json -> session_memory` 配置，禁止在运行时初始化处继续硬编码保留条数。
 - plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`；plan 模式下仅允许写入该文件。
 
 ## 变更记录
 
+- 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 与 `FileSessionMemoryStore` 裁剪行为不一致的问题。
+- 2026-03-26：新增 `project_runtime.logging` 配置，统一控制日志文本是否截断与截断长度；默认关闭截断，仅保留换行转义与敏感信息脱敏，便于排查超长 tool 参数与模型返回内容。
+- 2026-03-26：新增独立 `src/agent/tools/skill_tool.py` 与 `load_skill.txt`，将 `load_skill` 重构为按 `name` 精确加载单个 skill 的独立工具；返回结构统一为 `title/output/metadata(name, dir)`，`output` 仅注入 `Base directory` 与原始 `SKILL.md`，避免模型再用 `glob`/`bash` 搜索 skill 目录。
 - 2026-03-26：新增独立 `src/agent/tools/question_tool.py`，将 `question` 工具从 `handlers.py` 拆分；问题项新增可选 `custom` 字段，默认 `true`，由后端统一自动追加“不是以上任何选项”兜底项，并同步补齐 runtime/Web/schema 透传与测试覆盖。
 - 2026-03-26：新增 `question` 工具与 `src/agent/tools/question.txt`，支持 Agent 在执行过程中发起结构化提问；运行时新增待答问题状态管理、Web 答题/拒绝接口与流式恢复链路，助手消息与 SSE `done` 事件同步透传 `question` 结构，用户拒绝回答时会以“用户拒绝”语义继续后续推理并与普通工具异常区分。
 - 2026-03-26：Web 前端补齐 `question_required` 交互：最新待答问题会切换输入区为 question composer，支持问题/选项/notes 三段式输入、上下左右键导航、`Tab` 焦点切换、`Shift+Enter` 备注换行，并将每题 `answers + notes` 以结构化 payload 提交到 question 恢复接口。
+- 2026-03-26：skills 正式根目录切换为 `~/.my-agent/skills`；`read_file` / `write_file` / `edit_file` 新增对 skills 目录的受控访问；同时修复 `kimi` 在 `chat_completions` 下插入 PDF 抽取上下文过早导致多工具调用 `tool_call_id` 与 `tool` 响应不成对的问题，并新增本地序列校验防止无效请求直接外呼。
 - 2026-03-26：新增独立 `src/agent/tools/write_file_tool.py` 与 `write_file.txt`，将 `write_file` 收敛为整文件覆盖写工具；正式参数切换为 `filePath/content`，新增“已有文件先 `read_file` 再写”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `filepath/exists/diagnostics_status` 结构化返回。
 
 - 2026-03-26：重构 `edit_file` 工具为独立 `src/agent/tools/edit_file_tool.py`，正式参数切换为 `filePath/oldString/newString/replaceAll`，新增“先 `read_file` 再编辑”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `diff/filediff/diagnostics_status` 结构化返回；同时新增 `src/agent/tools/file_edit_state.py` 维护当前 session 的文件读取/编辑时序状态。

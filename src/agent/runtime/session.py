@@ -12,7 +12,13 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..config.logging_setup import build_log_extra, sanitize_log_text
-from ..config.settings import ResolvedLLMConfig, resolve_agent_loop_settings, resolve_llm_config, resolve_subagent_loop_settings
+from ..config.settings import (
+    ResolvedLLMConfig,
+    resolve_agent_loop_settings,
+    resolve_llm_config,
+    resolve_session_memory_settings,
+    resolve_subagent_loop_settings,
+)
 from ..core.context import set_session_id
 from ..core.message import (
     DisplayPart,
@@ -44,13 +50,14 @@ from ..tools.handlers import (
 )
 from ..tools.question_tool import run_question
 from ..tools.read_file_tool import run_read
+from ..tools.skill_tool import run_load_skill
 from ..tools.specs import build_agent_tools, build_base_tools
 from ..tools.todo_manager import TodoManager
 from ..tools.webfetch import webfetch
 from ..tools.websearch import websearch
 from ..tools.write_file_tool import run_write
 from .compaction import compact
-from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore
+from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore, normalize_history_prefix
 from .stream_display import (
     _append_display_event_part,
     _append_display_reasoning_part,
@@ -70,14 +77,18 @@ logger = logging.getLogger(__name__)
 
 MainAgentMode = Literal["build", "plan"]
 
-SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
-registry = SkillRegistry(SKILLS_ROOT)
-registry.discover()
-
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 TODO = TodoManager()
-SESSION_MEMORY_STORE: SessionMemoryStore = FileSessionMemoryStore(max_messages=24)
+def _build_default_session_memory_store() -> SessionMemoryStore:
+    settings = resolve_session_memory_settings()
+    return FileSessionMemoryStore(
+        max_messages=settings.max_messages,
+        trim_enabled=settings.trim_enabled,
+    )
+
+
+SESSION_MEMORY_STORE: SessionMemoryStore = _build_default_session_memory_store()
 ModeSwitchAction = Literal["confirm", "cancel"]
 
 
@@ -163,6 +174,8 @@ class TaskToolRequest:
 PENDING_MODE_SWITCHES: dict[str, PendingModeSwitch] = {}
 PENDING_QUESTIONS: dict[str, PendingQuestion] = {}
 STOP_REQUESTED_SESSION_IDS: set[str] = set()
+_SKILL_REGISTRY: SkillRegistry | None = None
+_SKILL_REGISTRY_ROOT: Path | None = None
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
@@ -256,6 +269,22 @@ def _resolve_prompt_path(agent: str, vendor: str) -> Path:
     if candidate.exists():
         return candidate
     raise ValueError(f"未知的 prompt agent: {agent}")
+
+
+def _get_skill_registry() -> SkillRegistry:
+    global _SKILL_REGISTRY, _SKILL_REGISTRY_ROOT
+    skills_root = get_workspace().skills_dir.resolve()
+    if _SKILL_REGISTRY is not None and _SKILL_REGISTRY_ROOT == skills_root:
+        return _SKILL_REGISTRY
+
+    registry = SkillRegistry(skills_root)
+    try:
+        registry.discover()
+    except FileNotFoundError:
+        registry.skills = []
+    _SKILL_REGISTRY = registry
+    _SKILL_REGISTRY_ROOT = skills_root
+    return registry
 
 
 def _read_prompt_file(path: Path) -> str:
@@ -374,7 +403,7 @@ def _get_system_prompt_for_mode(
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
-    return build_agent_tools(mode, registry.list_briefs())
+    return build_agent_tools(mode, _get_skill_registry().list_briefs())
 
 
 def _ensure_system_prompt(messages: list[Message], prompt: str, session_id: str) -> list[Message]:
@@ -383,6 +412,309 @@ def _ensure_system_prompt(messages: list[Message], prompt: str, session_id: str)
         messages[0] = system_msg
         return messages
     return [system_msg, *messages]
+
+
+def _extract_tool_result_call_id(message: Message) -> str:
+    for part in message.get("parts", []):
+        if part.get("type") != "tool":
+            continue
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        tool_call_id = str(state.get("tool_call_id", "")).strip()
+        if tool_call_id:
+            return tool_call_id
+    return ""
+
+
+def _build_recovered_tool_message(
+    *,
+    session_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    assistant_message: Message,
+) -> Message:
+    recovered_message = create_message(role="tool", session_id=session_id)
+    recovery_text = (
+        "系统恢复提示：该工具调用在上一轮请求异常结束前未完成，未执行任何实际工具逻辑。"
+        "当前结果为系统在会话恢复阶段自动补齐的失败占位结果，请基于当前上下文重新判断是否需要再次调用该工具。"
+    )
+    append_tool_part(
+        recovered_message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status="failed",
+        output={
+            "output": recovery_text,
+            "metadata": {
+                "status": "failed",
+                "error_code": "interrupted_tool_call_recovered",
+                "recovered": True,
+                "synthetic": True,
+                "recovery_reason": "request_interrupted_before_tool_result",
+            },
+        },
+    )
+    _set_message_runtime_info(
+        recovered_message,
+        agent=str(assistant_message["info"].get("agent", "")).strip(),
+        model=str(assistant_message["info"].get("model", "")).strip() or None,
+        provider=str(assistant_message["info"].get("provider", "")).strip() or None,
+        turn_started_at=(
+            str(assistant_message["info"].get("turn_started_at", "")).strip()
+            or str(assistant_message["info"].get("created_at", "")).strip()
+            or utc_now_iso()
+        ),
+        turn_completed_at=utc_now_iso(),
+    )
+    return recovered_message
+
+
+def _build_missing_tool_result_message(
+    *,
+    session_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    assistant_message: Message,
+) -> Message:
+    recovered_message = create_message(role="tool", session_id=session_id)
+    recovery_text = (
+        "系统恢复提示：该工具调用的原始 tool result 已缺失，当前无法确认工具是否真正执行、执行到哪一步、"
+        "以及当时的具体输出内容。当前结果为恢复阶段自动补齐的未知结果占位，请基于当前上下文重新判断是否需要再次调用该工具。"
+    )
+    append_tool_part(
+        recovered_message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status="failed",
+        output={
+            "output": recovery_text,
+            "metadata": {
+                "status": "failed",
+                "error_code": "missing_tool_result_context",
+                "recovered": True,
+                "synthetic": True,
+                "recovery_reason": "tool_result_or_context_missing",
+            },
+        },
+    )
+    _set_message_runtime_info(
+        recovered_message,
+        agent=str(assistant_message["info"].get("agent", "")).strip(),
+        model=str(assistant_message["info"].get("model", "")).strip() or None,
+        provider=str(assistant_message["info"].get("provider", "")).strip() or None,
+        turn_started_at=(
+            str(assistant_message["info"].get("turn_started_at", "")).strip()
+            or str(assistant_message["info"].get("created_at", "")).strip()
+            or utc_now_iso()
+        ),
+        turn_completed_at=utc_now_iso(),
+    )
+    return recovered_message
+
+
+def _build_orphan_tool_assistant_message(*, tool_message: Message, tool_call_id: str, tool_name: str) -> Message:
+    session_id = str(tool_message["info"].get("session_id", "")).strip()
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    append_text_part(
+        assistant_message,
+        "系统恢复提示：发现一条缺少请求上下文的工具结果，以下为系统为保持会话可继续而补齐的工具调用锚点，请将后续工具结果仅视为参考。",
+    )
+    arguments = "{}"
+    for part in tool_message.get("parts", []):
+        if part.get("type") != "tool":
+            continue
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        input_data = state.get("input")
+        if isinstance(input_data, dict):
+            arguments = str(input_data.get("arguments", "{}") or "{}")
+            break
+    append_tool_part(
+        assistant_message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status="requested",
+        arguments=arguments,
+    )
+    _set_message_runtime_info(
+        assistant_message,
+        agent=str(tool_message["info"].get("agent", "")).strip(),
+        model=str(tool_message["info"].get("model", "")).strip() or None,
+        provider=str(tool_message["info"].get("provider", "")).strip() or None,
+        turn_started_at=(
+            str(tool_message["info"].get("turn_started_at", "")).strip()
+            or str(tool_message["info"].get("created_at", "")).strip()
+            or utc_now_iso()
+        ),
+        turn_completed_at=utc_now_iso(),
+    )
+    return assistant_message
+
+
+def _extract_tool_message_meta(message: Message) -> tuple[str, str]:
+    tool_call_id = ""
+    tool_name = ""
+    for part in message.get("parts", []):
+        if part.get("type") != "tool":
+            continue
+        tool_name = str(part.get("name", "")).strip()
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        tool_call_id = str(state.get("tool_call_id", "")).strip()
+        if tool_call_id or tool_name:
+            break
+    return tool_call_id, tool_name
+
+
+def _insert_missing_tool_results_for_pending(
+    *,
+    repaired_messages: list[Message],
+    insert_at: int,
+    pending_tool_calls: list[dict[str, str]],
+    current_assistant_index: int,
+) -> tuple[int, list[str]]:
+    if not pending_tool_calls or current_assistant_index < 0:
+        return insert_at, []
+
+    assistant_message = repaired_messages[current_assistant_index]
+    missing_tool_messages = [
+        _build_missing_tool_result_message(
+            session_id=str(assistant_message["info"].get("session_id", "")).strip(),
+            tool_call_id=tool_call["id"],
+            tool_name=tool_call["name"],
+            assistant_message=assistant_message,
+        )
+        for tool_call in pending_tool_calls
+    ]
+    repaired_messages[insert_at:insert_at] = missing_tool_messages
+    return insert_at + len(missing_tool_messages), [tool_call["id"] for tool_call in pending_tool_calls]
+
+
+def _recover_incomplete_tool_calls(history_messages: list[Message]) -> tuple[list[Message], bool]:
+    if not history_messages:
+        return history_messages, False
+
+    repaired_messages = list(normalize_history_prefix(history_messages))
+    pending_tool_calls: list[dict[str, str]] = []
+    current_assistant_index = -1
+    repaired = repaired_messages != history_messages
+    inserted_call_ids: list[str] = []
+    recovered_call_ids: list[str] = []
+    index = 0
+
+    while index < len(repaired_messages):
+        message = repaired_messages[index]
+        role = get_role(message)
+
+        if role == "assistant":
+            if pending_tool_calls:
+                index, recovered_ids = _insert_missing_tool_results_for_pending(
+                    repaired_messages=repaired_messages,
+                    insert_at=index,
+                    pending_tool_calls=pending_tool_calls,
+                    current_assistant_index=current_assistant_index,
+                )
+                recovered_call_ids.extend(recovered_ids)
+                repaired = True
+            pending_tool_calls = extract_tool_calls(message)
+            current_assistant_index = index if pending_tool_calls else -1
+            index += 1
+            continue
+
+        if role == "tool":
+            tool_call_id = _extract_tool_result_call_id(message)
+            if pending_tool_calls:
+                matched_index = next(
+                    (offset for offset, tool_call in enumerate(pending_tool_calls) if tool_call["id"] == tool_call_id),
+                    -1,
+                )
+                if matched_index >= 0:
+                    pending_tool_calls.pop(matched_index)
+                    index += 1
+                    continue
+
+            orphan_tool_call_id, orphan_tool_name = _extract_tool_message_meta(message)
+            if orphan_tool_call_id and orphan_tool_name:
+                if pending_tool_calls:
+                    # 先补齐前一个 assistant 尚未完成的 tool result，再修当前孤儿 tool，
+                    # 避免新的 synthetic assistant 覆盖掉已有 pending 状态。
+                    index, recovered_ids = _insert_missing_tool_results_for_pending(
+                        repaired_messages=repaired_messages,
+                        insert_at=index,
+                        pending_tool_calls=pending_tool_calls,
+                        current_assistant_index=current_assistant_index,
+                    )
+                    recovered_call_ids.extend(recovered_ids)
+                    pending_tool_calls = []
+                    current_assistant_index = -1
+                    repaired = True
+                synthetic_assistant = _build_orphan_tool_assistant_message(
+                    tool_message=message,
+                    tool_call_id=orphan_tool_call_id,
+                    tool_name=orphan_tool_name,
+                )
+                repaired_messages.insert(index, synthetic_assistant)
+                inserted_call_ids.append(orphan_tool_call_id)
+                pending_tool_calls = extract_tool_calls(synthetic_assistant)
+                current_assistant_index = index
+                repaired = True
+                index += 1
+                continue
+
+            index += 1
+            continue
+
+        if pending_tool_calls:
+            index, recovered_ids = _insert_missing_tool_results_for_pending(
+                repaired_messages=repaired_messages,
+                insert_at=index,
+                pending_tool_calls=pending_tool_calls,
+                current_assistant_index=current_assistant_index,
+            )
+            recovered_call_ids.extend(recovered_ids)
+            repaired = True
+            pending_tool_calls = []
+            current_assistant_index = -1
+            continue
+
+        index += 1
+
+    if pending_tool_calls and current_assistant_index >= 0:
+        _, recovered_ids = _insert_missing_tool_results_for_pending(
+            repaired_messages=repaired_messages,
+            insert_at=len(repaired_messages),
+            pending_tool_calls=pending_tool_calls,
+            current_assistant_index=current_assistant_index,
+        )
+        recovered_call_ids.extend(recovered_ids)
+        repaired = True
+
+    if inserted_call_ids:
+        logger.info(
+            "session.repair_orphan_tool_messages session_id=%s repaired_call_ids=%s",
+            str(repaired_messages[0]["info"].get("session_id", "")).strip(),
+            ",".join(inserted_call_ids),
+            extra=build_log_extra(
+                agent=str(repaired_messages[0]["info"].get("agent", "")).strip(),
+                model=str(repaired_messages[0]["info"].get("model", "")).strip(),
+            ),
+        )
+    if recovered_call_ids:
+        assistant_message = repaired_messages[current_assistant_index] if 0 <= current_assistant_index < len(repaired_messages) else repaired_messages[0]
+        logger.info(
+            "session.recover_incomplete_tool_calls session_id=%s assistant_message_id=%s recovered_call_ids=%s",
+            str(assistant_message["info"].get("session_id", "")).strip(),
+            str(assistant_message["info"].get("message_id", "")).strip(),
+            ",".join(recovered_call_ids),
+            extra=build_log_extra(
+                agent=str(assistant_message["info"].get("agent", "")).strip(),
+                model=str(assistant_message["info"].get("model", "")).strip(),
+            ),
+        )
+    return repaired_messages, repaired
 
 
 def _latest_model(messages: list[Message]) -> str:
@@ -576,12 +908,17 @@ def _bootstrap_session(
     active_session_id = set_session_id(normalize_required_session_id(session_id))
     turn_started_at = utc_now_iso()
     mode_enabled = tools is None and system_prompt is None
+    registry = _get_skill_registry()
 
     initial_mode: MainAgentMode = "build"
     if mode in {"build", "plan"}:
         initial_mode = mode
 
     history_messages: list[Message] = SESSION_MEMORY_STORE.load(active_session_id) if mode_enabled else []
+    if mode_enabled and history_messages:
+        history_messages, history_repaired = _recover_incomplete_tool_calls(history_messages)
+        if history_repaired:
+            SESSION_MEMORY_STORE.save(active_session_id, history_messages)
     if mode is None and mode_enabled and history_messages:
         initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
 
@@ -935,6 +1272,7 @@ def _resume_question_session(
 ) -> Message | Generator[dict[str, Any], None, None]:
     agent_kind = str(pending.get("agent_kind", "")).strip().lower()
     if agent_kind == "subagent":
+        registry = _get_skill_registry()
         provider_name = str(pending.get("provider", "")).strip()
         model_name = str(pending.get("model", "")).strip()
         runtime_agent = str(pending.get("resume_runtime_agent", "")).strip().lower() or "explore"
@@ -1612,7 +1950,7 @@ def subagent_loop(
     result = run_session(
         user_input=prompt,
         session_id=session_id,
-        tools=build_base_tools(registry.list_briefs()),
+        tools=build_base_tools(_get_skill_registry().list_briefs()),
         system_prompt=_call_build_system_prompt(
             agent=agent_name,
             model=(llm_config.model if llm_config else ""),
@@ -2094,6 +2432,7 @@ def _run_session_stream(
                     )
                     result = task_request.result
                     if task_request.should_execute:
+                        registry = _get_skill_registry()
                         delegated_message = yield from _run_session_stream(
                             task_request.prompt,
                             session_id=active_session_id,
@@ -2498,7 +2837,7 @@ def _build_tool_handlers(
         ),
         "plan_enter": lambda **kw: _run_plan_enter_tool(**kw),
         "plan_exit": lambda **kw: _run_plan_exit_tool(**kw),
-        "load_skill": lambda **kw: registry.build_skill_context(kw["skill_names"]),
+        "load_skill": lambda **kw: run_load_skill(name=kw["name"], registry=_get_skill_registry()),
     }
 
 

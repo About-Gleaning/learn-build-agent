@@ -5,7 +5,7 @@ from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path, build_session_storage_name, get_workspace
 from .file_edit_state import record_file_read
 from .handlers import build_tool_failure, build_tool_success
-from .path_utils import resolve_workspace_path
+from .path_utils import resolve_workspace_or_skills_path
 
 MAX_INLINE_PDF_BYTES = 50 * 1024 * 1024
 EMPTY_FILE_OUTPUT = "文件存在，但内容为空。"
@@ -41,10 +41,12 @@ def resolve_readable_file_path(file_path: str) -> Path:
         return target
     if target.is_relative_to(current_tool_output_dir):
         return target
+    if target.is_relative_to(workspace.skills_dir):
+        return target
     if target.is_relative_to(workspace.runtime_home):
         raise ValueError(f"read_file 路径超出允许范围: {file_path}")
     try:
-        return resolve_workspace_path(file_path)
+        return resolve_workspace_or_skills_path(file_path)
     except ValueError as exc:
         raise ValueError(f"read_file 路径超出允许范围: {file_path}") from exc
 
