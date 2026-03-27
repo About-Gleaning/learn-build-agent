@@ -355,6 +355,36 @@ function formatDuration(durationMs: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (typeof document === "undefined") {
+    throw new Error("当前环境不支持复制");
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, text.length);
+
+  try {
+    const succeeded = document.execCommand("copy");
+    if (!succeeded) {
+      throw new Error("浏览器拒绝执行复制操作");
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 function toSingleLine(text: string, limit = 160): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (!normalized) {
@@ -1546,12 +1576,14 @@ export function App() {
   const [questionCursor, setQuestionCursor] = useState(0);
   const [questionFocus, setQuestionFocus] = useState<QuestionFocusTarget>("options");
   const [questionRequestId, setQuestionRequestId] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState("");
 
   const messageListRef = useRef<HTMLDivElement>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const questionNotesRef = useRef<HTMLTextAreaElement>(null);
   const questionOptionsRef = useRef<HTMLDivElement>(null);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
 
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
@@ -1695,6 +1727,14 @@ export function App() {
   }, [activeQuestion, questionRequestId]);
 
   useEffect(() => {
+    return () => {
+      if (copyFeedbackTimerRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!activeQuestion) {
       return;
     }
@@ -1714,6 +1754,26 @@ export function App() {
       });
     } catch (err) {
       setError((err as Error).message || "历史加载失败");
+    }
+  };
+
+  const handleCopyMessage = async (message: UiMessage) => {
+    const content = message.text || "";
+    if (!content) {
+      return;
+    }
+    try {
+      await copyTextToClipboard(content);
+      setCopiedMessageId(message.id);
+      if (copyFeedbackTimerRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
+      }
+      copyFeedbackTimerRef.current = window.setTimeout(() => {
+        setCopiedMessageId((current) => (current === message.id ? "" : current));
+        copyFeedbackTimerRef.current = null;
+      }, 1800);
+    } catch (err) {
+      setError((err as Error).message || "复制失败");
     }
   };
 
@@ -2656,6 +2716,18 @@ export function App() {
                         {msg.role === "assistant" && msg.turnCompletedAt ? (
                           <span className="assistant-runtime-sub">完成于 {formatTime(msg.turnCompletedAt)}</span>
                         ) : null}
+                      </div>
+                      <div className="terminal-record-actions">
+                        <button
+                          type="button"
+                          className="terminal-inline-btn message-copy-btn"
+                          disabled={!msg.text}
+                          onClick={() => {
+                            void handleCopyMessage(msg);
+                          }}
+                        >
+                          {copiedMessageId === msg.id ? "已复制" : "复制"}
+                        </button>
                       </div>
                     </div>
                     <div className="terminal-record-body">

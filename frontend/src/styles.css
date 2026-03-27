@@ -299,6 +299,17 @@ button:disabled {
   min-width: 0;
 }
 
+.terminal-record-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: flex-end;
+}
+
+.message-copy-btn {
+  min-width: 72px;
+}
+
 .terminal-record-body {
   display: grid;
   gap: 8px;
@@ -733,6 +744,10 @@ button:disabled {
 
   .terminal-statusline {
     gap: 10px;
+  }
+
+  .terminal-record-actions {
+    width: 100%;
   }
 
   .terminal-statusline-group {
