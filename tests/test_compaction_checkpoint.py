@@ -9,7 +9,7 @@ from agent.core.message import (
     get_message_text,
     trim_messages_by_compaction_checkpoint,
 )
-from agent.runtime.session_memory import InMemorySessionMemoryStore
+from agent.runtime.session_memory import InMemorySessionMemoryStore, normalize_history_prefix
 
 
 def _tool_result_content(message):
@@ -185,3 +185,25 @@ def test_inmemory_session_memory_store_should_not_split_tool_chain():
     loaded = store.load(session_id)
 
     assert [message["info"]["role"] for message in loaded] == ["user", "assistant", "tool"]
+
+
+def test_normalize_history_prefix_should_prepend_synthetic_user_for_tool_prefix():
+    session_id = "s_prefix_tool"
+    tool_message = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_message, tool_call_id="call_1", name="read_file", content="hello")
+
+    normalized = normalize_history_prefix([tool_message])
+
+    assert [message["info"]["role"] for message in normalized] == ["user", "tool"]
+    assert "系统恢复提示" in get_message_text(normalized[0])
+
+
+def test_normalize_history_prefix_should_prepend_synthetic_user_for_assistant_tool_calls_prefix():
+    session_id = "s_prefix_assistant"
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    append_tool_call_part(assistant_message, tool_call_id="call_1", name="read_file", arguments='{"path":"a.txt"}')
+
+    normalized = normalize_history_prefix([assistant_message])
+
+    assert [message["info"]["role"] for message in normalized] == ["user", "assistant"]
+    assert "系统恢复提示" in get_message_text(normalized[0])

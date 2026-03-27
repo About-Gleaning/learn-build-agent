@@ -214,6 +214,31 @@ def _build_tool_followup_messages(session_id: str = "s_hook"):
     return [user_msg, assistant_msg, tool_msg]
 
 
+def _build_valid_tool_followup_messages(session_id: str = "s_hook"):
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "plan_enter工具的描述怎么写的")
+
+    assistant_msg = create_message("assistant", session_id)
+    append_text_part(assistant_msg, "我来读取工具描述")
+    append_tool_call_part(
+        assistant_msg,
+        tool_call_id="call_1",
+        name="read_file",
+        arguments='{"path":"src/agent/tools/plan_enter.txt"}',
+    )
+
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_1",
+        name="read_file",
+        status="completed",
+        arguments='{"path":"src/agent/tools/plan_enter.txt"}',
+        output={"output": "使用这个工具来建议用户切换到 plan agent"},
+    )
+    return [user_msg, assistant_msg, tool_msg]
+
+
 def _build_pdf_tool_followup_messages(session_id: str = "s_hook"):
     user_msg = create_message("user", session_id)
     append_text_part(user_msg, "读取这个 PDF")
@@ -242,6 +267,44 @@ def _build_pdf_tool_followup_messages(session_id: str = "s_hook"):
         },
     )
     return [user_msg, tool_msg]
+
+
+def _build_valid_pdf_tool_followup_messages(session_id: str = "s_hook"):
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "读取这个 PDF")
+
+    assistant_msg = create_message("assistant", session_id)
+    append_tool_call_part(
+        assistant_msg,
+        tool_call_id="call_pdf",
+        name="read_file",
+        arguments='{"path":"docs/demo.pdf"}',
+    )
+
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"path":"docs/demo.pdf"}',
+        output={
+            "output": "PDF read successfully",
+            "metadata": {"filename": "demo.pdf", "status": "completed"},
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": session_id,
+                    "messageID": tool_msg["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+    )
+    return [user_msg, assistant_msg, tool_msg]
 
 
 def _build_system_and_pdf_tool_followup_messages(session_id: str = "s_hook"):
@@ -1654,6 +1717,33 @@ def test_create_chat_completion_should_reject_missing_tool_response_before_non_t
     assert "invalid_tool_message_sequence" in message["info"]["error"]["message"]
 
 
+def test_create_chat_completion_should_reject_orphan_tool_message(monkeypatch):
+    session_id = "s_invalid_orphan_tool"
+    user_msg = create_message("user", session_id)
+    append_text_part(user_msg, "读取文件")
+
+    tool_msg = create_message("tool", session_id)
+    append_tool_part(
+        tool_msg,
+        tool_call_id="call_orphan",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.txt"}',
+        output={"output": "hello"},
+    )
+
+    message = create_chat_completion(
+        [user_msg, tool_msg],
+        tools=[],
+        llm_config=_build_chat_config(),
+    )
+
+    assert message["info"]["status"] == "failed"
+    assert message["info"]["error"]["code"] == "api_error"
+    assert "invalid_tool_message_sequence" in message["info"]["error"]["message"]
+    assert "孤儿 tool 响应" in message["info"]["error"]["message"]
+
+
 def test_kimi_build_messages_should_defer_pdf_context_until_all_active_tool_results_finish(monkeypatch):
     captured_payload: dict[str, object] = {}
     session_id = "s_kimi_multi_tool"
@@ -1738,13 +1828,13 @@ def test_kimi_build_messages_should_defer_pdf_context_until_all_active_tool_resu
     assert provider_messages[4]["content"] == KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "这是从 PDF 抽取出来的内容"
 
 
-def test_logging_hook_should_log_latest_message(monkeypatch, caplog):
+def test_logging_hook_should_log_chat_request_messages(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     with caplog.at_level("INFO"):
         create_chat_completion(_build_user_message(), tools=[], agent="build", llm_config=_build_chat_config())
 
-    assert "llm.request api_mode=chat_completions latest_message=hello" in caplog.text
+    assert 'llm.request api_mode=chat_completions messages=[{"role":"user","content":"hello"}]' in caplog.text
     assert all(record.agent == "build" for record in caplog.records)
     assert all(record.model == "unknown" or isinstance(record.model, str) for record in caplog.records)
 
@@ -1828,17 +1918,16 @@ def test_logging_hook_should_log_reasoning_only_response(monkeypatch, caplog):
     assert "reasoning=先确认当前工作目录。" in caplog.text
 
 
-def test_logging_hook_should_not_repeat_previous_user_message_on_tool_followup(monkeypatch, caplog):
+def test_logging_hook_should_log_full_request_messages_on_tool_followup(monkeypatch, caplog):
     _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
 
     with caplog.at_level("INFO"):
-        create_chat_completion(_build_tool_followup_messages(), tools=[], agent="build", llm_config=_build_chat_config())
+        create_chat_completion(_build_valid_tool_followup_messages(), tools=[], agent="build", llm_config=_build_chat_config())
 
-    assert "latest_message=plan_enter工具的描述怎么写的" not in caplog.text
-    assert "llm.request" in caplog.text
+    assert 'messages=[{"role":"user","content":"plan_enter工具的描述怎么写的"},{"role":"assistant","content":"我来读取工具描述","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"src/agent/tools/plan_enter.txt\\"}"}}]},{"role":"tool","content":"使用这个工具来建议用户切换到 plan agent","tool_call_id":"call_1"}]' in caplog.text
 
 
-def test_logging_hook_should_log_attachment_summary_on_tool_followup(monkeypatch, caplog):
+def test_logging_hook_should_log_responses_input_structure_on_tool_followup(monkeypatch, caplog):
     config = ResolvedLLMConfig(
         agent="build",
         provider="gpt",
@@ -1855,5 +1944,26 @@ def test_logging_hook_should_log_attachment_summary_on_tool_followup(monkeypatch
         create_chat_completion(_build_pdf_tool_followup_messages(), tools=[], agent="build", llm_config=config)
 
     assert "llm.request api_mode=responses" in caplog.text
-    assert "attachments=tool:application/pdf:demo.pdf" in caplog.text
+    assert '[{"role":"user","content":"读取这个 PDF"},{"type":"function_call_output","call_id":"call_pdf","output":[{"type":"input_text","text":"PDF read successfully"},{"type":"input_file","file_data":"[omitted_file_data length=8]","filename":"demo.pdf"}]}]' in caplog.text
+    assert "data:application/pdf;base64" not in caplog.text
+
+
+def test_logging_hook_should_redact_data_url_in_chat_request_messages(monkeypatch, caplog):
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: _build_success_response("done"))),
+        responses=SimpleNamespace(create=lambda **kwargs: _build_responses_text_response("unused")),
+        files=SimpleNamespace(
+            create=lambda **kwargs: SimpleNamespace(id="file_pdf_1"),
+            content=lambda **kwargs: SimpleNamespace(text="这是从 PDF 抽取出来的内容"),
+            delete=lambda **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(client_module, "_build_openai_client", lambda _config: fake_client)
+    monkeypatch.setattr(vendors_module, "_spawn_kimi_cleanup", lambda *args, **kwargs: None)
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_valid_pdf_tool_followup_messages(), tools=[], agent="build", llm_config=_build_kimi_config())
+
+    assert "llm.request api_mode=chat_completions" in caplog.text
+    assert "[omitted_data_url mime=application/pdf length=" in caplog.text
     assert "data:application/pdf;base64" not in caplog.text

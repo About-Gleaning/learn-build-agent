@@ -1714,7 +1714,7 @@ def test_run_session_should_recover_incomplete_tool_calls_before_continue(monkey
     recovered_messages = [msg for msg in persisted_history if msg["info"].get("role") == "tool"]
     assert len(recovered_messages) == 1
     recovered_output = recovered_messages[0]["parts"][0]["state"]["output"]
-    assert recovered_output["metadata"]["error_code"] == "interrupted_tool_call_recovered"
+    assert recovered_output["metadata"]["error_code"] == "missing_tool_result_context"
     assert recovered_output["metadata"]["recovered"] is True
     assert recovered_output["metadata"]["synthetic"] is True
 
@@ -1815,9 +1815,215 @@ def test_run_session_should_not_duplicate_recovered_tool_messages(monkeypatch):
         msg
         for msg in persisted_history
         if msg["info"].get("role") == "tool"
-        and msg["parts"][0]["state"]["output"]["metadata"].get("error_code") == "interrupted_tool_call_recovered"
+        and msg["parts"][0]["state"]["output"]["metadata"].get("error_code") == "missing_tool_result_context"
     ]
     assert len(recovered_messages) == 1
+
+
+def test_run_session_should_repair_assistant_tool_calls_prefix(monkeypatch):
+    session_id = "s_prefix_assistant_tool_calls"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    assistant_message["info"]["agent"] = "build"
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_prefix",
+        name="read_file",
+        arguments='{"file_path":"demo.txt"}',
+    )
+    store.save(session_id, [assistant_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+    tool_messages = [msg for msg in captured_provider_messages if msg.get("role") == "tool"]
+    assert any(msg.get("tool_call_id") == "call_prefix" for msg in tool_messages)
+    assert any("tool result 已缺失" in str(msg.get("content", "")) for msg in tool_messages)
+
+
+def test_run_session_should_repair_tool_prefix_with_synthetic_assistant(monkeypatch):
+    session_id = "s_prefix_tool_orphan"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        tool_message,
+        tool_call_id="call_orphan",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.txt"}',
+        output={"output": "hello", "metadata": {"status": "completed"}},
+    )
+    store.save(session_id, [tool_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+    assistant_index = next(index for index, msg in enumerate(captured_provider_messages) if msg.get("role") == "assistant")
+    assert captured_provider_messages[assistant_index]["tool_calls"][0]["id"] == "call_orphan"
+    assert captured_provider_messages[assistant_index + 1]["role"] == "tool"
+    assert captured_provider_messages[assistant_index + 1]["tool_call_id"] == "call_orphan"
+
+
+def test_run_session_should_repair_midstream_orphan_tool(monkeypatch):
+    session_id = "s_midstream_tool_orphan"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "第一问")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    append_text_part(assistant_message, "第一答")
+    orphan_tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        orphan_tool_message,
+        tool_call_id="call_mid",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.txt"}',
+        output={"output": "mid", "metadata": {"status": "completed"}},
+    )
+    store.save(session_id, [user_message, assistant_message, orphan_tool_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+    tool_index = next(index for index, msg in enumerate(captured_provider_messages) if msg.get("role") == "tool")
+    assert captured_provider_messages[tool_index - 1]["role"] == "assistant"
+    assert captured_provider_messages[tool_index - 1]["tool_calls"][0]["id"] == "call_mid"
+
+
+def test_run_session_should_preserve_previous_pending_tool_calls_before_repairing_orphan_tool(monkeypatch):
+    session_id = "s_orphan_tool_should_not_override_pending"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "先读取文件再继续")
+
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    assistant_message["info"]["agent"] = "build"
+    assistant_message["info"]["model"] = "kimi-k2.5"
+    assistant_message["info"]["provider"] = "kimi"
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_pending",
+        name="read_file",
+        arguments='{"file_path":"pending.txt"}',
+    )
+
+    orphan_tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        orphan_tool_message,
+        tool_call_id="call_orphan_mix",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"orphan.txt"}',
+        output={"output": "orphan content", "metadata": {"status": "completed"}},
+    )
+
+    interrupted_user = create_message("user", session_id, status="completed")
+    append_text_part(interrupted_user, "继续")
+    store.save(session_id, [user_message, assistant_message, orphan_tool_message, interrupted_user])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("再次继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+
+    pending_tool_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == "call_pending"
+    )
+    orphan_assistant_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "assistant"
+        and msg.get("tool_calls")
+        and msg["tool_calls"][0]["id"] == "call_orphan_mix"
+    )
+    orphan_tool_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == "call_orphan_mix"
+    )
+    continue_user_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "user" and msg.get("content") == "继续"
+    )
+
+    assert pending_tool_index < orphan_assistant_index < orphan_tool_index < continue_user_index
+    assert "系统恢复提示" in str(captured_provider_messages[pending_tool_index]["content"])
+
+    persisted_history = store.load(session_id)
+    recovered_tool_ids = [
+        str(part["state"].get("tool_call_id", ""))
+        for message in persisted_history
+        if message["info"].get("role") == "tool"
+        for part in message.get("parts", [])
+        if part.get("type") == "tool"
+        and isinstance(part.get("state"), dict)
+        and isinstance(part["state"].get("output"), dict)
+        and part["state"]["output"].get("metadata", {}).get("error_code") == "missing_tool_result_context"
+    ]
+    assert "call_pending" in recovered_tool_ids
+    assert "call_orphan_mix" not in recovered_tool_ids
 
 
 def test_workspace_should_store_session_history_in_global_sessions_dir(tmp_path):

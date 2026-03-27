@@ -507,6 +507,13 @@ class ChatCompletionsAdapter(ProviderAdapter):
                     pending_tool_call_ids.remove(tool_call_id)
                 continue
 
+            if role == "tool":
+                tool_call_id = stringify_text(provider_message.get("tool_call_id"))
+                raise ValueError(
+                    "invalid_tool_message_sequence: 发现孤儿 tool 响应，前面缺少对应的 assistant tool_calls，"
+                    f"tool_call_id={tool_call_id or 'unknown'}"
+                )
+
             if role != "assistant":
                 continue
 

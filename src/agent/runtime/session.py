@@ -51,7 +51,7 @@ from ..tools.webfetch import webfetch
 from ..tools.websearch import websearch
 from ..tools.write_file_tool import run_write
 from .compaction import compact
-from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore
+from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore, normalize_history_prefix
 from .stream_display import (
     _append_display_event_part,
     _append_display_reasoning_part,
@@ -456,71 +456,251 @@ def _build_recovered_tool_message(
     return recovered_message
 
 
-def _recover_incomplete_tool_calls(history_messages: list[Message]) -> tuple[list[Message], bool]:
-    if not history_messages:
-        return history_messages, False
+def _build_missing_tool_result_message(
+    *,
+    session_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    assistant_message: Message,
+) -> Message:
+    recovered_message = create_message(role="tool", session_id=session_id)
+    recovery_text = (
+        "系统恢复提示：该工具调用的原始 tool result 已缺失，当前无法确认工具是否真正执行、执行到哪一步、"
+        "以及当时的具体输出内容。当前结果为恢复阶段自动补齐的未知结果占位，请基于当前上下文重新判断是否需要再次调用该工具。"
+    )
+    append_tool_part(
+        recovered_message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status="failed",
+        output={
+            "output": recovery_text,
+            "metadata": {
+                "status": "failed",
+                "error_code": "missing_tool_result_context",
+                "recovered": True,
+                "synthetic": True,
+                "recovery_reason": "tool_result_or_context_missing",
+            },
+        },
+    )
+    _set_message_runtime_info(
+        recovered_message,
+        agent=str(assistant_message["info"].get("agent", "")).strip(),
+        model=str(assistant_message["info"].get("model", "")).strip() or None,
+        provider=str(assistant_message["info"].get("provider", "")).strip() or None,
+        turn_started_at=(
+            str(assistant_message["info"].get("turn_started_at", "")).strip()
+            or str(assistant_message["info"].get("created_at", "")).strip()
+            or utc_now_iso()
+        ),
+        turn_completed_at=utc_now_iso(),
+    )
+    return recovered_message
 
-    repaired_messages = list(history_messages)
-    assistant_index = -1
-    pending_tool_calls: list[dict[str, str]] = []
-    for index in range(len(repaired_messages) - 1, -1, -1):
-        message = repaired_messages[index]
-        if get_role(message) != "assistant":
+
+def _build_orphan_tool_assistant_message(*, tool_message: Message, tool_call_id: str, tool_name: str) -> Message:
+    session_id = str(tool_message["info"].get("session_id", "")).strip()
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    append_text_part(
+        assistant_message,
+        "系统恢复提示：发现一条缺少请求上下文的工具结果，以下为系统为保持会话可继续而补齐的工具调用锚点，请将后续工具结果仅视为参考。",
+    )
+    arguments = "{}"
+    for part in tool_message.get("parts", []):
+        if part.get("type") != "tool":
             continue
-        tool_calls = extract_tool_calls(message)
-        if not tool_calls:
+        state = part.get("state")
+        if not isinstance(state, dict):
             continue
-        assistant_index = index
-        pending_tool_calls = tool_calls
-        break
-
-    if assistant_index < 0 or not pending_tool_calls:
-        return history_messages, False
-
-    pending_tool_ids = {tool_call["id"] for tool_call in pending_tool_calls if tool_call.get("id")}
-    if not pending_tool_ids:
-        return history_messages, False
-
-    matched_tool_ids: set[str] = set()
-    insert_index = assistant_index + 1
-    cursor = assistant_index + 1
-    while cursor < len(repaired_messages):
-        message = repaired_messages[cursor]
-        if get_role(message) != "tool":
+        input_data = state.get("input")
+        if isinstance(input_data, dict):
+            arguments = str(input_data.get("arguments", "{}") or "{}")
             break
-        tool_call_id = _extract_tool_result_call_id(message)
-        if not tool_call_id or tool_call_id not in pending_tool_ids:
+    append_tool_part(
+        assistant_message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status="requested",
+        arguments=arguments,
+    )
+    _set_message_runtime_info(
+        assistant_message,
+        agent=str(tool_message["info"].get("agent", "")).strip(),
+        model=str(tool_message["info"].get("model", "")).strip() or None,
+        provider=str(tool_message["info"].get("provider", "")).strip() or None,
+        turn_started_at=(
+            str(tool_message["info"].get("turn_started_at", "")).strip()
+            or str(tool_message["info"].get("created_at", "")).strip()
+            or utc_now_iso()
+        ),
+        turn_completed_at=utc_now_iso(),
+    )
+    return assistant_message
+
+
+def _extract_tool_message_meta(message: Message) -> tuple[str, str]:
+    tool_call_id = ""
+    tool_name = ""
+    for part in message.get("parts", []):
+        if part.get("type") != "tool":
+            continue
+        tool_name = str(part.get("name", "")).strip()
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        tool_call_id = str(state.get("tool_call_id", "")).strip()
+        if tool_call_id or tool_name:
             break
-        matched_tool_ids.add(tool_call_id)
-        insert_index = cursor + 1
-        cursor += 1
+    return tool_call_id, tool_name
 
-    missing_tool_calls = [tool_call for tool_call in pending_tool_calls if tool_call["id"] not in matched_tool_ids]
-    if not missing_tool_calls:
-        return history_messages, False
 
-    assistant_message = repaired_messages[assistant_index]
-    recovered_messages = [
-        _build_recovered_tool_message(
+def _insert_missing_tool_results_for_pending(
+    *,
+    repaired_messages: list[Message],
+    insert_at: int,
+    pending_tool_calls: list[dict[str, str]],
+    current_assistant_index: int,
+) -> tuple[int, list[str]]:
+    if not pending_tool_calls or current_assistant_index < 0:
+        return insert_at, []
+
+    assistant_message = repaired_messages[current_assistant_index]
+    missing_tool_messages = [
+        _build_missing_tool_result_message(
             session_id=str(assistant_message["info"].get("session_id", "")).strip(),
             tool_call_id=tool_call["id"],
             tool_name=tool_call["name"],
             assistant_message=assistant_message,
         )
-        for tool_call in missing_tool_calls
+        for tool_call in pending_tool_calls
     ]
-    logger.info(
-        "session.recover_incomplete_tool_calls session_id=%s assistant_message_id=%s recovered_call_ids=%s",
-        str(assistant_message["info"].get("session_id", "")).strip(),
-        str(assistant_message["info"].get("message_id", "")).strip(),
-        ",".join(tool_call["id"] for tool_call in missing_tool_calls),
-        extra=build_log_extra(
-            agent=str(assistant_message["info"].get("agent", "")).strip(),
-            model=str(assistant_message["info"].get("model", "")).strip(),
-        ),
-    )
-    repaired_messages[insert_index:insert_index] = recovered_messages
-    return repaired_messages, True
+    repaired_messages[insert_at:insert_at] = missing_tool_messages
+    return insert_at + len(missing_tool_messages), [tool_call["id"] for tool_call in pending_tool_calls]
+
+
+def _recover_incomplete_tool_calls(history_messages: list[Message]) -> tuple[list[Message], bool]:
+    if not history_messages:
+        return history_messages, False
+
+    repaired_messages = list(normalize_history_prefix(history_messages))
+    pending_tool_calls: list[dict[str, str]] = []
+    current_assistant_index = -1
+    repaired = repaired_messages != history_messages
+    inserted_call_ids: list[str] = []
+    recovered_call_ids: list[str] = []
+    index = 0
+
+    while index < len(repaired_messages):
+        message = repaired_messages[index]
+        role = get_role(message)
+
+        if role == "assistant":
+            if pending_tool_calls:
+                index, recovered_ids = _insert_missing_tool_results_for_pending(
+                    repaired_messages=repaired_messages,
+                    insert_at=index,
+                    pending_tool_calls=pending_tool_calls,
+                    current_assistant_index=current_assistant_index,
+                )
+                recovered_call_ids.extend(recovered_ids)
+                repaired = True
+            pending_tool_calls = extract_tool_calls(message)
+            current_assistant_index = index if pending_tool_calls else -1
+            index += 1
+            continue
+
+        if role == "tool":
+            tool_call_id = _extract_tool_result_call_id(message)
+            if pending_tool_calls:
+                matched_index = next(
+                    (offset for offset, tool_call in enumerate(pending_tool_calls) if tool_call["id"] == tool_call_id),
+                    -1,
+                )
+                if matched_index >= 0:
+                    pending_tool_calls.pop(matched_index)
+                    index += 1
+                    continue
+
+            orphan_tool_call_id, orphan_tool_name = _extract_tool_message_meta(message)
+            if orphan_tool_call_id and orphan_tool_name:
+                if pending_tool_calls:
+                    # 先补齐前一个 assistant 尚未完成的 tool result，再修当前孤儿 tool，
+                    # 避免新的 synthetic assistant 覆盖掉已有 pending 状态。
+                    index, recovered_ids = _insert_missing_tool_results_for_pending(
+                        repaired_messages=repaired_messages,
+                        insert_at=index,
+                        pending_tool_calls=pending_tool_calls,
+                        current_assistant_index=current_assistant_index,
+                    )
+                    recovered_call_ids.extend(recovered_ids)
+                    pending_tool_calls = []
+                    current_assistant_index = -1
+                    repaired = True
+                synthetic_assistant = _build_orphan_tool_assistant_message(
+                    tool_message=message,
+                    tool_call_id=orphan_tool_call_id,
+                    tool_name=orphan_tool_name,
+                )
+                repaired_messages.insert(index, synthetic_assistant)
+                inserted_call_ids.append(orphan_tool_call_id)
+                pending_tool_calls = extract_tool_calls(synthetic_assistant)
+                current_assistant_index = index
+                repaired = True
+                index += 1
+                continue
+
+            index += 1
+            continue
+
+        if pending_tool_calls:
+            index, recovered_ids = _insert_missing_tool_results_for_pending(
+                repaired_messages=repaired_messages,
+                insert_at=index,
+                pending_tool_calls=pending_tool_calls,
+                current_assistant_index=current_assistant_index,
+            )
+            recovered_call_ids.extend(recovered_ids)
+            repaired = True
+            pending_tool_calls = []
+            current_assistant_index = -1
+            continue
+
+        index += 1
+
+    if pending_tool_calls and current_assistant_index >= 0:
+        _, recovered_ids = _insert_missing_tool_results_for_pending(
+            repaired_messages=repaired_messages,
+            insert_at=len(repaired_messages),
+            pending_tool_calls=pending_tool_calls,
+            current_assistant_index=current_assistant_index,
+        )
+        recovered_call_ids.extend(recovered_ids)
+        repaired = True
+
+    if inserted_call_ids:
+        logger.info(
+            "session.repair_orphan_tool_messages session_id=%s repaired_call_ids=%s",
+            str(repaired_messages[0]["info"].get("session_id", "")).strip(),
+            ",".join(inserted_call_ids),
+            extra=build_log_extra(
+                agent=str(repaired_messages[0]["info"].get("agent", "")).strip(),
+                model=str(repaired_messages[0]["info"].get("model", "")).strip(),
+            ),
+        )
+    if recovered_call_ids:
+        assistant_message = repaired_messages[current_assistant_index] if 0 <= current_assistant_index < len(repaired_messages) else repaired_messages[0]
+        logger.info(
+            "session.recover_incomplete_tool_calls session_id=%s assistant_message_id=%s recovered_call_ids=%s",
+            str(assistant_message["info"].get("session_id", "")).strip(),
+            str(assistant_message["info"].get("message_id", "")).strip(),
+            ",".join(recovered_call_ids),
+            extra=build_log_extra(
+                agent=str(assistant_message["info"].get("agent", "")).strip(),
+                model=str(assistant_message["info"].get("model", "")).strip(),
+            ),
+        )
+    return repaired_messages, repaired
 
 
 def _latest_model(messages: list[Message]) -> str:
