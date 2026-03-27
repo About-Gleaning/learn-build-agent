@@ -137,6 +137,7 @@
 
 ## 变更记录
 
+- 2026-03-27：Web 前端新增 `session-load` 交互，支持手动输入自定义 `session_id` 并通过既有 `GET /api/sessions/{session_id}/messages` 接口重载本地会话历史；前端切换会话时会同步重置临时交互态并尽量从历史消息回填 `mode/provider/model`，后端同时统一 `messages/stop/mode-switch/question/clear` 等 session 路由的 `session_id` 格式校验，避免出现“历史可加载但后续请求不可继续”的行为不一致。
 - 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 未按阈值裁剪、与 `FileSessionMemoryStore` 行为不一致的问题。
 - 2026-03-27：增强 session 历史恢复链路；`session_memory` 在读取历史时会为非法前缀自动补齐 synthetic user 锚点，`runtime/session.py` 新增对“首条 assistant(tool_calls)”“首条 tool”“中间孤儿 tool”的统一修理逻辑：孤儿 `tool` 会补 synthetic assistant(tool_calls) 作为上下文锚点，缺失的 tool result 会补“具体情况未知”的 synthetic tool 占位结果；`chat_completions` 协议层同时收紧校验，若仍出现未修理的孤儿 `tool`，会在本地直接报 `invalid_tool_message_sequence`，避免继续外发非法消息序列。
 - 2026-03-26：新增 `project_runtime.logging` 配置，统一控制日志文本是否截断与截断长度；默认关闭截断，仅保留换行转义与敏感信息脱敏，便于排查超长 tool 参数与模型返回内容。
