@@ -400,6 +400,129 @@ def _ensure_system_prompt(messages: list[Message], prompt: str, session_id: str)
     return [system_msg, *messages]
 
 
+def _extract_tool_result_call_id(message: Message) -> str:
+    for part in message.get("parts", []):
+        if part.get("type") != "tool":
+            continue
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        tool_call_id = str(state.get("tool_call_id", "")).strip()
+        if tool_call_id:
+            return tool_call_id
+    return ""
+
+
+def _build_recovered_tool_message(
+    *,
+    session_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    assistant_message: Message,
+) -> Message:
+    recovered_message = create_message(role="tool", session_id=session_id)
+    recovery_text = (
+        "系统恢复提示：该工具调用在上一轮请求异常结束前未完成，未执行任何实际工具逻辑。"
+        "当前结果为系统在会话恢复阶段自动补齐的失败占位结果，请基于当前上下文重新判断是否需要再次调用该工具。"
+    )
+    append_tool_part(
+        recovered_message,
+        tool_call_id=tool_call_id,
+        name=tool_name,
+        status="failed",
+        output={
+            "output": recovery_text,
+            "metadata": {
+                "status": "failed",
+                "error_code": "interrupted_tool_call_recovered",
+                "recovered": True,
+                "synthetic": True,
+                "recovery_reason": "request_interrupted_before_tool_result",
+            },
+        },
+    )
+    _set_message_runtime_info(
+        recovered_message,
+        agent=str(assistant_message["info"].get("agent", "")).strip(),
+        model=str(assistant_message["info"].get("model", "")).strip() or None,
+        provider=str(assistant_message["info"].get("provider", "")).strip() or None,
+        turn_started_at=(
+            str(assistant_message["info"].get("turn_started_at", "")).strip()
+            or str(assistant_message["info"].get("created_at", "")).strip()
+            or utc_now_iso()
+        ),
+        turn_completed_at=utc_now_iso(),
+    )
+    return recovered_message
+
+
+def _recover_incomplete_tool_calls(history_messages: list[Message]) -> tuple[list[Message], bool]:
+    if not history_messages:
+        return history_messages, False
+
+    repaired_messages = list(history_messages)
+    assistant_index = -1
+    pending_tool_calls: list[dict[str, str]] = []
+    for index in range(len(repaired_messages) - 1, -1, -1):
+        message = repaired_messages[index]
+        if get_role(message) != "assistant":
+            continue
+        tool_calls = extract_tool_calls(message)
+        if not tool_calls:
+            continue
+        assistant_index = index
+        pending_tool_calls = tool_calls
+        break
+
+    if assistant_index < 0 or not pending_tool_calls:
+        return history_messages, False
+
+    pending_tool_ids = {tool_call["id"] for tool_call in pending_tool_calls if tool_call.get("id")}
+    if not pending_tool_ids:
+        return history_messages, False
+
+    matched_tool_ids: set[str] = set()
+    insert_index = assistant_index + 1
+    cursor = assistant_index + 1
+    while cursor < len(repaired_messages):
+        message = repaired_messages[cursor]
+        if get_role(message) != "tool":
+            break
+        tool_call_id = _extract_tool_result_call_id(message)
+        if not tool_call_id or tool_call_id not in pending_tool_ids:
+            break
+        matched_tool_ids.add(tool_call_id)
+        insert_index = cursor + 1
+        cursor += 1
+
+    missing_tool_calls = [tool_call for tool_call in pending_tool_calls if tool_call["id"] not in matched_tool_ids]
+    if not missing_tool_calls:
+        return history_messages, False
+
+    assistant_message = repaired_messages[assistant_index]
+    recovered_messages = [
+        _build_recovered_tool_message(
+            session_id=str(assistant_message["info"].get("session_id", "")).strip(),
+            tool_call_id=tool_call["id"],
+            tool_name=tool_call["name"],
+            assistant_message=assistant_message,
+        )
+        for tool_call in missing_tool_calls
+    ]
+    logger.info(
+        "session.recover_incomplete_tool_calls session_id=%s assistant_message_id=%s recovered_call_ids=%s",
+        str(assistant_message["info"].get("session_id", "")).strip(),
+        str(assistant_message["info"].get("message_id", "")).strip(),
+        ",".join(tool_call["id"] for tool_call in missing_tool_calls),
+        extra=build_log_extra(
+            agent=str(assistant_message["info"].get("agent", "")).strip(),
+            model=str(assistant_message["info"].get("model", "")).strip(),
+        ),
+    )
+    repaired_messages[insert_index:insert_index] = recovered_messages
+    return repaired_messages, True
+
+
 def _latest_model(messages: list[Message]) -> str:
     for msg in reversed(messages):
         model = str(msg["info"].get("model", "")).strip()
@@ -598,6 +721,10 @@ def _bootstrap_session(
         initial_mode = mode
 
     history_messages: list[Message] = SESSION_MEMORY_STORE.load(active_session_id) if mode_enabled else []
+    if mode_enabled and history_messages:
+        history_messages, history_repaired = _recover_incomplete_tool_calls(history_messages)
+        if history_repaired:
+            SESSION_MEMORY_STORE.save(active_session_id, history_messages)
     if mode is None and mode_enabled and history_messages:
         initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
 

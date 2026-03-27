@@ -35,12 +35,14 @@ from agent.runtime.session_memory import InMemorySessionMemoryStore, SessionMemo
 from agent.core.message import (
     append_reasoning_part,
     append_text_part,
+    append_tool_part,
     append_tool_call_part,
     create_error_message,
     create_message,
     get_message_text,
     to_provider_messages,
 )
+from agent.adapters.llm.vendors import build_provider_adapter
 
 
 def _last_tool_result_content(messages):
@@ -1665,6 +1667,157 @@ def test_run_session_should_use_configured_memory_store(monkeypatch):
         assert get_message_text(result) == "ok"
     finally:
         configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+
+
+def test_run_session_should_recover_incomplete_tool_calls_before_continue(monkeypatch):
+    session_id = "s_recover_tool_call"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "读取这个 PDF")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    assistant_message["info"]["agent"] = "build"
+    assistant_message["info"]["model"] = "kimi-k2.5"
+    assistant_message["info"]["provider"] = "kimi"
+    append_text_part(assistant_message, "我先读取 PDF。")
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_pdf",
+        name="read_file",
+        arguments='{"file_path":"demo.pdf"}',
+    )
+    store.save(session_id, [user_message, assistant_message])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    result = run_session("继续", session_id=session_id)
+
+    assert get_message_text(result) == "ok"
+    tool_messages = [msg for msg in captured_provider_messages if msg.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["tool_call_id"] == "call_pdf"
+    assert "系统恢复提示" in str(tool_messages[0]["content"])
+    build_provider_adapter(resolve_llm_config("build", "kimi")).validate_messages(captured_provider_messages)
+
+    persisted_history = store.load(session_id)
+    recovered_messages = [msg for msg in persisted_history if msg["info"].get("role") == "tool"]
+    assert len(recovered_messages) == 1
+    recovered_output = recovered_messages[0]["parts"][0]["state"]["output"]
+    assert recovered_output["metadata"]["error_code"] == "interrupted_tool_call_recovered"
+    assert recovered_output["metadata"]["recovered"] is True
+    assert recovered_output["metadata"]["synthetic"] is True
+
+
+def test_run_session_should_insert_missing_tool_results_before_next_non_tool_message(monkeypatch):
+    session_id = "s_recover_partial_tool_call"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    first_user = create_message("user", session_id, status="completed")
+    append_text_part(first_user, "同时读取 PDF 和模板")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    assistant_message["info"]["agent"] = "build"
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_pdf",
+        name="read_file",
+        arguments='{"file_path":"demo.pdf"}',
+    )
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_template",
+        name="read_file",
+        arguments='{"file_path":"rule.md"}',
+    )
+    tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        tool_message,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"file_path":"demo.pdf"}',
+        output={"output": "PDF read successfully", "metadata": {"status": "completed"}},
+    )
+    interrupted_user = create_message("user", session_id, status="completed")
+    append_text_part(interrupted_user, "继续")
+    store.save(session_id, [first_user, assistant_message, tool_message, interrupted_user])
+
+    captured_provider_messages: list[dict[str, object]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        nonlocal captured_provider_messages
+        captured_provider_messages = to_provider_messages(messages)
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    run_session("再次继续", session_id=session_id)
+
+    roles = [str(msg.get("role")) for msg in captured_provider_messages]
+    assert roles.count("tool") == 2
+    template_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == "call_template"
+    )
+    interrupted_user_index = next(
+        index
+        for index, msg in enumerate(captured_provider_messages)
+        if msg.get("role") == "user" and msg.get("content") == "继续"
+    )
+    assert template_index < interrupted_user_index
+    assert "系统恢复提示" in str(captured_provider_messages[template_index]["content"])
+
+
+def test_run_session_should_not_duplicate_recovered_tool_messages(monkeypatch):
+    session_id = "s_recover_tool_call_once"
+    store = InMemorySessionMemoryStore(max_messages=24)
+    configure_session_memory_store(store)
+    clear_session_memory(session_id)
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "读取文件")
+    assistant_message = create_message("assistant", session_id, status="completed")
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_read",
+        name="read_file",
+        arguments='{"file_path":"demo.txt"}',
+    )
+    store.save(session_id, [user_message, assistant_message])
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "ok")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    run_session("继续", session_id=session_id)
+    run_session("再继续", session_id=session_id)
+
+    persisted_history = store.load(session_id)
+    recovered_messages = [
+        msg
+        for msg in persisted_history
+        if msg["info"].get("role") == "tool"
+        and msg["parts"][0]["state"]["output"]["metadata"].get("error_code") == "interrupted_tool_call_recovered"
+    ]
+    assert len(recovered_messages) == 1
 
 
 def test_workspace_should_store_session_history_in_global_sessions_dir(tmp_path):
