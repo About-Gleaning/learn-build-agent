@@ -3,9 +3,9 @@
     // 默认压缩配置。当前模型厂商没有专属配置时，直接使用这里的参数。
     "default": {
       // 是否开启旧 tool result 的占位压缩。为 false 时，旧工具结果不会被替换成占位符。
-      "tool_result_prune_enabled": false,
+      "tool_result_prune_enabled": true,
       // 按 role=tool 消息计数，保留最近多少条 tool result 不做占位压缩。
-      "tool_result_keep_recent": 3,
+      "tool_result_keep_recent": 5,
       // 只有旧 tool result 的字符数大于这个阈值时，才会被替换成占位符。
       "tool_result_prune_min_chars": 100,
       // 触发摘要压缩的近似 token 阈值。上下文估算值超过它后，会生成 summary checkpoint。

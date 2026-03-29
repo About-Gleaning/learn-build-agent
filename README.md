@@ -36,6 +36,7 @@ src/
       tool_executor.py            # ToolExecutor 与 Tool Hook 调度
       compaction.py               # 上下文压缩
       stream_display.py           # 流式事件、display_parts 与响应摘要组装
+      web_dev_server.py           # Web 开发模式下的前后端联合启动与进程托管
       workspace.py                # 当前工作区与运行态目录解析
     web/
       app.py                      # Web API（SSE 聊天、历史查询、模式切换/问题答复、停止会话、清空会话）
@@ -73,16 +74,28 @@ frontend/
 2. 安装依赖：`pip install -r requirements.txt`。
 3. 安装当前项目为命令行工具：`pip install -e .`。
 4. 进入任意项目目录后启动 CLI：`my-agent`；可选传 `--session <session_id>`，未传时 CLI 会自动生成随机会话号。
-5. 在当前目录启动 Web 后端：`my-agent web --host 127.0.0.1 --port 8000`。
+5. 在当前目录一键启动 Web 前后端：`my-agent web --host 127.0.0.1 --port 8000`。
 6. 兼容入口仍可使用：`python3 src/main.py`。
-7. 启动前端：
+7. 首次启动前需安装前端依赖：
 
 ```bash
 cd frontend
 cp .env.example .env
 pnpm install
-pnpm dev
 ```
+
+随后执行 `my-agent web` 会默认静默启动并同时拉起：
+
+- 后端：`http://127.0.0.1:8000`
+- 前端：`http://127.0.0.1:5173`
+
+如需在控制台打印启动与停止日志，可执行：
+
+```bash
+my-agent web --verbose
+```
+
+若未安装 `pnpm` 或 `frontend/node_modules` 不存在，CLI 会直接报错并提示修复命令。
 
 8. 运行测试：`pytest -q`。
 9. 语法检查：`PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`。
@@ -90,9 +103,10 @@ pnpm dev
 ## 工作区运行方式
 
 - `my-agent` 与 `my-agent web` 默认都以启动命令时的当前目录作为唯一工作区。
+- `my-agent web` 会从安装包源码所在仓库定位 `frontend/` 目录，并以当前工作区作为后端唯一工作区根目录。
 - 可通过 `--workdir /path/to/project` 显式指定工作区；第一版不会自动上跳到 Git 根目录。
 - Web / 运行时正式入口必须显式携带 `session_id`；CLI 与测试辅助入口会在最外层自动生成随机 `session_id`，运行时内部不再回退到默认会话。
-- 工作区内的 `AGENTS.md` 会自动追加到系统提示词中。
+- `~/.my-agent/AGENTS.md` 会先追加到系统提示词中；若当前工作区存在 `AGENTS.md`，则继续追加在其后，让工作区规则优先覆盖全局规则。
 - 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
 - `glob` 的正式参数为 `pattern` 与可选 `path`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件。
 - `grep` 的正式参数为 `pattern` 与可选 `path`、`include`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围，结果返回命中的文件路径、行号与行内容。
@@ -237,6 +251,7 @@ pnpm dev
 
 ## 变更记录
 
+- 2026-03-29：新增 `src/agent/runtime/web_dev_server.py`，将 `my-agent web` 重构为默认同时启动 uvicorn 后端与 Vite 前端开发服务；统一补齐前端依赖检查、端口就绪探测、异常清理与 CLI 单测覆盖。
 - 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 与 `FileSessionMemoryStore` 裁剪行为不一致的问题。
 - 2026-03-26：新增 `project_runtime.logging` 配置，统一控制日志文本是否截断与截断长度；默认关闭截断，仅保留换行转义与敏感信息脱敏，便于排查超长 tool 参数与模型返回内容。
 - 2026-03-26：新增独立 `src/agent/tools/skill_tool.py` 与 `load_skill.txt`，将 `load_skill` 重构为按 `name` 精确加载单个 skill 的独立工具；返回结构统一为 `title/output/metadata(name, dir)`，`output` 仅注入 `Base directory` 与原始 `SKILL.md`，避免模型再用 `glob`/`bash` 搜索 skill 目录。

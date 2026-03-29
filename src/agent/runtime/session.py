@@ -293,6 +293,20 @@ def _read_prompt_file(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
+def _read_global_agent_appendix() -> str:
+    agent_md_path = Path.home() / ".my-agent" / "AGENTS.md"
+    if not agent_md_path.exists():
+        return ""
+    try:
+        content = agent_md_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("prompt.global_agent_md.read_failed path=%s error=%s", agent_md_path, exc)
+        return ""
+    if not content:
+        return ""
+    return f"以下是全局 ~/.my-agent/AGENTS.md 内容，请一并遵守：\n\n{content}"
+
+
 def _read_local_agent_appendix() -> str:
     agent_md_path = _get_workdir() / "AGENTS.md"
     if not agent_md_path.exists():
@@ -379,6 +393,7 @@ def build_system_prompt(
     rendered_prompt = _apply_prompt_context(base_prompt, agent=agent, session_id=session_id)
     parts = [
         rendered_prompt,
+        _read_global_agent_appendix(),
         _read_local_agent_appendix(),
         _build_environment_appendix(agent=agent, model=model, provider=provider, vendor=vendor),
     ]

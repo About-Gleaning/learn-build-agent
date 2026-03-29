@@ -2633,6 +2633,114 @@ def test_build_system_prompt_should_append_agents_md(monkeypatch, tmp_path):
     assert "{plan_path}" not in prompt
 
 
+def test_build_system_prompt_should_append_global_agents_md(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    home_dir = tmp_path / "home"
+    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path.parent.mkdir(parents=True)
+    global_agents_path.write_text("请优先保证全局风格一致。", encoding="utf-8")
+    monkeypatch.setattr(session_module.Path, "home", lambda: home_dir)
+    configure_workspace(tmp_path)
+
+    prompt = build_system_prompt(
+        agent="build",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id="s_global_prompt",
+    )
+
+    assert "请优先保证全局风格一致。" in prompt
+    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" in prompt
+
+
+def test_build_system_prompt_should_append_global_agents_md_before_local(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    home_dir = tmp_path / "home"
+    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path.parent.mkdir(parents=True)
+    global_agents_path.write_text("全局规范。", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("工作区规范。", encoding="utf-8")
+    monkeypatch.setattr(session_module.Path, "home", lambda: home_dir)
+    configure_workspace(tmp_path)
+
+    prompt = build_system_prompt(
+        agent="build",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id="s_global_local_prompt",
+    )
+
+    assert prompt.index("全局规范。") < prompt.index("工作区规范。")
+
+
+def test_build_system_prompt_should_ignore_missing_or_empty_global_agents_md(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    home_dir = tmp_path / "home"
+    monkeypatch.setattr(session_module.Path, "home", lambda: home_dir)
+    configure_workspace(tmp_path)
+
+    prompt_without_file = build_system_prompt(
+        agent="build",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id="s_global_missing_prompt",
+    )
+
+    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" not in prompt_without_file
+
+    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path.parent.mkdir(parents=True)
+    global_agents_path.write_text("   \n", encoding="utf-8")
+
+    prompt_with_empty_file = build_system_prompt(
+        agent="build",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id="s_global_empty_prompt",
+    )
+
+    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" not in prompt_with_empty_file
+
+
+def test_build_system_prompt_should_ignore_global_agents_md_read_error(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    home_dir = tmp_path / "home"
+    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path.parent.mkdir(parents=True)
+    global_agents_path.write_text("全局规范。", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("工作区规范。", encoding="utf-8")
+    monkeypatch.setattr(session_module.Path, "home", lambda: home_dir)
+    configure_workspace(tmp_path)
+
+    original_read_text = session_module.Path.read_text
+
+    def fake_read_text(path_obj: Path, *args, **kwargs):
+        if path_obj == global_agents_path:
+            raise OSError("boom")
+        return original_read_text(path_obj, *args, **kwargs)
+
+    monkeypatch.setattr(session_module.Path, "read_text", fake_read_text)
+
+    prompt = build_system_prompt(
+        agent="build",
+        model="qwen3-max",
+        provider="qwen",
+        vendor="qwen",
+        session_id="s_global_error_prompt",
+    )
+
+    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" not in prompt
+    assert "工作区规范。" in prompt
+
+
 def test_build_system_prompt_should_include_git_environment(monkeypatch):
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (True, "/tmp/repo"))
     prompt = build_system_prompt(

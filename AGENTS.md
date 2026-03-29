@@ -17,6 +17,7 @@
 - `src/agent/runtime/tool_executor.py`：工具执行器与 Tool Hook 分发。
 - `src/agent/runtime/compaction.py`：上下文压缩逻辑。
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要组装。
+- `src/agent/runtime/web_dev_server.py`：`my-agent web` 的前后端联合启动、依赖校验与子进程托管。
 - `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与启动模式解析。
 - `src/agent/adapters/llm/client.py`：LLM 统一调用入口与 LLM Hook。
 - `src/agent/adapters/llm/protocols.py`：协议层适配（`responses` / `chat_completions`）。
@@ -53,6 +54,8 @@
 - `edit_file` 当前返回 `metadata.diff`、`metadata.filediff`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language server 的统一入口，本期固定返回空数组与 `not_enabled`。
 - `load_skill` 的正式参数统一为 `name`；工具会按名称精确加载单个 skill，并返回 `title/output/metadata` 结构，其中 `output` 必须包含 `## Skill: {name}`、`Base directory: {dir}` 与原始 `SKILL.md` 全文，禁止模型再通过 `glob`、`grep`、`bash` 自行搜索 skill 目录。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
+- `my-agent web` 默认同时启动后端 uvicorn 与前端 Vite 开发服务；前端目录定位、`pnpm`/`node_modules` 校验、端口就绪探测与子进程清理由 `runtime/web_dev_server.py` 统一负责，禁止回退到 `cli.py` 内联零散进程管理。
+- system prompt 组装时必须先尝试追加全局 `~/.my-agent/AGENTS.md`，再追加当前工作区 `AGENTS.md`；任一文件不存在、为空或读取失败时都应自动忽略，避免影响主流程。
 - 很多工具都会验证工作路径是否合法；相对路径解析、工作区越界校验、目录存在性校验等公共逻辑必须统一收敛到 `tools/path_utils.py`，禁止继续在各工具模块重复实现。
 - plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`，plan 模式下仅允许写入该文件。
 - 会话运行态数据写入 `~/.my-agent/workspaces/sessions/`；todo、tool-output 等共享运行态数据按类型聚合写入 `~/.my-agent/workspaces/todo/<session_id>.json` 与 `~/.my-agent/workspaces/tool-output/<session_id>/`，禁止继续写回仓库内 `src/storage/*`。
@@ -96,7 +99,7 @@
 
 - `pip install -e .`：安装 `my-agent` 命令。
 - `my-agent`：在当前目录启动 CLI。
-- `my-agent web --host 127.0.0.1 --port 8000`：在当前目录启动 Web 后端。
+- `my-agent web --host 127.0.0.1 --port 8000`：在当前目录一键静默启动 Web 前后端；首次启动前需先执行 `cd frontend && pnpm install`，如需控制台输出可追加 `--verbose`。
 - `python3 src/main.py`：兼容 CLI 入口。
 - `pytest -q`：执行测试。
 - `PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`：语法检查。
@@ -137,6 +140,7 @@
 
 ## 变更记录
 
+- 2026-03-29：新增 `src/agent/runtime/web_dev_server.py`，将 `my-agent web` 重构为默认同时启动 uvicorn 后端与 Vite 前端开发服务；统一补齐前端依赖检查、端口就绪探测、异常清理与 CLI 单测覆盖。
 - 2026-03-27：Web 前端新增 `session-load` 交互，支持手动输入自定义 `session_id` 并通过既有 `GET /api/sessions/{session_id}/messages` 接口重载本地会话历史；前端切换会话时会同步重置临时交互态并尽量从历史消息回填 `mode/provider/model`，后端同时统一 `messages/stop/mode-switch/question/clear` 等 session 路由的 `session_id` 格式校验，避免出现“历史可加载但后续请求不可继续”的行为不一致。
 - 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 未按阈值裁剪、与 `FileSessionMemoryStore` 行为不一致的问题。
 - 2026-03-27：增强 session 历史恢复链路；`session_memory` 在读取历史时会为非法前缀自动补齐 synthetic user 锚点，`runtime/session.py` 新增对“首条 assistant(tool_calls)”“首条 tool”“中间孤儿 tool”的统一修理逻辑：孤儿 `tool` 会补 synthetic assistant(tool_calls) 作为上下文锚点，缺失的 tool result 会补“具体情况未知”的 synthetic tool 占位结果；`chat_completions` 协议层同时收紧校验，若仍出现未修理的孤儿 `tool`，会在本地直接报 `invalid_tool_message_sequence`，避免继续外发非法消息序列。

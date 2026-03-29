@@ -3,11 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import uvicorn
-
 from .config.logging_setup import init_logging
 from .core.message import get_message_text
 from .runtime.session import clear_session_memory, generate_session_id, run_session
+from .runtime.web_dev_server import WebStackError, run_web_dev_stack
 from .runtime.workspace import configure_workspace, get_workspace
 
 
@@ -21,6 +20,7 @@ def _build_parser() -> argparse.ArgumentParser:
     web_parser = subparsers.add_parser("web", help="启动绑定当前工作区的 Web 服务。")
     web_parser.add_argument("--host", default="127.0.0.1", help="监听地址。")
     web_parser.add_argument("--port", type=int, default=8000, help="监听端口。")
+    web_parser.add_argument("--verbose", action="store_true", help="输出 Web 前后端启动与停止日志。")
     return parser
 
 
@@ -57,12 +57,12 @@ def run_cli_session(*, session_id: str, mode: str) -> None:
         print(f"\n助手：{get_message_text(result)}")
 
 
-def run_web_server(*, host: str, port: int) -> None:
+def run_web_server(*, host: str, port: int, verbose: bool = False) -> None:
     init_logging(get_workspace().logs_dir)
-    workspace = get_workspace()
-    print(f"工作区: {workspace.root}")
-    print(f"Web 服务: http://{host}:{port}")
-    uvicorn.run("agent.web.app:app", host=host, port=port, reload=False)
+    try:
+        run_web_dev_stack(workspace_root=get_workspace().root, host=host, port=port, verbose=verbose)
+    except WebStackError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     configure_workspace(Path(args.workdir), launch_mode="web" if args.command == "web" else "cli")
     if args.command == "web":
-        run_web_server(host=args.host, port=args.port)
+        run_web_server(host=args.host, port=args.port, verbose=bool(getattr(args, "verbose", False)))
         return
     session_id = (args.session or "").strip() or generate_session_id("cli")
     run_cli_session(session_id=session_id, mode=args.mode)
