@@ -47,6 +47,26 @@ def test_init_logging_should_write_daily_log_file_with_append_mode(tmp_path):
         logging.getLogger("openai").setLevel(original_openai_level)
 
 
+def test_init_logging_should_allow_disabling_console_handler(tmp_path):
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    original_flag = logging_setup._LOGGER_INITIALIZED
+
+    try:
+        root_logger.handlers.clear()
+        logging_setup._LOGGER_INITIALIZED = False
+
+        logging_setup.init_logging(tmp_path / "logs", console_enabled=False)
+
+        assert len(logging.getLogger().handlers) == 1
+        assert isinstance(logging.getLogger().handlers[0], logging.FileHandler)
+    finally:
+        root_logger.handlers.clear()
+        for handler in original_handlers:
+            root_logger.addHandler(handler)
+        logging_setup._LOGGER_INITIALIZED = original_flag
+
+
 def test_sanitize_log_text_should_not_truncate_by_default(monkeypatch):
     monkeypatch.setattr(
         logging_setup,

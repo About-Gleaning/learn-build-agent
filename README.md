@@ -74,7 +74,7 @@ frontend/
 2. 安装依赖：`pip install -r requirements.txt`。
 3. 安装当前项目为命令行工具：`pip install -e .`。
 4. 进入任意项目目录后启动 CLI：`my-agent`；可选传 `--session <session_id>`，未传时 CLI 会自动生成随机会话号。
-5. 在当前目录一键启动 Web 前后端：`my-agent web --host 127.0.0.1 --port 8000`。
+5. 在当前目录后台启动 Web 前后端：`my-agent web --host 0.0.0.0 --port 8000`。
 6. 兼容入口仍可使用：`python3 src/main.py`。
 7. 首次启动前需安装前端依赖：
 
@@ -84,18 +84,31 @@ cp .env.example .env
 pnpm install
 ```
 
-随后执行 `my-agent web` 会默认静默启动并同时拉起：
+随后执行 `my-agent web` 会默认在后台静默启动前后端，并在当前命令里同步返回启动成功或失败结果：
 
-- 后端：`http://127.0.0.1:8000`
+- 后端监听：`0.0.0.0:8000`
+- 后端访问：`http://127.0.0.1:8000`
 - 前端：`http://127.0.0.1:5173`
 
-如需在控制台打印启动与停止日志，可执行：
+如需查看当前工作区的后台状态，可执行：
+
+```bash
+my-agent web status
+```
+
+如需停止后台 Web 开发栈，可执行：
+
+```bash
+my-agent web stop
+```
+
+如需在控制台打印启动过程与状态提示，可执行：
 
 ```bash
 my-agent web --verbose
 ```
 
-若未安装 `pnpm` 或 `frontend/node_modules` 不存在，CLI 会直接报错并提示修复命令。
+`--verbose` 只输出启动步骤与状态提示，不输出业务日志。若未安装 `pnpm` 或 `frontend/node_modules` 不存在，CLI 会直接报错并提示修复命令。
 
 8. 运行测试：`pytest -q`。
 9. 语法检查：`PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`。
@@ -121,6 +134,7 @@ my-agent web --verbose
   - todo：`~/.my-agent/workspaces/todo/<session_id>.json`
   - plan 占位文件：`~/.my-agent/workspaces/plan/<session_id>.md`
   - 长输出落盘：`~/.my-agent/workspaces/tool-output/<session_id>/`
+  - Web 开发栈状态与子进程日志：`~/.my-agent/workspaces/web-dev/<workspace_id>/`
   - 日志：`~/.my-agent/logs/`
 - 如需覆盖默认运行态目录，可设置环境变量 `MY_AGENT_HOME`。
 
@@ -251,6 +265,7 @@ my-agent web --verbose
 
 ## 变更记录
 
+- 2026-03-30：`my-agent web` 改为默认后台启动前后端开发服务，并新增 `status/stop` 管理动作；启动命令会同步等待成功/失败结果，业务日志仅落文件不打印到当前终端，后台子进程状态与日志统一收敛到 `~/.my-agent/workspaces/web-dev/<workspace_id>/`。
 - 2026-03-29：新增 `src/agent/runtime/web_dev_server.py`，将 `my-agent web` 重构为默认同时启动 uvicorn 后端与 Vite 前端开发服务；统一补齐前端依赖检查、端口就绪探测、异常清理与 CLI 单测覆盖。
 - 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 与 `FileSessionMemoryStore` 裁剪行为不一致的问题。
 - 2026-03-26：新增 `project_runtime.logging` 配置，统一控制日志文本是否截断与截断长度；默认关闭截断，仅保留换行转义与敏感信息脱敏，便于排查超长 tool 参数与模型返回内容。
