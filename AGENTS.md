@@ -54,7 +54,7 @@
 - `edit_file` 当前返回 `metadata.diff`、`metadata.filediff`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language server 的统一入口，本期固定返回空数组与 `not_enabled`。
 - `load_skill` 的正式参数统一为 `name`；工具会按名称精确加载单个 skill，并返回 `title/output/metadata` 结构，其中 `output` 必须包含 `## Skill: {name}`、`Base directory: {dir}` 与原始 `SKILL.md` 全文，禁止模型再通过 `glob`、`grep`、`bash` 自行搜索 skill 目录。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
-- `my-agent web` 默认在后台启动后端 uvicorn 与前端 Vite 开发服务，并同步返回成功/失败结果；`status/stop`、前端目录定位、`pnpm`/`node_modules` 校验、端口就绪探测、状态文件维护与子进程清理由 `runtime/web_dev_server.py` 统一负责，禁止回退到 `cli.py` 内联零散进程管理。
+- `my-agent web` 默认在后台启动后端 uvicorn 与前端 Vite 开发服务，并同步返回成功/失败结果；`status/stop`、前端目录定位、`pnpm`/`node_modules` 校验、端口就绪探测、状态文件维护与子进程清理由 `runtime/web_dev_server.py` 统一负责，禁止回退到 `cli.py` 内联零散进程管理。若启用 `--share-frontend`，则必须只开放前端 `5173` 给局域网访问，后端继续仅监听 `127.0.0.1` 并通过 Vite 代理承接 `/api`、`/healthz` 与 SSE 流式请求，禁止把 `8000` 端口直接暴露给同网设备。
 - system prompt 组装时必须先尝试追加全局 `~/.my-agent/AGENTS.md`，再追加当前工作区 `AGENTS.md`；任一文件不存在、为空或读取失败时都应自动忽略，避免影响主流程。
 - 很多工具都会验证工作路径是否合法；相对路径解析、工作区越界校验、目录存在性校验等公共逻辑必须统一收敛到 `tools/path_utils.py`，禁止继续在各工具模块重复实现。
 - plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`，plan 模式下仅允许写入该文件。
@@ -102,6 +102,7 @@
 - `pip install -e .`：安装 `my-agent` 命令。
 - `my-agent`：在当前目录启动 CLI。
 - `my-agent web --host 0.0.0.0 --port 8000`：在当前目录后台启动 Web 前后端，并同步返回成功/失败结果；首次启动前需先执行 `cd frontend && pnpm install`。
+- `my-agent web --share-frontend`：仅将前端页面开放给局域网访问；前端绑定局域网地址，后端继续仅监听 `127.0.0.1` 并由前端开发代理转发接口请求。
 - `my-agent web status`：查看当前工作区后台 Web 开发栈状态、PID 与日志路径。
 - `my-agent web stop`：停止当前工作区后台 Web 开发栈。
 - `my-agent web --verbose`：输出启动过程与状态提示，但不输出业务日志。
@@ -145,6 +146,7 @@
 
 ## 变更记录
 
+- 2026-03-30：`my-agent web` 新增 `--share-frontend` 模式：前端可对局域网开放访问，后端继续仅监听 `127.0.0.1`，前端默认改为通过同源相对路径访问 `/api` 并由 Vite 开发代理转发到本机后端。
 - 2026-03-30：`my-agent web` 改为默认后台启动前后端开发服务，并新增 `status/stop` 管理动作；启动命令会同步等待成功/失败结果，父 CLI 默认不打印业务日志，后台子进程状态与日志统一收敛到 `~/.my-agent/workspaces/web-dev/<workspace_id>/`。
 - 2026-03-29：新增 `src/agent/runtime/web_dev_server.py`，将 `my-agent web` 重构为默认同时启动 uvicorn 后端与 Vite 前端开发服务；统一补齐前端依赖检查、端口就绪探测、异常清理与 CLI 单测覆盖。
 - 2026-03-27：Web 前端新增 `session-load` 交互，支持手动输入自定义 `session_id` 并通过既有 `GET /api/sessions/{session_id}/messages` 接口重载本地会话历史；前端切换会话时会同步重置临时交互态并尽量从历史消息回填 `mode/provider/model`，后端同时统一 `messages/stop/mode-switch/question/clear` 等 session 路由的 `session_id` 格式校验，避免出现“历史可加载但后续请求不可继续”的行为不一致。

@@ -16,6 +16,7 @@ from .workspace import get_workspace
 
 FRONTEND_HOST = "127.0.0.1"
 FRONTEND_PORT = 5173
+LOOPBACK_HOST = "127.0.0.1"
 STARTUP_TIMEOUT_SECONDS = 15.0
 PORT_CHECK_INTERVAL_SECONDS = 0.2
 SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -54,6 +55,10 @@ class WebStackState:
     frontend_log_path: str
     started_at: float
     status: str
+    frontend_bind_host: str = FRONTEND_HOST
+    frontend_local_url: str = ""
+    frontend_network_url: str = ""
+    share_frontend: bool = False
 
 
 def resolve_project_root() -> Path:
@@ -116,14 +121,27 @@ def _reset_log_file(path: Path) -> None:
     path.write_text("", encoding="utf-8")
 
 
-def _spawn_logged_process(command: list[str], *, cwd: Path, log_path: Path) -> subprocess.Popen[bytes]:
+def _spawn_logged_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[bytes]:
     with log_path.open("ab") as log_file:
+        process_env = os.environ.copy()
+        if env:
+            process_env.update(env)
         return subprocess.Popen(
             command,
             cwd=str(cwd),
+            env=process_env,
+            # Web 开发服务需要彻底脱离当前终端，避免继承 stdin 后让 shell 输入变卡。
+            stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            close_fds=True,
         )
 
 
@@ -141,16 +159,49 @@ def start_backend_dev_server(*, workspace_root: Path, host: str, port: int, log_
     return _spawn_logged_process(command, cwd=workspace_root, log_path=log_path)
 
 
-def start_frontend_dev_server(*, frontend_dir: Path, pnpm_binary: str, log_path: Path) -> subprocess.Popen[bytes]:
+def start_frontend_dev_server(
+    *,
+    frontend_dir: Path,
+    pnpm_binary: str,
+    host: str,
+    port: int,
+    backend_url: str,
+    log_path: Path,
+) -> subprocess.Popen[bytes]:
     command = [
         pnpm_binary,
         "dev",
         "--host",
-        FRONTEND_HOST,
+        host,
         "--port",
-        str(FRONTEND_PORT),
+        str(port),
     ]
-    return _spawn_logged_process(command, cwd=frontend_dir, log_path=log_path)
+    return _spawn_logged_process(
+        command,
+        cwd=frontend_dir,
+        log_path=log_path,
+        env={"MY_AGENT_VITE_BACKEND_URL": backend_url},
+    )
+
+
+def resolve_network_host() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("10.255.255.255", 1))
+            host = sock.getsockname()[0]
+    except OSError:
+        return LOOPBACK_HOST
+    return host or LOOPBACK_HOST
+
+
+def build_frontend_urls(*, frontend_bind_host: str, frontend_port: int, share_frontend: bool) -> tuple[str, str]:
+    local_url = f"http://{LOOPBACK_HOST}:{frontend_port}"
+    if not share_frontend:
+        return local_url, ""
+    network_host = resolve_network_host()
+    if network_host == LOOPBACK_HOST:
+        return local_url, ""
+    return local_url, f"http://{network_host}:{frontend_port}"
 
 
 def is_tcp_port_open(host: str, port: int) -> bool:
@@ -288,7 +339,10 @@ def get_web_stack_status() -> tuple[str, WebStackState | None]:
     backend_alive = _is_process_alive(state.backend_pid)
     frontend_alive = _is_process_alive(state.frontend_pid)
     backend_ready = is_tcp_port_open(create_service_endpoint("后端服务", state.host, state.port).host, state.port)
-    frontend_ready = is_tcp_port_open(FRONTEND_HOST, FRONTEND_PORT)
+    frontend_ready = is_tcp_port_open(
+        create_service_endpoint("前端服务", state.frontend_bind_host, FRONTEND_PORT).host,
+        FRONTEND_PORT,
+    )
 
     if backend_alive and frontend_alive and backend_ready and frontend_ready:
         return "running", state
@@ -308,7 +362,14 @@ def _ensure_not_running() -> None:
         _remove_state_file()
 
 
-def start_web_dev_stack(*, workspace_root: Path, host: str, port: int, verbose: bool = False) -> WebStackState:
+def start_web_dev_stack(
+    *,
+    workspace_root: Path,
+    host: str,
+    port: int,
+    share_frontend: bool = False,
+    verbose: bool = False,
+) -> WebStackState:
     frontend_dir = resolve_frontend_dir()
     pnpm_binary = ensure_frontend_dev_prerequisites(frontend_dir)
     _ensure_not_running()
@@ -321,15 +382,22 @@ def start_web_dev_stack(*, workspace_root: Path, host: str, port: int, verbose: 
 
     backend_process: subprocess.Popen[bytes] | None = None
     frontend_process: subprocess.Popen[bytes] | None = None
-    backend_endpoint = create_service_endpoint("后端服务", host, port)
-    frontend_endpoint = create_service_endpoint("前端服务", FRONTEND_HOST, FRONTEND_PORT)
+    backend_bind_host = LOOPBACK_HOST if share_frontend else host
+    frontend_bind_host = host if share_frontend else FRONTEND_HOST
+    backend_endpoint = create_service_endpoint("后端服务", backend_bind_host, port)
+    frontend_endpoint = create_service_endpoint("前端服务", frontend_bind_host, FRONTEND_PORT)
+    frontend_local_url, frontend_network_url = build_frontend_urls(
+        frontend_bind_host=frontend_bind_host,
+        frontend_port=FRONTEND_PORT,
+        share_frontend=share_frontend,
+    )
 
     try:
         _emit_console(f"工作区: {workspace_root}", verbose=verbose)
         _emit_console(f"后端服务启动中: {backend_endpoint.url}", verbose=verbose)
         backend_process = start_backend_dev_server(
             workspace_root=workspace_root,
-            host=host,
+            host=backend_bind_host,
             port=port,
             log_path=backend_log_path,
         )
@@ -340,6 +408,9 @@ def start_web_dev_stack(*, workspace_root: Path, host: str, port: int, verbose: 
         frontend_process = start_frontend_dev_server(
             frontend_dir=frontend_dir,
             pnpm_binary=pnpm_binary,
+            host=frontend_bind_host,
+            port=FRONTEND_PORT,
+            backend_url=backend_endpoint.url,
             log_path=frontend_log_path,
         )
         wait_for_process_port(frontend_process, frontend_endpoint)
@@ -347,16 +418,20 @@ def start_web_dev_stack(*, workspace_root: Path, host: str, port: int, verbose: 
 
         state = WebStackState(
             workspace_root=str(workspace_root),
-            host=host,
+            host=backend_bind_host,
             port=port,
             backend_pid=backend_process.pid,
             frontend_pid=frontend_process.pid,
             backend_url=backend_endpoint.url,
-            frontend_url=frontend_endpoint.url,
+            frontend_url=frontend_local_url,
             backend_log_path=str(backend_log_path),
             frontend_log_path=str(frontend_log_path),
             started_at=time.time(),
             status="running",
+            frontend_bind_host=frontend_bind_host,
+            frontend_local_url=frontend_local_url,
+            frontend_network_url=frontend_network_url,
+            share_frontend=share_frontend,
         )
         _write_state(state)
         return state
@@ -383,13 +458,19 @@ def format_web_stack_status(status: str, state: WebStackState | None) -> str:
         "degraded": "异常残留",
         "stopped": "已停止",
     }.get(status, status)
-    return "\n".join(
+    lines = [
+        f"状态: {status_label}",
+        f"工作区: {state.workspace_root}",
+        f"后端监听地址: {state.host}:{state.port}",
+        f"后端访问地址: {state.backend_url}",
+        f"前端本机访问地址: {state.frontend_local_url or state.frontend_url}",
+    ]
+    if state.frontend_network_url:
+        lines.append(f"前端局域网访问地址: {state.frontend_network_url}")
+    if state.share_frontend:
+        lines.append("开放模式: 仅前端页面对局域网开放，后端继续仅本机可见")
+    lines.extend(
         [
-            f"状态: {status_label}",
-            f"工作区: {state.workspace_root}",
-            f"监听地址: {state.host}:{state.port}",
-            f"后端访问地址: {state.backend_url}",
-            f"前端访问地址: {state.frontend_url}",
             f"后端 PID: {state.backend_pid}",
             f"前端 PID: {state.frontend_pid}",
             f"状态文件: {get_web_dev_state_path()}",
@@ -397,6 +478,7 @@ def format_web_stack_status(status: str, state: WebStackState | None) -> str:
             f"前端日志: {state.frontend_log_path}",
         ]
     )
+    return "\n".join(lines)
 
 
 def stop_web_dev_stack() -> tuple[str, WebStackState | None]:

@@ -75,8 +75,9 @@ frontend/
 3. 安装当前项目为命令行工具：`pip install -e .`。
 4. 进入任意项目目录后启动 CLI：`my-agent`；可选传 `--session <session_id>`，未传时 CLI 会自动生成随机会话号。
 5. 在当前目录后台启动 Web 前后端：`my-agent web --host 0.0.0.0 --port 8000`。
-6. 兼容入口仍可使用：`python3 src/main.py`。
-7. 首次启动前需安装前端依赖：
+6. 如需让同一局域网内的其他设备访问前端页面，同时保持后端仅本机可见，可执行：`my-agent web --share-frontend`。
+7. 兼容入口仍可使用：`python3 src/main.py`。
+8. 首次启动前需安装前端依赖：
 
 ```bash
 cd frontend
@@ -89,6 +90,14 @@ pnpm install
 - 后端监听：`0.0.0.0:8000`
 - 后端访问：`http://127.0.0.1:8000`
 - 前端：`http://127.0.0.1:5173`
+
+如执行 `my-agent web --share-frontend`，则启动行为会调整为：
+
+- 后端监听：`127.0.0.1:8000`
+- 后端仅供本机和前端开发代理访问，不直接对局域网暴露
+- 前端本机访问：`http://127.0.0.1:5173`
+- 前端局域网访问：`http://<你的局域网 IP>:5173`
+- 前端会通过 Vite 代理把 `/api`、`/healthz` 和 SSE 流式请求转发到本机后端
 
 如需查看当前工作区的后台状态，可执行：
 
@@ -108,15 +117,22 @@ my-agent web stop
 my-agent web --verbose
 ```
 
+如需同时查看“前端局域网访问地址”和当前开放模式，可执行：
+
+```bash
+my-agent web --share-frontend --verbose
+```
+
 `--verbose` 只输出启动步骤与状态提示，不输出业务日志。若未安装 `pnpm` 或 `frontend/node_modules` 不存在，CLI 会直接报错并提示修复命令。
 
-8. 运行测试：`pytest -q`。
-9. 语法检查：`PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`。
+9. 运行测试：`pytest -q`。
+10. 语法检查：`PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`。
 
 ## 工作区运行方式
 
 - `my-agent` 与 `my-agent web` 默认都以启动命令时的当前目录作为唯一工作区。
 - `my-agent web` 会从安装包源码所在仓库定位 `frontend/` 目录，并以当前工作区作为后端唯一工作区根目录。
+- `my-agent web --share-frontend` 会将 Vite 前端绑定到局域网地址，同时让后端退回 `127.0.0.1`，并通过前端开发代理转发 API/SSE 请求，避免把后端直接暴露给同网设备。
 - 可通过 `--workdir /path/to/project` 显式指定工作区；第一版不会自动上跳到 Git 根目录。
 - Web / 运行时正式入口必须显式携带 `session_id`；CLI 与测试辅助入口会在最外层自动生成随机 `session_id`，运行时内部不再回退到默认会话。
 - `~/.my-agent/AGENTS.md` 会先追加到系统提示词中；若当前工作区存在 `AGENTS.md`，则继续追加在其后，让工作区规则优先覆盖全局规则。
@@ -265,6 +281,7 @@ my-agent web --verbose
 
 ## 变更记录
 
+- 2026-03-30：`my-agent web` 新增 `--share-frontend` 模式：前端可对局域网开放访问，后端继续仅监听 `127.0.0.1`，前端默认改为通过同源相对路径访问 `/api` 并由 Vite 开发代理转发到本机后端。
 - 2026-03-30：`my-agent web` 改为默认后台启动前后端开发服务，并新增 `status/stop` 管理动作；启动命令会同步等待成功/失败结果，业务日志仅落文件不打印到当前终端，后台子进程状态与日志统一收敛到 `~/.my-agent/workspaces/web-dev/<workspace_id>/`。
 - 2026-03-29：新增 `src/agent/runtime/web_dev_server.py`，将 `my-agent web` 重构为默认同时启动 uvicorn 后端与 Vite 前端开发服务；统一补齐前端依赖检查、端口就绪探测、异常清理与 CLI 单测覆盖。
 - 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 与 `FileSessionMemoryStore` 裁剪行为不一致的问题。

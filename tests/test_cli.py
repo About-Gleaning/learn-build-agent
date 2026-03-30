@@ -39,12 +39,14 @@ def test_main_should_default_web_command_to_start(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli_module,
         "run_web_start",
-        lambda *, host, port, verbose=False: captured.update({"host": host, "port": port, "verbose": verbose}),
+        lambda *, host, port, share_frontend=False, verbose=False: captured.update(
+            {"host": host, "port": port, "share_frontend": share_frontend, "verbose": verbose}
+        ),
     )
 
     cli_module.main(["--workdir", str(tmp_path), "web"])
 
-    assert captured == {"host": "0.0.0.0", "port": 8000, "verbose": False}
+    assert captured == {"host": "0.0.0.0", "port": 8000, "share_frontend": False, "verbose": False}
 
 
 def test_main_should_pass_explicit_web_start_arguments(monkeypatch, tmp_path):
@@ -54,12 +56,16 @@ def test_main_should_pass_explicit_web_start_arguments(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli_module,
         "run_web_start",
-        lambda *, host, port, verbose=False: captured.update({"host": host, "port": port, "verbose": verbose}),
+        lambda *, host, port, share_frontend=False, verbose=False: captured.update(
+            {"host": host, "port": port, "share_frontend": share_frontend, "verbose": verbose}
+        ),
     )
 
-    cli_module.main(["--workdir", str(tmp_path), "web", "start", "--host", "0.0.0.0", "--port", "9000", "--verbose"])
+    cli_module.main(
+        ["--workdir", str(tmp_path), "web", "start", "--host", "0.0.0.0", "--port", "9000", "--share-frontend", "--verbose"]
+    )
 
-    assert captured == {"host": "0.0.0.0", "port": 9000, "verbose": True}
+    assert captured == {"host": "0.0.0.0", "port": 9000, "share_frontend": True, "verbose": True}
 
 
 def test_main_should_route_web_status(monkeypatch, tmp_path):
