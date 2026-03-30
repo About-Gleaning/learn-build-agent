@@ -35,7 +35,7 @@
   },
   "agent_loop": {
     // 单次 agent loop 允许执行的最大轮次。命中上限后会以 error 收口，避免 unknown 持续空转。
-    "max_rounds": 50
+    "max_rounds": 100
   },
   "subagent_loop": {
     // 单次 subagent loop 允许执行的最大轮次。subagent 通常需要更多轮次来完成复杂探索任务。
@@ -52,5 +52,66 @@
     "trim_enabled": true,
     // 开启裁剪时，最多保留最近多少条非 system 消息。
     "max_messages": 50
+  },
+  "lsp": {
+    // 是否启用文件写入/编辑后的 LSP 诊断链路。
+    "enabled": true,
+    // 是否允许后续接入 IDE LSP 代理模式。
+    "ide_enabled": false,
+    // 当前仅支持按需启动语言服务。
+    "startup_mode": "on_demand",
+    // 语言服务空闲多久后自动回收。
+    "server_idle_ttl_seconds": 900,
+    // 单次等待 diagnostics 的超时时间。
+    "request_timeout_ms": 60000,
+    // 返回给 Agent 的最大诊断条数。
+    "max_diagnostics": 20,
+    // 返回给 Agent 的最大诊断字符数。
+    "max_chars": 4000,
+    // 当前默认只回传 error 与 warning。
+    "include_severity": ["error", "warning"],
+    // 收到首个 diagnostics 后，继续等待多少毫秒以捕获同一文件后续 publishDiagnostics。
+    "diagnostics_stable_window_ms": 800,
+    // 等待稳定态时，最多额外接受多少轮新的 diagnostics 刷新。
+    "diagnostics_max_wait_rounds": 4,
+    // 是否输出 Java LSP 的原始 status/log/publish 观测明细，用于排查多模块 Maven 导入问题。
+    "java_debug_observation_enabled": true,
+    // LSP 不可用时是否提升为强告警。不会改变文件工具成功语义。
+    "strict_unavailable": false,
+    "languages": {
+      "java": {
+        "enabled": true,
+        "command": [
+          "/usr/bin/env",
+          "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home",
+          "/opt/homebrew/bin/jdtls"
+        ],
+        // 多模块 Maven 项目可在这里显式指定导入 profile，避免默认 profile 冲突导致源码树未进入 Java Model。
+        "maven_profiles": ["hna"],
+        // 若 IDE 使用了非默认本地 Maven 仓库，需要在这里显式对齐，避免 jdtls 回落到 ~/.m2 后解析不到私有依赖。
+        "maven_local_repository": "/Users/liurui/work_space/tools/apache-maven-3.9.3/repository",
+        "file_extensions": [".java"],
+        "workspace_markers": ["pom.xml", "build.gradle", "settings.gradle"],
+        "init_options": {}
+      },
+      "python": {
+        "enabled": false,
+        "command": [],
+        "file_extensions": [".py"],
+        "workspace_markers": ["pyproject.toml", "setup.py", "requirements.txt"],
+        "init_options": {}
+      },
+      "typescript": {
+        "enabled": false,
+        "command": [],
+        "file_extensions": [".ts", ".tsx", ".js", ".jsx"],
+        "workspace_markers": ["package.json", "tsconfig.json"],
+        "init_options": {}
+      }
+    },
+    "ide": {
+      "transport": "",
+      "endpoint": ""
+    }
   }
 }

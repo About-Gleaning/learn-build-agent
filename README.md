@@ -114,8 +114,9 @@ my-agent web --verbose
 - `write_file` 的正式参数为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；允许写入当前工作区与 `~/.my-agent/skills`。若目标文件已存在，写入前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
 - `edit_file` 的正式参数为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；允许编辑当前工作区与 `~/.my-agent/skills` 的文本文件；编辑已有文件前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
 - `load_skill` 的正式参数为 `name`；工具会按名称精确加载单个 skill，返回 `Loaded skill: <name>` 标题、`Base directory` 与原始 `SKILL.md` 全文，避免模型再通过 `glob`/`bash` 自行扫描 skill 目录。
-- `write_file` 会返回结构化 `filepath/exists/diagnostics`；当前 `diagnostics` 仅预留扩展入口，固定返回空数组与 `diagnostics_status=not_enabled`。
-- `edit_file` 会返回结构化 `diff/filediff/diagnostics`；当前 `diagnostics` 仅预留扩展入口，固定返回空数组与 `diagnostics_status=not_enabled`。
+- `write_file` 会返回结构化 `filepath/exists/diagnostics`；写入 `.java` 文件后会尝试触发 Java LSP 诊断，当前成功与否会通过 `diagnostics_status` 与可选 `lsp_error` 返回。
+- `edit_file` 会返回结构化 `diff/filediff/diagnostics`；编辑 `.java` 文件后会尝试触发 Java LSP 诊断，LSP 不可用时不会改变文件工具成功语义，但会在输出和元数据中追加原因。
+- `tool.response` 会继续打印工具输出；当 `edit_file` / `write_file` 的返回元数据包含 `diagnostics_status` 时，日志还会额外输出 `tool.lsp_result` 摘要，直接展示 LSP 是否触发、诊断数量、摘要以及 `lsp_error`。
 - 运行态数据默认落到 `~/.my-agent/`：
   - 会话历史：`~/.my-agent/workspaces/sessions/`
   - todo：`~/.my-agent/workspaces/todo/<session_id>.json`
@@ -123,6 +124,9 @@ my-agent web --verbose
   - 长输出落盘：`~/.my-agent/workspaces/tool-output/<session_id>/`
   - 日志：`~/.my-agent/logs/`
 - 如需覆盖默认运行态目录，可设置环境变量 `MY_AGENT_HOME`。
+- Java LSP 当前采用 `project_runtime.json -> lsp.languages.java.command` 显式绑定 JDK 21 的方式启动；当前仓库在本机推荐固定为 `["/usr/bin/env", "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home", "/opt/homebrew/bin/jdtls"]`。这样即使当前 shell 没有激活 JDK 21，`.java` 文件写入后的 LSP 诊断也会优先使用 JDK 21。
+- 当前环境已通过 Homebrew 安装 `jdtls`，默认路径为 `/opt/homebrew/bin/jdtls`；若后续迁移到其他机器，应先确认 `which jdtls` 的实际结果，再同步更新 `project_runtime.json`。若 `JAVA_HOME` 指向的 JDK 版本低于 21，LSP 会返回明确错误提示而不是静默降级。
+- Java LSP 首次按需启动时初始化通常较慢，当前项目已将 `project_runtime.json -> lsp.request_timeout_ms` 调整为 `15000`，避免首次加载 Maven/工作区元数据时过早超时。
 
 ## 分层职责约束（必须遵守）
 
@@ -248,46 +252,3 @@ my-agent web --verbose
 - 日志是否截断必须走 `project_runtime.json -> logging` 配置，禁止在调用点重新硬编码长度策略；默认不启用截断。
 - 会话历史是否裁剪必须走 `project_runtime.json -> session_memory` 配置，禁止在运行时初始化处继续硬编码保留条数。
 - plan 模式占位文件统一落到当前会话对应的 `~/.my-agent/workspaces/plan/<session_id>.md`；plan 模式下仅允许写入该文件。
-
-## 变更记录
-
-- 2026-03-29：新增 `src/agent/runtime/web_dev_server.py`，将 `my-agent web` 重构为默认同时启动 uvicorn 后端与 Vite 前端开发服务；统一补齐前端依赖检查、端口就绪探测、异常清理与 CLI 单测覆盖。
-- 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 与 `FileSessionMemoryStore` 裁剪行为不一致的问题。
-- 2026-03-26：新增 `project_runtime.logging` 配置，统一控制日志文本是否截断与截断长度；默认关闭截断，仅保留换行转义与敏感信息脱敏，便于排查超长 tool 参数与模型返回内容。
-- 2026-03-26：新增独立 `src/agent/tools/skill_tool.py` 与 `load_skill.txt`，将 `load_skill` 重构为按 `name` 精确加载单个 skill 的独立工具；返回结构统一为 `title/output/metadata(name, dir)`，`output` 仅注入 `Base directory` 与原始 `SKILL.md`，避免模型再用 `glob`/`bash` 搜索 skill 目录。
-- 2026-03-26：新增独立 `src/agent/tools/question_tool.py`，将 `question` 工具从 `handlers.py` 拆分；问题项新增可选 `custom` 字段，默认 `true`，由后端统一自动追加“不是以上任何选项”兜底项，并同步补齐 runtime/Web/schema 透传与测试覆盖。
-- 2026-03-26：新增 `question` 工具与 `src/agent/tools/question.txt`，支持 Agent 在执行过程中发起结构化提问；运行时新增待答问题状态管理、Web 答题/拒绝接口与流式恢复链路，助手消息与 SSE `done` 事件同步透传 `question` 结构，用户拒绝回答时会以“用户拒绝”语义继续后续推理并与普通工具异常区分。
-- 2026-03-26：Web 前端补齐 `question_required` 交互：最新待答问题会切换输入区为 question composer，支持问题/选项/notes 三段式输入、上下左右键导航、`Tab` 焦点切换、`Shift+Enter` 备注换行，并将每题 `answers + notes` 以结构化 payload 提交到 question 恢复接口。
-- 2026-03-26：skills 正式根目录切换为 `~/.my-agent/skills`；`read_file` / `write_file` / `edit_file` 新增对 skills 目录的受控访问；同时修复 `kimi` 在 `chat_completions` 下插入 PDF 抽取上下文过早导致多工具调用 `tool_call_id` 与 `tool` 响应不成对的问题，并新增本地序列校验防止无效请求直接外呼。
-- 2026-03-26：新增独立 `src/agent/tools/write_file_tool.py` 与 `write_file.txt`，将 `write_file` 收敛为整文件覆盖写工具；正式参数切换为 `filePath/content`，新增“已有文件先 `read_file` 再写”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `filepath/exists/diagnostics_status` 结构化返回。
-
-- 2026-03-26：重构 `edit_file` 工具为独立 `src/agent/tools/edit_file_tool.py`，正式参数切换为 `filePath/oldString/newString/replaceAll`，新增“先 `read_file` 再编辑”的强校验、基于 `mtime_ns` 的读后变更保护，以及 `diff/filediff/diagnostics_status` 结构化返回；同时新增 `src/agent/tools/file_edit_state.py` 维护当前 session 的文件读取/编辑时序状态。
-- 2026-03-25：新增 `src/agent/tools/grep_tool.py` 与 `grep` 工具，基于 ripgrep 在工作区内做内容正则搜索，支持 `pattern/path/include` 入参，结果按命中文件修改时间倒序、同文件内按行号升序返回，并统一复用结构化工具返回协议。
-- 2026-03-25：新增 `src/agent/tools/glob_tool.py` 与 `glob` 工具，支持在工作区内按 glob 模式搜索普通文件、按修改时间倒序返回并最多截断 100 条；同时新增 `src/agent/tools/path_utils.py`，统一收敛工作区路径解析与目录校验逻辑，复用到 `bash` 与文件工具。
-- 2026-03-25：将 `read_file` 从 `handlers.py` 拆分到独立 `src/agent/tools/read_file_tool.py`，正式参数统一为 `file_path`，仅支持绝对路径；同时新增当前 session 运行态白名单，允许读取当前 session 的 `plan`、`tool-output` 与 `sessions` 文件，并同步收敛工具描述与测试。
-- 2026-03-23：`bash` 工具改为“单次调用内持久、调用结束即销毁”的持久 bash shell；同一次调用中的多步命令共享目录与环境变量状态，不再跨调用复用 shell，同时移除工具层固定字符截断，改为复用运行时统一长输出落盘链路。
-- 2026-03-23：增强 `llm.response` 日志，统一输出 `finish_reason`、响应文本、思考内容与工具调用摘要，避免仅有思考或仅有工具调用时日志出现空 `message=` 导致无法排查。
-- 2026-03-23：重构 `bash` 工具协议，新增必填 `description` 与可选 `timeout`、`workdir` 入参，默认超时收敛为 `DEFAULT_TIMEOUT=120000ms`，默认执行目录固定为当前工作区根目录，并将工具 description 拆分到独立 `src/agent/tools/bash.txt` 模板文件。
-- 2026-03-20：为 `kimi` provider 新增 PDF 支持；命中 PDF 附件时改为走 Moonshot 文件抽取链路（上传文件、拉取抽取文本、注入“仅供参考”的合成 `user` message），并在抽取完成后异步删除远端文件，删除失败不影响主流程。
-- 2026-03-20：`project_runtime.json` 新增 `file_extraction` 配置，统一管理可抽取文件扩展名与清理策略，当前默认仅开放 `.pdf`。
-- 2026-03-20：修复 qwen `responses` 自定义 function tool 的无参 schema 兼容问题；无参工具不再下发 `parameters: {}`，避免 DashScope 返回 `InternalError.Algo.InvalidParameter`。
-- 2026-03-20：将 LLM 适配层重构为“统一入口 + 协议层 + 厂商方言层”，新增 `adapters/llm/protocols.py` 与 `adapters/llm/vendors.py`，在不改变 `Message` 结构的前提下为 `qwen` / `kimi` 保留独立转换扩展点。
-- 2026-03-12：同步文档结构与当前代码，补充 `session_memory.py`、Web/测试说明、分层职责约束。
-- 2026-03-13：补充 agent 注册约定、`task` 动态描述模板与 subagent 扩展说明。
-- 2026-03-13：将 skills 暴露方式从 `explore` prompt 占位符迁移为 `load_skill` 工具描述动态注入。
-- 2026-03-16：新增统一日志初始化模块，日志改为按天追加落盘，并收敛为 LLM/工具关键节点日志。
-- 2026-03-16：`build` 模式提示词改为按 `vendor` 选择 `build.<vendor>.txt`，`qwen` 与 `qwen-coder` 共用同一份 Qwen prompt。
-- 2026-03-17：将 bash 工具执行与 Plan 模式只读校验拆分到独立模块，并允许有限的只读管道查询。
-- 2026-03-17：新增 `project_runtime.json`，将上下文压缩关键参数统一改为可配置，并支持按模型厂商 `vendor` 做局部覆盖。
-- 2026-03-18：将会话初始化、`task` 参数解析与模式切换结果处理从 `session.py` 内部收敛为公共逻辑，减少流式与非流式路径重复实现。
-- 2026-03-18：新增 `runtime/stream_display.py`，统一流式事件、`process_items`、`display_parts` 与响应摘要组装。
-- 2026-03-18：统一文件工具与 plan 模式拦截的结构化返回，工具层默认返回 `output + metadata.status/error_code`。
-- 2026-03-18：新增 `web/serializers.py`，将 `Message -> VO` 与 SSE 事件序列化从 `web/app.py` 中抽离。
-- 2026-03-18：新增正式 CLI 入口 `agent.cli` 与 `pyproject.toml`，支持在任意目录通过 `my-agent` / `my-agent web` 启动并将当前目录绑定为工作区。
-- 2026-03-18：新增 `runtime/workspace.py`，统一管理工作区根目录、运行态目录与 `AGENTS.md` 发现逻辑。
-- 2026-03-18：将会话、todo、plan 占位文件、tool-output 与日志切换为按工作区隔离的 `~/.my-agent/` 目录结构。
-- 2026-03-18：将 `plan` 与 `todo` 收敛为按类型聚合的工作区单文件，并将 `tool-output` 收敛为按类型聚合的工作区子目录，统一路径形态为 `workspaces/<type>/<workspace_id>...`。
-- 2026-03-18：新增 `POST /api/sessions/{session_id}/stop` 与前端停止按钮，支持按 session 协作式终止当前 loop，并统一以 `interrupted/cancelled` 收口。
-- 2026-03-19：将 session 历史落库目录调整为全局 `~/.my-agent/workspaces/sessions/`，文件名直接使用 `session_id` 安全清洗后的结果，不再按工作区目录隔离。
-- 2026-03-19：将 `todo`、`plan` 与 `tool-output` 的运行态路径统一切换为按 `session_id` 组织，移除路径中的 `workspace_id`。
-- 2026-03-19：新增可选 `kimi` provider，统一通过 `KIMI_API_KEY` 读取 Moonshot OpenAI 兼容接口密钥，默认模型名使用占位值等待按实际账号能力补齐。

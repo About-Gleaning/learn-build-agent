@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..lsp import collect_file_diagnostics
 from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path
 from .file_edit_state import get_file_state, record_file_edit
@@ -220,9 +221,26 @@ def _count_line_changes(before: str, after: str) -> tuple[int, int]:
 
 def _build_success_result(file_path: Path, before: str, after: str) -> dict[str, Any]:
     additions, deletions = _count_line_changes(before, after)
+    diagnostics_result = collect_file_diagnostics(file_path=file_path, content=after)
+    output = f"编辑成功：{file_path}。"
+    if diagnostics_result.status == "server_unavailable" and diagnostics_result.lsp_error:
+        output += f"\nLSP 当前不可用：{diagnostics_result.lsp_error}"
+    elif diagnostics_result.status == "project_import_failed" and diagnostics_result.lsp_error:
+        output += f"\nLSP 暂时无法返回 diagnostics：{diagnostics_result.lsp_error}"
+    elif diagnostics_result.status == "timeout_degraded" and diagnostics_result.lsp_error:
+        output += f"\nLSP 诊断暂未返回，已降级跳过本次 diagnostics：{diagnostics_result.lsp_error}"
+    elif diagnostics_result.status == "not_enabled":
+        output += "\n当前未启用 LSP diagnostics。"
+    elif diagnostics_result.status == "unsupported_language":
+        output += "\n当前文件类型暂未接入 LSP diagnostics。"
+    elif diagnostics_result.output_excerpt:
+        output += diagnostics_result.output_excerpt
+    observation_excerpt = diagnostics_result.build_observation_excerpt()
+    if observation_excerpt:
+        output += observation_excerpt
     return {
         "title": str(file_path),
-        "output": f"编辑成功：{file_path}。当前未启用 LSP diagnostics。",
+        "output": output,
         "metadata": {
             "status": "completed",
             "diff": _build_unified_diff(file_path, before, after),
@@ -233,8 +251,7 @@ def _build_success_result(file_path: Path, before: str, after: str) -> dict[str,
                 "additions": additions,
                 "deletions": deletions,
             },
-            "diagnostics": [],
-            "diagnostics_status": "not_enabled",
+            **diagnostics_result.to_metadata(),
         },
     }
 

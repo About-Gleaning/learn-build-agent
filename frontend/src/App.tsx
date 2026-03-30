@@ -106,7 +106,11 @@ type ProgressEntry = {
   createdAt: string;
   updatedAt: string;
   request?: string;
+  requestFull?: string;
+  requestFormatted?: string;
   result?: string;
+  resultFull?: string;
+  resultLineCount?: number;
   toolCallId?: string;
   meta: string[];
   isFinal?: boolean;
@@ -399,6 +403,40 @@ function toSingleLine(text: string, limit = 160): string {
     return normalized;
   }
   return `${normalized.slice(0, limit)}...`;
+}
+
+function normalizeToolContent(text: string): string {
+  return text.trim();
+}
+
+function shouldEnableContentToggle(preview?: string, full?: string): boolean {
+  const normalizedPreview = normalizeToolContent(preview || "");
+  const normalizedFull = normalizeToolContent(full || "");
+  return Boolean(normalizedPreview && normalizedFull && normalizedPreview !== normalizedFull);
+}
+
+function getToolContentToggleKey(messageId: string, entryId: string, blockType: "request" | "result"): string {
+  return `${messageId}:${entryId}:${blockType}`;
+}
+
+function formatToolRequestContent(text?: string): string {
+  const normalized = normalizeToolContent(text || "");
+  if (!normalized) {
+    return "";
+  }
+  try {
+    return JSON.stringify(JSON.parse(normalized), null, 2);
+  } catch {
+    return normalized;
+  }
+}
+
+function countLogicalLines(text?: string): number {
+  const normalized = normalizeToolContent(text || "");
+  if (!normalized) {
+    return 0;
+  }
+  return normalized.split(/\r?\n/).length;
 }
 
 function getRoleLabel(role: Role): string {
@@ -1253,6 +1291,25 @@ function summarizeProcessItem(item: ProcessItem): { title: string; request?: str
   };
 }
 
+function getToolBlockText(params: {
+  preview?: string;
+  full?: string;
+  collapsed: boolean;
+}): string {
+  const normalizedFull = normalizeToolContent(params.full || "");
+  if (!normalizedFull) {
+    return normalizeToolContent(params.preview || "");
+  }
+  if (!params.collapsed) {
+    return normalizedFull;
+  }
+  return normalizeToolContent(params.preview || "") || normalizedFull;
+}
+
+function shouldUseExpandedResultPanel(entry: ProgressEntry): boolean {
+  return (entry.resultLineCount || 0) > 5;
+}
+
 function buildProgressMeta(item: ProcessItem): string[] {
   const meta = [item.agentKind === "subagent" ? "子代理" : "主代理", item.agent];
   if (item.round > 0) {
@@ -1330,7 +1387,11 @@ function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: str
     createdAt: part.createdAt,
     updatedAt: part.createdAt,
     request: summary.request,
+    requestFull: part.kind === "tool_call" ? part.detail : undefined,
+    requestFormatted: part.kind === "tool_call" ? formatToolRequestContent(part.detail) : undefined,
     result: summary.result,
+    resultFull: part.kind === "tool_result" ? part.detail : undefined,
+    resultLineCount: part.kind === "tool_result" ? countLogicalLines(part.detail) : 0,
     toolCallId: part.toolCallId,
     meta: buildProgressMeta(item),
   };
@@ -1367,6 +1428,8 @@ function mergeToolTimelineEntries(entries: ProgressEntry[]): ProgressEntry[] {
       status: entry.status || matchedEntry.status,
       updatedAt: entry.updatedAt || entry.createdAt || matchedEntry.updatedAt,
       result: entry.result || matchedEntry.result,
+      resultFull: entry.resultFull || matchedEntry.resultFull,
+      resultLineCount: entry.resultLineCount || matchedEntry.resultLineCount,
       meta: entry.meta.length > 0 ? entry.meta : matchedEntry.meta,
     };
   }
@@ -1402,7 +1465,12 @@ function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
       createdAt: item.createdAt,
       updatedAt: item.createdAt,
       request: summary.request,
+      requestFull: item.kind === "tool_call" ? item.detail : undefined,
+      requestFormatted: item.kind === "tool_call" ? formatToolRequestContent(item.detail) : undefined,
       result: summary.result,
+      resultFull: item.kind === "tool_result" ? item.detail : undefined,
+      resultLineCount: item.kind === "tool_result" ? countLogicalLines(item.detail) : 0,
+      toolCallId: item.toolCallId,
       meta: buildProgressMeta(item),
     });
   }
@@ -1436,8 +1504,19 @@ function renderAssistantTimeline(params: {
   reasoningDefaultCollapsed: boolean;
   reasoningCollapsedState: Record<string, boolean>;
   onToggleReasoning: (entryKey: string) => void;
+  toolDefaultCollapsed: boolean;
+  toolCollapsedState: Record<string, boolean>;
+  onToggleToolContent: (entryKey: string) => void;
 }) {
-  const { message, reasoningDefaultCollapsed, reasoningCollapsedState, onToggleReasoning } = params;
+  const {
+    message,
+    reasoningDefaultCollapsed,
+    reasoningCollapsedState,
+    onToggleReasoning,
+    toolDefaultCollapsed,
+    toolCollapsedState,
+    onToggleToolContent,
+  } = params;
   const entries = buildAssistantTimelineEntries(message);
   const hasTimeline = entries.length > 0;
 
@@ -1453,6 +1532,16 @@ function renderAssistantTimeline(params: {
         const isReasoningCollapsed = entry.isReasoning
           ? reasoningCollapsedState[reasoningEntryKey] ?? reasoningDefaultCollapsed
           : false;
+        const resultToggleKey = getToolContentToggleKey(message.id, entry.id, "result");
+        const shouldShowResultPanel = shouldUseExpandedResultPanel(entry);
+        const canToggleResult = shouldShowResultPanel && shouldEnableContentToggle(entry.result, entry.resultFull);
+        const isResultCollapsed = canToggleResult ? toolCollapsedState[resultToggleKey] ?? toolDefaultCollapsed : false;
+        const requestText = normalizeToolContent(entry.requestFormatted || entry.requestFull || entry.request || "");
+        const resultText = getToolBlockText({
+          preview: entry.result,
+          full: entry.resultFull,
+          collapsed: isResultCollapsed,
+        });
 
         return (
           <section
@@ -1482,7 +1571,10 @@ function renderAssistantTimeline(params: {
                   entry.status === "failed" ? "is-failed-request" : ""
                 }`}
               >
-                <div className="assistant-timeline-entry-text">{entry.request}</div>
+                <div className="assistant-timeline-entry-content">
+                  <div className="assistant-timeline-entry-label">参数</div>
+                  <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{requestText}</pre>
+                </div>
               </div>
             ) : null}
             {entry.isFinal ? (
@@ -1497,9 +1589,29 @@ function renderAssistantTimeline(params: {
               </div>
             ) : entry.result ? (
               <div
-                className={`assistant-timeline-entry-block is-result ${entry.status === "failed" ? "is-failed-result" : ""}`}
+                className={`assistant-timeline-entry-block is-result ${entry.status === "failed" ? "is-failed-result" : ""} ${
+                  canToggleResult && isResultCollapsed ? "is-collapsed" : ""
+                }`}
               >
-                <div className="assistant-timeline-entry-text">{entry.result}</div>
+                <div className="assistant-timeline-entry-content">
+                  <div className="assistant-timeline-entry-label">结果</div>
+                  {shouldShowResultPanel && !isResultCollapsed ? (
+                    <div className="assistant-timeline-entry-panel">
+                      <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{resultText}</pre>
+                    </div>
+                  ) : (
+                    <div className="assistant-timeline-entry-text">{resultText}</div>
+                  )}
+                </div>
+                {canToggleResult ? (
+                  <button
+                    type="button"
+                    className="assistant-timeline-toggle assistant-timeline-block-toggle"
+                    onClick={() => onToggleToolContent(resultToggleKey)}
+                  >
+                    {isResultCollapsed ? "查看全文" : "收起结果"}
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </section>
@@ -1593,6 +1705,8 @@ export function App() {
   const [activeModel, setActiveModel] = useState("");
   const [reasoningDefaultCollapsed, setReasoningDefaultCollapsed] = useState(false);
   const [reasoningCollapsedState, setReasoningCollapsedState] = useState<Record<string, boolean>>({});
+  const [toolDefaultCollapsed] = useState(true);
+  const [toolCollapsedState, setToolCollapsedState] = useState<Record<string, boolean>>({});
   const [questionDrafts, setQuestionDrafts] = useState<QuestionDraft[]>([]);
   const [questionCursor, setQuestionCursor] = useState(0);
   const [questionFocus, setQuestionFocus] = useState<QuestionFocusTarget>("options");
@@ -2764,6 +2878,13 @@ export function App() {
     }));
   };
 
+  const handleToggleToolContent = (entryKey: string) => {
+    setToolCollapsedState((prev) => ({
+      ...prev,
+      [entryKey]: !(prev[entryKey] ?? toolDefaultCollapsed),
+    }));
+  };
+
   const currentQuestion = activeQuestion?.questions[questionCursor] || null;
   const currentQuestionDraft = questionDrafts[questionCursor] || null;
   const isQuestionMode = Boolean(activeQuestion);
@@ -2892,6 +3013,9 @@ export function App() {
                             reasoningDefaultCollapsed,
                             reasoningCollapsedState,
                             onToggleReasoning: handleToggleReasoning,
+                            toolDefaultCollapsed,
+                            toolCollapsedState,
+                            onToggleToolContent: handleToggleToolContent,
                           })
                         : renderMessageBody(msg)}
                       {renderModeSwitchActions({

@@ -441,6 +441,11 @@ button:disabled {
   font-size: 11px;
 }
 
+.assistant-timeline-block-toggle {
+  flex: 0 0 auto;
+  align-self: flex-start;
+}
+
 .assistant-timeline-entry-block {
   display: flex;
   align-items: flex-start;
@@ -448,16 +453,60 @@ button:disabled {
   min-width: 0;
 }
 
+.assistant-timeline-entry-content {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.assistant-timeline-entry-label {
+  color: var(--ink-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+}
+
 .assistant-timeline-entry-block.final-body {
   display: block;
 }
 
 .assistant-timeline-entry-text {
+  min-width: 0;
+  flex: 1 1 auto;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
   color: #b8cbde;
   font-size: 12px;
   line-height: 1.7;
+}
+
+.assistant-timeline-entry-code {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(124, 194, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(6, 16, 26, 0.9);
+  font-family: "SFMono-Regular", "Fira Code", "JetBrains Mono", monospace;
+}
+
+.assistant-timeline-entry-panel {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid rgba(124, 194, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(4, 12, 20, 0.94);
+}
+
+.assistant-timeline-entry-panel .assistant-timeline-entry-code {
+  min-width: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+.assistant-timeline-entry-block.is-collapsed {
+  padding-right: 0;
 }
 
 .assistant-timeline-entry.kind-reasoning::before {

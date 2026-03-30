@@ -275,6 +275,245 @@ def test_tool_logging_hook_should_log_agent_model_args_and_result(caplog):
     assert any(record.agent == "build" and record.model == "demo-model" for record in caplog.records)
 
 
+def test_tool_logging_hook_should_log_lsp_result_summary(caplog):
+    executor = ToolExecutor(
+        {
+            "edit_file": lambda: {
+                "output": "编辑成功：Foo.java。",
+                "metadata": {
+                    "status": "completed",
+                    "diagnostics_status": "completed",
+                    "diagnostics_total": 1,
+                    "raw_diagnostics_total": 3,
+                    "diagnostics_sequence": 2,
+                    "diagnostics_previous_sequence": 1,
+                    "diagnostics_latest_sequence": 2,
+                    "diagnostics_wait_rounds": 1,
+                    "diagnostics_wait_ms": 840,
+                    "diagnostics_settled": True,
+                    "diagnostics_summary": "1 个error",
+                    "diagnostics_truncated": True,
+                    "lsp_language": "java",
+                    "lsp_server": "jdtls",
+                    "lsp_server_pid": 321,
+                    "lsp_workspace_root": "/tmp/project",
+                    "lsp_workspace_selection_reason": "maven_aggregator_root",
+                    "lsp_server_key": "java:/tmp/project:direct_lsp",
+                    "lsp_snapshot_uri": "file:///tmp/project/src/Foo.java",
+                    "recent_status_summary": "Starting:Init...",
+                    "recent_log_summary": "1:build running",
+                    "recent_publish_uris": "src/Foo.java#2(3)",
+                    "received_other_file_diagnostics": False,
+                },
+            }
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "edit_file",
+            "{}",
+            session_id="s_lsp_log",
+            tool_call_id="call_lsp_log",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert (
+        "tool.lsp_result tool=edit_file diagnostics_status=completed diagnostics_total=1 "
+        "raw_diagnostics_total=3 diagnostics_sequence=2 diagnostics_previous_sequence=1 "
+        "diagnostics_latest_sequence=2 diagnostics_wait_rounds=1 "
+        "diagnostics_wait_ms=840 diagnostics_settled=True"
+    ) in caplog.text
+    assert "diagnostics_summary=1 个error" in caplog.text
+    assert "diagnostics_truncated=True" in caplog.text
+    assert "lsp_language=java lsp_server=jdtls lsp_server_pid=321" in caplog.text
+    assert "lsp_workspace_root=/tmp/project" in caplog.text
+    assert "lsp_workspace_selection_reason=maven_aggregator_root" in caplog.text
+    assert "recent_publish_uris=src/Foo.java#2(3)" in caplog.text
+
+
+def test_tool_logging_hook_should_log_lsp_error_details(caplog):
+    executor = ToolExecutor(
+        {
+            "write_file": lambda: {
+                "output": "写入成功：Foo.java。",
+                "metadata": {
+                    "status": "completed",
+                    "diagnostics_status": "server_unavailable",
+                    "diagnostics_total": 0,
+                    "raw_diagnostics_total": 0,
+                    "diagnostics_sequence": 0,
+                    "diagnostics_previous_sequence": 0,
+                    "diagnostics_latest_sequence": 0,
+                    "diagnostics_wait_rounds": 0,
+                    "diagnostics_wait_ms": 0,
+                    "diagnostics_settled": False,
+                    "diagnostics_summary": "",
+                    "diagnostics_truncated": False,
+                    "lsp_language": "java",
+                    "lsp_server": "jdtls",
+                    "lsp_workspace_root": "/tmp/project",
+                    "lsp_workspace_selection_reason": "maven_nearest_module",
+                    "lsp_server_key": "java:/tmp/project:direct_lsp",
+                    "lsp_snapshot_uri": "file:///tmp/project/src/Foo.java",
+                    "recent_status_summary": "Starting:Init...",
+                    "recent_log_summary": "",
+                    "recent_publish_uris": "src/Bar.java#1(2)",
+                    "received_other_file_diagnostics": True,
+                    "lsp_error": "jdtls 未安装",
+                },
+            }
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "write_file",
+            "{}",
+            session_id="s_lsp_error_log",
+            tool_call_id="call_lsp_error_log",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert (
+        "tool.lsp_result tool=write_file diagnostics_status=server_unavailable diagnostics_total=0 "
+        "raw_diagnostics_total=0 diagnostics_sequence=0 diagnostics_previous_sequence=0 "
+        "diagnostics_latest_sequence=0 diagnostics_wait_rounds=0 "
+        "diagnostics_wait_ms=0 diagnostics_settled=False"
+    ) in caplog.text
+    assert "lsp_workspace_selection_reason=maven_nearest_module" in caplog.text
+    assert "received_other_file_diagnostics=True" in caplog.text
+    assert "lsp_error=jdtls 未安装" in caplog.text
+
+
+def test_tool_logging_hook_should_log_debug_observation_fields(caplog):
+    executor = ToolExecutor(
+        {
+            "write_file": lambda: {
+                "output": "写入成功：Foo.java。",
+                "metadata": {
+                    "status": "completed",
+                    "diagnostics_status": "timeout_degraded",
+                    "diagnostics_total": 0,
+                    "raw_diagnostics_total": 0,
+                    "diagnostics_sequence": 1,
+                    "diagnostics_previous_sequence": 0,
+                    "diagnostics_latest_sequence": 1,
+                    "diagnostics_wait_rounds": 0,
+                    "diagnostics_wait_ms": 1000,
+                    "diagnostics_settled": False,
+                    "diagnostics_summary": "",
+                    "diagnostics_truncated": False,
+                    "lsp_language": "java",
+                    "lsp_server": "jdtls",
+                    "java_debug_observation_enabled": True,
+                    "debug_status_events": "1:Starting:Refreshing '/instruction-service/src/main/java'.",
+                    "debug_log_events": "2:1:Error in Java Model (code 969)",
+                    "debug_publish_events": "3:src/Foo.java#1(0)",
+                    "debug_issue_probe": "contains_code_969=True",
+                },
+            }
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "write_file",
+            "{}",
+            session_id="s_lsp_debug_log",
+            tool_call_id="call_lsp_debug_log",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert "java_debug_observation_enabled=True" in caplog.text
+    assert "debug_status_events=1:Starting:Refreshing '/instruction-service/src/main/java'." in caplog.text
+    assert "debug_log_events=2:1:Error in Java Model (code 969)" in caplog.text
+    assert "debug_publish_events=3:src/Foo.java#1(0)" in caplog.text
+    assert "debug_issue_probe=contains_code_969=True" in caplog.text
+
+
+def test_tool_logging_hook_should_log_java_project_issue_fields(caplog):
+    executor = ToolExecutor(
+        {
+            "edit_file": lambda: {
+                "output": "编辑成功：Foo.java。",
+                "metadata": {
+                    "status": "completed",
+                    "diagnostics_status": "project_import_failed",
+                    "diagnostics_total": 0,
+                    "raw_diagnostics_total": 1,
+                    "diagnostics_sequence": 1,
+                    "diagnostics_previous_sequence": 0,
+                    "diagnostics_latest_sequence": 1,
+                    "diagnostics_wait_rounds": 0,
+                    "diagnostics_wait_ms": 5072,
+                    "diagnostics_settled": True,
+                    "diagnostics_summary": "",
+                    "diagnostics_truncated": False,
+                    "lsp_language": "java",
+                    "lsp_server": "jdtls",
+                    "lsp_data_dir": "/tmp/.my-agent/lsp/java/server-key-hash",
+                    "java_project_issue_code": "maven_profile_conflict",
+                    "java_project_state": "profile_conflict",
+                    "java_maven_profiles": ["hna"],
+                    "java_maven_local_repository": "/custom/maven/repository",
+                },
+            }
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "edit_file",
+            "{}",
+            session_id="s_lsp_java_issue",
+            tool_call_id="call_lsp_java_issue",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert "diagnostics_status=project_import_failed" in caplog.text
+    assert "java_project_issue_code=maven_profile_conflict" in caplog.text
+    assert "java_project_state=profile_conflict" in caplog.text
+    assert "java_maven_profiles=hna" in caplog.text
+    assert "java_maven_local_repository=/custom/maven/repository" in caplog.text
+    assert "lsp_data_dir=/tmp/.my-agent/lsp/java/server-key-hash" in caplog.text
+
+
+def test_tool_logging_hook_should_skip_lsp_summary_for_non_lsp_tools(caplog):
+    executor = ToolExecutor({"demo_tool": lambda: {"output": "ok", "metadata": {"status": "completed"}}})
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "demo_tool",
+            "{}",
+            session_id="s_no_lsp_log",
+            tool_call_id="call_no_lsp_log",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert "tool.lsp_result" not in caplog.text
+
+
 def test_tool_logging_hook_should_not_truncate_long_arguments_when_disabled(caplog, monkeypatch):
     executor = ToolExecutor({"demo_tool": lambda value: f"len:{len(value)}"})
     long_value = "x" * 800

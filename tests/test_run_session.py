@@ -3185,6 +3185,13 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.logging.truncate_limit == 500
         assert settings.session_memory.trim_enabled is True
         assert settings.session_memory.max_messages == 24
+        assert settings.lsp.enabled is True
+        assert settings.lsp.languages["java"].enabled is True
+        assert settings.lsp.languages["java"].command == (
+            "/usr/bin/env",
+            "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home",
+            "jdtls",
+        )
     finally:
         clear_runtime_settings_cache()
 
@@ -3353,6 +3360,81 @@ def test_get_project_runtime_settings_should_read_session_memory_config(tmp_path
         settings = get_project_runtime_settings()
         assert settings.session_memory.trim_enabled is False
         assert settings.session_memory.max_messages == 128
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_read_lsp_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "lsp": {
+            "enabled": true,
+            "server_idle_ttl_seconds": 123,
+            "request_timeout_ms": 4567,
+            "max_diagnostics": 9,
+            "max_chars": 1024,
+            "include_severity": ["error", "warning", "information"],
+            "strict_unavailable": true,
+            "languages": {
+              "java": {
+                "enabled": true,
+                "command": ["custom-jdtls"],
+                "maven_profiles": ["hna"],
+                "maven_local_repository": "/custom/maven/repository",
+                "file_extensions": [".java"],
+                "workspace_markers": ["pom.xml"],
+                "init_options": {
+                  "bundles": []
+                }
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.lsp.enabled is True
+        assert settings.lsp.server_idle_ttl_seconds == 123
+        assert settings.lsp.request_timeout_ms == 4567
+        assert settings.lsp.max_diagnostics == 9
+        assert settings.lsp.max_chars == 1024
+        assert settings.lsp.include_severity == ("error", "warning", "information")
+        assert settings.lsp.strict_unavailable is True
+        assert settings.lsp.languages["java"].command == ("custom-jdtls",)
+        assert settings.lsp.languages["java"].maven_profiles == ("hna",)
+        assert settings.lsp.languages["java"].maven_local_repository == "/custom/maven/repository"
+        assert settings.lsp.languages["java"].workspace_markers == ("pom.xml",)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_invalid_lsp_severity(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "lsp": {
+            "include_severity": ["fatal"]
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 lsp.include_severity 配置抛出异常")
+    except ValueError as exc:
+        assert "lsp.include_severity" in str(exc)
     finally:
         clear_runtime_settings_cache()
 

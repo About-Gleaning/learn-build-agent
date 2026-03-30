@@ -24,6 +24,7 @@
 - `src/agent/adapters/llm/vendors.py`：厂商方言注册与独立转换层。
 - `src/agent/config/logging_setup.py`：统一日志初始化、格式规范与日志脱敏。
 - `src/agent/config/project_runtime.json`：项目级运行时配置（如压缩开关、保留策略）。
+- `src/agent/lsp/`：LSP 统一入口、server 生命周期、文档同步、诊断过滤与语言适配层。
 - `src/agent/tools/`：工具分模块实现（如 `handlers.py`、`question_tool.py`、`read_file_tool.py`）与协议定义（`specs.py`）。
 - `src/agent/tools/bash_tool.py`：bash 工具执行与 Plan 模式只读校验。
 - `src/agent/tools/write_file_tool.py`：`write_file` 工具实现与整文件覆盖写入。
@@ -49,9 +50,9 @@
 - `grep` 的正式参数统一为 `pattern` 与可选 `path`、`include`；`path` 未传时默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围；结果返回命中的文件路径、行号与行内容，按命中文件修改时间倒序、同文件内按行号升序排列，最多返回 `100` 条。
 - `read_file` 的正式参数统一为 `file_path`，且必须使用绝对路径；允许读取的范围仅限当前工作区、`~/.my-agent/skills` 下的 skill 文件，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件，禁止跨 session 读取其他运行态数据。
 - `write_file` 的正式参数统一为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；允许写入当前工作区与 `~/.my-agent/skills`；对已存在文件，写入前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再写入。
-- `write_file` 当前返回 `metadata.filepath`、`metadata.exists`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language service 的统一入口，本期固定返回空数组与 `not_enabled`。
+- `write_file` 成功写入后必须尝试走统一 `LSP Client -> documents -> diagnostics filters` 链路；工具层只消费结构化诊断结果，不感知 `jdtls`、JSON-RPC 或文档版本细节；返回至少包含 `metadata.filepath`、`metadata.exists`、`metadata.diagnostics`、`metadata.diagnostics_status`，并在存在关键错误时把错误摘要直接追加进 `output`。
 - `edit_file` 的正式参数统一为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；允许编辑当前工作区与 `~/.my-agent/skills` 的文本文件；编辑已有文件前必须先对同一文件执行 `read_file`，并以最近一次读取时记录的 `mtime_ns` 校验文件未发生变化；若文件在读取后又被修改，必须重新读取后再编辑。
-- `edit_file` 当前返回 `metadata.diff`、`metadata.filediff`、`metadata.diagnostics` 与 `metadata.diagnostics_status`；其中 diagnostics 仅预留按语言接入 language server 的统一入口，本期固定返回空数组与 `not_enabled`。
+- `edit_file` 成功写入后同样必须触发统一 LSP 诊断链路；当前仅回填“当前文件”的 diagnostics，不做跨文件全量回灌；LSP 不可用时只通过 `metadata.diagnostics_status/lsp_error` 与 `output` 追加说明降级，不改变工具成功语义。
 - `load_skill` 的正式参数统一为 `name`；工具会按名称精确加载单个 skill，并返回 `title/output/metadata` 结构，其中 `output` 必须包含 `## Skill: {name}`、`Base directory: {dir}` 与原始 `SKILL.md` 全文，禁止模型再通过 `glob`、`grep`、`bash` 自行搜索 skill 目录。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止在业务模块继续散落使用 `Path.cwd()` 或固定仓库根目录推导工作区边界。
 - `my-agent web` 默认同时启动后端 uvicorn 与前端 Vite 开发服务；前端目录定位、`pnpm`/`node_modules` 校验、端口就绪探测与子进程清理由 `runtime/web_dev_server.py` 统一负责，禁止回退到 `cli.py` 内联零散进程管理。
@@ -88,6 +89,7 @@
 - 项目级运行时开关统一放在 `src/agent/config/project_runtime.json`，禁止继续在 `runtime/compaction.py` 等业务模块中硬编码可配置策略。
 - `project_runtime.json` 中的 `compaction` 必须采用 `default + vendors` 结构；命中当前模型厂商 `vendor` 时，仅覆盖显式配置字段，未配置字段继续继承 `default`。
 - `project_runtime.json` 中的 `file_extraction` 也必须采用 `default + vendors` 结构；当前默认仅开放 `.pdf`，并统一使用 `cleanup_mode=async_delete` 做远端异步清理。
+- `project_runtime.json` 中的 `lsp` 统一管理语言服务开关、超时、诊断裁剪、语言命令与 IDE 代理预留配置；语言扩展必须优先新增 `lsp.languages.<lang>` 与 `src/agent/lsp/servers/*.py` 适配器，禁止把语言分支散落回工具层。Java `jdtls` 默认要求通过 `lsp.languages.java.command` 显式绑定 JDK 21，避免依赖当前 shell 激活的默认 Java 版本。
 - `project_runtime.json` 中的 `agent_loop.max_rounds` 是主 Agent 循环的统一兜底阈值；命中上限后必须以 `finish_reason=error` 收口，禁止继续无限空转。
 - `project_runtime.json` 中的 `session_memory` 负责会话历史按消息条数的裁剪策略；`trim_enabled=false` 仅关闭条数裁剪，不关闭 compaction checkpoint 收口与非法前缀修复。
 - `compaction.tool_result_keep_recent` 的计数口径统一按 `role=tool` 消息数量计算，默认保留最近 `3` 条不压缩。
@@ -140,6 +142,21 @@
 
 ## 变更记录
 
+- 2026-03-30：Java LSP 新增 `project_runtime.json -> lsp.languages.java.maven_local_repository`，用于显式对齐 IDE 使用的非默认 Maven 本地仓库；`JdtlsServerAdapter` 现在会把该路径写入运行态 `settings.xml` 的 `<localRepository>`，并将其纳入 `server_key` / `data_dir` 隔离维度，同时在 metadata、文件工具输出与 `tool.lsp_result` 日志中新增 `java_maven_local_repository` 字段，避免 `jdtls` 回落到 `~/.m2` 后解析不到私有依赖。
+- 2026-03-30：修复 Java LSP 运行态缓存隔离粒度；`LspServerAdapter.build_data_dir()` 不再仅按 `workspace_root` 生成目录，而是改为按 `server_key`（包含 `adapter_mode`、`maven_profiles` 等关键维度）做哈希，避免同一 Maven 工程在不同 profile/模式下复用旧的 Eclipse workspace 缓存；同时新增 `lsp_data_dir` 透传到 metadata、文件工具输出与 `tool.lsp_result` 日志，便于直接确认本次 `jdtls` 是否落到了新的隔离目录。
+- 2026-03-30：增强 Java LSP 对 `Java Model Exception (code 969)` 的工程态失败识别；`manager.py` 现在会把“当前源码包未进入 Java Model / 多模块 Maven 仅部分导入成功”场景直接收口为 `project_import_failed`，并新增 `java_project_issue_code`、`java_project_state` 透传到 metadata、文件工具输出与 `tool.lsp_result` 日志，避免继续把这类场景误判为当前文件仅有少量 warning。
+- 2026-03-30：增强 Java LSP 对多模块 Maven profile 冲突的识别与修复能力；`project_runtime.json -> lsp.languages.java` 新增 `maven_profiles`，`JdtlsServerAdapter` 会把显式 profile 写入运行态 Maven `settings.xml` 并通过 `initializationOptions.settings.java.configuration.maven.userSettings` 注入 `jdtls`，同时在未配置 profile 时预检 `pom.xml` 中多个 `activeByDefault` 业务 profile 对当前源码路径的排除冲突，命中后收口为 `maven_profile_conflict/profile_conflict`，并在 metadata、文件工具输出与 `tool.lsp_result` 日志中新增 `java_maven_profiles` 字段。
+- 2026-03-30：新增 Java LSP 最小调试观测开关 `project_runtime.json -> lsp.java_debug_observation_enabled`；开启后，`manager.py` 会在保留原有摘要字段的同时，把最近 20 条 `language/status`、`window/logMessage`、`publishDiagnostics` 原始时间线和 Java 工程态判定 probe 透传到 `LspDiagnosticsResult` metadata，`tool_executor.py` 的 `tool.lsp_result` 日志也会同步打印这些明细，便于定位多模块 Maven 下 `Java Model Exception (code 969)` 一类真实导入问题。
+- 2026-03-30：增强 Java LSP “无 publishDiagnostics” 场景的可观测性；`manager.py` 现在会在 `timeout_degraded` / `project_import_failed` 等返回中补齐 `lsp_workspace_root`、`lsp_server_key`、`lsp_snapshot_uri`、`diagnostics_previous_sequence`、`diagnostics_latest_sequence`、最近 `status/log/publishDiagnostics` 摘要，以及是否收到“其他文件 diagnostics”的结构化字段；`edit_file` / `write_file` 会把这些关键信息追加到工具输出，`tool.lsp_result` 日志也会同步打印，便于直接判断是 workspace root 不对、工程未入编译单元，还是 jdtls 只在给别的文件发 diagnostics。
+- 2026-03-30：增强多模块 Maven 项目的 Java workspace root 选择；`JdtlsServerAdapter` 不再停在最近的 `pom.xml`，而是会优先向上识别最顶层 Maven 聚合根（`packaging=pom` 且声明 `modules`），避免 `jdtls` 仅以子模块视角导入多模块工程；同时新增 `lsp_workspace_selection_reason` 透传到文件工具输出与 `tool.lsp_result` 日志，便于直接确认本次为何选择该 workspace root。
+- 2026-03-30：Java 文件工具的 LSP diagnostics 收口策略改为“等待稳定态”而非首帧即返；`manager.py` 在收到首个 `publishDiagnostics` 后，会继续观察短稳定窗口并接纳同一文件后续 sequence，尽量返回更接近 IDE 最终态的当前文件 diagnostics；同时补齐 `raw_diagnostics_total`、`diagnostics_sequence`、`diagnostics_wait_rounds`、`diagnostics_wait_ms`、`diagnostics_settled` 等 metadata 与 `tool.lsp_result` 日志字段，便于区分“jdtls 只发了一条”和“链路过早收口”。
+- 2026-03-29：增强文件工具的 LSP 可观测性；`tool_executor.py` 在保留原有 `tool.response` 输出日志的同时，针对 `edit_file` / `write_file` 新增 `tool.lsp_result` 摘要日志，统一打印 `diagnostics_status`、diagnostics 数量、summary、LSP server/pid 与 `lsp_error`，便于直接从日志判断是否触发了 LSP 以及结果如何。
+- 2026-03-29：增强 Java LSP 工程态失败识别；`manager.py` 除 `publishDiagnostics` 外会额外收集 `language/status` 与 `window/logMessage`，当 `jdtls` 明确返回工程导入失败、构建失败、`ICompilationUnit` 未建立或 `.m2` 不可写等信号时，会优先收口为 `project_import_failed` 并把真实原因回填到文件工具输出，避免继续统一误报为“等待 diagnostics 超时”。
+- 2026-03-29：增强 Java LSP diagnostics 等待链路；`manager.py` 在首次等待 `publishDiagnostics` 超时后会补发一次 `textDocument/didSave` 做兜底重试，重试仍无结果时收敛为 `timeout_degraded` 结构化降级而非泛化“LSP 不可用”，同时补充进程提前退出识别、精简日志与文件工具提示文案，避免 `.java` 写入/编辑后频繁出现“等待诊断超时”的误导性报错。
+- 2026-03-29：新增 `src/agent/lsp/` 分层，接入 `write_file` / `edit_file` 的按需 LSP 诊断能力；首期落地 Java `jdtls` 直连模式，补齐 `project_runtime.lsp` 配置、server 复用与 TTL 回收、按 `server_key + normalized_path` 维护文档状态、诊断过滤裁剪，以及“关键错误直接回填到工具 output”的链路与测试覆盖。
+- 2026-03-29：Java LSP 启动链路改为通过 `project_runtime.json -> lsp.languages.java.command` 显式绑定 JDK 21；`jdtls` 启动前会校验命令可执行性与 Java 主版本，缺失 `jdtls`、JDK 路径错误或版本低于 21 时都会返回明确 `lsp_error`，并同步更新 README 中的 LSP 说明。
+- 2026-03-29：本机通过 Homebrew 安装 `jdtls`，并将 `project_runtime.json` 中的 Java LSP 命令固定为 `/opt/homebrew/bin/jdtls` 绝对路径，确保当前 macOS 环境下不依赖 PATH 即可成功启动 Java LSP。
+- 2026-03-29：针对 Homebrew 版 `jdtls` 首次启动较慢、默认 `~/.eclipse` 配置目录在当前环境下可能不可写的问题，Java LSP 启动参数补齐了显式 `-configuration` 可写目录，并将项目级 `lsp.request_timeout_ms` 提升到 `15000`，避免首次按需启动过早超时。
 - 2026-03-29：新增 `src/agent/runtime/web_dev_server.py`，将 `my-agent web` 重构为默认同时启动 uvicorn 后端与 Vite 前端开发服务；统一补齐前端依赖检查、端口就绪探测、异常清理与 CLI 单测覆盖。
 - 2026-03-27：Web 前端新增 `session-load` 交互，支持手动输入自定义 `session_id` 并通过既有 `GET /api/sessions/{session_id}/messages` 接口重载本地会话历史；前端切换会话时会同步重置临时交互态并尽量从历史消息回填 `mode/provider/model`，后端同时统一 `messages/stop/mode-switch/question/clear` 等 session 路由的 `session_id` 格式校验，避免出现“历史可加载但后续请求不可继续”的行为不一致。
 - 2026-03-27：新增 `project_runtime.session_memory` 配置，统一控制会话历史是否按消息条数裁剪以及最多保留多少条；默认开启并保留最近 `24` 条非 `system` 消息，同时修复 `InMemorySessionMemoryStore` 未按阈值裁剪、与 `FileSessionMemoryStore` 行为不一致的问题。
