@@ -86,8 +86,7 @@
           "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home",
           "/opt/homebrew/bin/jdtls"
         ],
-        // 多模块 Maven 项目可在这里显式指定导入 profile，避免默认 profile 冲突导致源码树未进入 Java Model。
-        "maven_profiles": ["hna"],
+        // 多模块 Maven 项目仅支持按当前文件路径和 pom.xml 自动探测导入 profile。
         // 若 IDE 使用了非默认本地 Maven 仓库，需要在这里显式对齐，避免 jdtls 回落到 ~/.m2 后解析不到私有依赖。
         "maven_local_repository": "/Users/liurui/work_space/tools/apache-maven-3.9.3/repository",
         "file_extensions": [".java"],

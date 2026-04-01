@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -13,6 +14,13 @@ from .base import LspPreflightIssue, LspServerAdapter
 
 
 _JAVA_VERSION_PATTERN = re.compile(r'version "(?P<version>[^"]+)"')
+
+
+@dataclass(frozen=True)
+class ResolvedJavaMavenImportConfig:
+    profiles: tuple[str, ...] = ()
+    profiles_source: str = ""
+    local_repository: str = ""
 
 
 class JdtlsServerAdapter(LspServerAdapter):
@@ -40,10 +48,11 @@ class JdtlsServerAdapter(LspServerAdapter):
             return nearest_marker_root, "gradle_marker_root"
         return nearest_marker_root, "workspace_marker_root"
 
-    def build_server_key(self, workspace_root: Path) -> str:
-        base_key = super().build_server_key(workspace_root)
-        profiles = self.get_language_settings().maven_profiles
-        local_repository = self.get_language_settings().maven_local_repository.strip()
+    def build_server_key(self, workspace_root: Path, *, file_path: Path | None = None) -> str:
+        base_key = super().build_server_key(workspace_root, file_path=file_path)
+        resolved = self.resolve_maven_import_config(file_path=file_path, workspace_root=workspace_root)
+        profiles = resolved.profiles
+        local_repository = resolved.local_repository.strip()
         suffix_parts: list[str] = []
         if profiles:
             suffix_parts.append(f"maven_profiles={','.join(profiles)}")
@@ -53,10 +62,11 @@ class JdtlsServerAdapter(LspServerAdapter):
             return base_key
         return f"{base_key}:{':'.join(suffix_parts)}"
 
-    def build_initialize_params(self, workspace_root: Path) -> dict[str, object]:
-        params = super().build_initialize_params(workspace_root)
-        profiles = self.get_language_settings().maven_profiles
-        local_repository = self.get_language_settings().maven_local_repository.strip()
+    def build_initialize_params(self, workspace_root: Path, *, file_path: Path | None = None) -> dict[str, object]:
+        params = super().build_initialize_params(workspace_root, file_path=file_path)
+        resolved = self.resolve_maven_import_config(file_path=file_path, workspace_root=workspace_root)
+        profiles = resolved.profiles
+        local_repository = resolved.local_repository.strip()
         if not profiles and not local_repository:
             return params
 
@@ -89,45 +99,61 @@ class JdtlsServerAdapter(LspServerAdapter):
         return params
 
     def detect_preflight_issue(self, *, file_path: Path, workspace_root: Path) -> LspPreflightIssue | None:
-        profiles = self.get_language_settings().maven_profiles
-        if profiles:
+        resolved = self.resolve_maven_import_config(file_path=file_path, workspace_root=workspace_root)
+        if resolved.profiles:
             return None
 
-        module_root = self._find_nearest_maven_module_root(file_path.resolve(), workspace_root.resolve())
-        if module_root is None:
+        conflict_info = self._build_profile_conflict_info(file_path=file_path, workspace_root=workspace_root)
+        if conflict_info is None:
             return None
-        pom_info = _parse_maven_pom_info(module_root / "pom.xml")
-        if pom_info is None:
-            return None
-        relative_path = file_path.resolve().relative_to(module_root).as_posix()
-        conflicting_profiles = [
-            profile["id"]
-            for profile in pom_info["profiles"]
-            if profile["active_by_default"] and any(fnmatch(relative_path, pattern) for pattern in profile["excludes"])
-        ]
-        if not conflicting_profiles:
-            return None
-
-        suggested_profile = _extract_channel_profile(file_path.resolve())
-        suggestion_text = (
-            f"；建议在 project_runtime.json 中配置 lsp.languages.java.maven_profiles=[\"{suggested_profile}\"]"
-            if suggested_profile
-            else ""
-        )
+        suggested_profile = conflict_info["candidates"][0] if len(conflict_info["candidates"]) == 1 else ""
+        suggestion_text = ""
+        if suggested_profile:
+            suggestion_text = (
+                f"；自动探测建议的 profile 为 {suggested_profile}，"
+                "如仍失败请调整项目目录结构或补充自动探测规则"
+            )
+        elif conflict_info["candidates"]:
+            suggestion_text = (
+                "；检测到多个候选 profile="
+                f"{list(conflict_info['candidates'])}，当前仅支持自动探测，请调整项目结构或补充探测规则"
+            )
+        else:
+            suggestion_text = "；当前无法自动推断可用 profile，请调整项目结构或补充自动探测规则"
         return LspPreflightIssue(
             message=(
                 "Java 工程导入存在 Maven profile 冲突："
-                f"当前文件 {relative_path} 会被默认激活的 profile {', '.join(conflicting_profiles)} 排除"
+                f"当前文件 {conflict_info['relative_path']} 会被默认激活的 profile "
+                f"{', '.join(conflict_info['conflicting_profiles'])} 排除"
                 f"{suggestion_text}"
             ),
             issue_code="maven_profile_conflict",
             project_state="profile_conflict",
             details={
-                "maven_module_path": module_root.relative_to(workspace_root.resolve()).as_posix() or ".",
-                "conflicting_profiles": ",".join(conflicting_profiles),
+                "maven_module_path": conflict_info["module_path"],
+                "conflicting_profiles": ",".join(conflict_info["conflicting_profiles"]),
                 "suggested_profile": suggested_profile or "",
             },
         )
+
+    def resolve_maven_import_config(
+        self,
+        *,
+        file_path: Path | None,
+        workspace_root: Path,
+    ) -> ResolvedJavaMavenImportConfig:
+        language_settings = self.get_language_settings()
+        if file_path is None:
+            return ResolvedJavaMavenImportConfig(local_repository=language_settings.maven_local_repository.strip())
+
+        conflict_info = self._build_profile_conflict_info(file_path=file_path, workspace_root=workspace_root)
+        if conflict_info is not None and len(conflict_info["candidates"]) == 1:
+            return ResolvedJavaMavenImportConfig(
+                profiles=(conflict_info["candidates"][0],),
+                profiles_source="auto_detected",
+                local_repository=language_settings.maven_local_repository.strip(),
+            )
+        return ResolvedJavaMavenImportConfig(local_repository=language_settings.maven_local_repository.strip())
 
     def _find_nearest_marker_root(self, file_path: Path, boundary: Path) -> Path | None:
         markers = self.get_language_settings().workspace_markers
@@ -312,6 +338,34 @@ class JdtlsServerAdapter(LspServerAdapter):
         )
         return settings_path
 
+    def _build_profile_conflict_info(self, *, file_path: Path, workspace_root: Path) -> dict[str, object] | None:
+        module_root = self._find_nearest_maven_module_root(file_path.resolve(), workspace_root.resolve())
+        if module_root is None:
+            return None
+        pom_info = _parse_maven_pom_info(module_root / "pom.xml")
+        if pom_info is None:
+            return None
+        relative_path = file_path.resolve().relative_to(module_root).as_posix()
+        conflicting_profiles = tuple(
+            profile["id"]
+            for profile in pom_info["profiles"]
+            if profile["active_by_default"] and any(fnmatch(relative_path, pattern) for pattern in profile["excludes"])
+        )
+        if not conflicting_profiles:
+            return None
+        candidates = _infer_maven_profile_candidates(
+            file_path=file_path.resolve(),
+            module_root=module_root,
+            declared_profiles=tuple(str(profile["id"]) for profile in pom_info["profiles"]),
+            conflicting_profiles=conflicting_profiles,
+        )
+        return {
+            "module_path": module_root.relative_to(workspace_root.resolve()).as_posix() or ".",
+            "relative_path": relative_path,
+            "conflicting_profiles": conflicting_profiles,
+            "candidates": candidates,
+        }
+
 
 def build_default_java_adapter() -> JdtlsServerAdapter:
     return JdtlsServerAdapter()
@@ -403,3 +457,34 @@ def _extract_channel_profile(file_path: Path) -> str | None:
     if channel_index + 1 >= len(parts):
         return None
     return parts[channel_index + 1].strip() or None
+
+
+def _infer_maven_profile_candidates(
+    *,
+    file_path: Path,
+    module_root: Path,
+    declared_profiles: tuple[str, ...],
+    conflicting_profiles: tuple[str, ...],
+) -> tuple[str, ...]:
+    normalized_declared = [profile.strip() for profile in declared_profiles if profile.strip()]
+    if not normalized_declared:
+        return ()
+    conflicting_set = {profile.strip().lower() for profile in conflicting_profiles if profile.strip()}
+    relative_parts = [part.strip().lower() for part in file_path.relative_to(module_root).parts if part.strip()]
+    candidates: list[str] = []
+
+    channel_profile = _extract_channel_profile(file_path)
+    if channel_profile:
+        for profile in normalized_declared:
+            if profile.lower() == channel_profile.lower() and profile.lower() not in conflicting_set:
+                candidates.append(profile)
+                break
+
+    for profile in normalized_declared:
+        lower_profile = profile.lower()
+        if lower_profile in conflicting_set:
+            continue
+        if lower_profile in relative_parts and profile not in candidates:
+            candidates.append(profile)
+
+    return tuple(candidates)

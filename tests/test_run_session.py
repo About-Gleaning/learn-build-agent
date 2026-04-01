@@ -3381,7 +3381,6 @@ def test_get_project_runtime_settings_should_read_lsp_config(tmp_path, monkeypat
               "java": {
                 "enabled": true,
                 "command": ["custom-jdtls"],
-                "maven_profiles": ["hna"],
                 "maven_local_repository": "/custom/maven/repository",
                 "file_extensions": [".java"],
                 "workspace_markers": ["pom.xml"],
@@ -3408,9 +3407,34 @@ def test_get_project_runtime_settings_should_read_lsp_config(tmp_path, monkeypat
         assert settings.lsp.include_severity == ("error", "warning", "information")
         assert settings.lsp.strict_unavailable is True
         assert settings.lsp.languages["java"].command == ("custom-jdtls",)
-        assert settings.lsp.languages["java"].maven_profiles == ("hna",)
         assert settings.lsp.languages["java"].maven_local_repository == "/custom/maven/repository"
         assert settings.lsp.languages["java"].workspace_markers == ("pom.xml",)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_java_maven_profiles_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "lsp": {
+            "languages": {
+              "java": {
+                "maven_profiles": ["hna"]
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        with pytest.raises(ValueError, match="maven_profiles 已废弃"):
+            get_project_runtime_settings()
     finally:
         clear_runtime_settings_cache()
 

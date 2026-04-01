@@ -176,20 +176,34 @@ class LspManager:
         )
         preflight_issue = adapter.detect_preflight_issue(file_path=file_path.resolve(), workspace_root=workspace_root)
         if preflight_issue is not None:
+            resolved_java_settings = (
+                adapter.resolve_maven_import_config(file_path=file_path.resolve(), workspace_root=workspace_root)
+                if hasattr(adapter, "resolve_maven_import_config")
+                else None
+            )
             return LspDiagnosticsResult(
                 status="project_import_failed",
                 lsp_language=adapter.language,
                 lsp_server=adapter.server_name,
                 lsp_workspace_root=str(workspace_root),
-                lsp_data_dir=str(adapter.build_data_dir(workspace_root)),
+                lsp_data_dir=str(adapter.build_data_dir(workspace_root, file_path=file_path.resolve())),
                 lsp_workspace_selection_reason=workspace_selection_reason,
-                lsp_server_key=adapter.build_server_key(workspace_root),
+                lsp_server_key=adapter.build_server_key(workspace_root, file_path=file_path.resolve()),
                 lsp_snapshot_uri=file_path.resolve().as_uri(),
                 lsp_error=preflight_issue.message,
                 java_project_issue_code=preflight_issue.issue_code,
                 java_project_state=preflight_issue.project_state,
-                java_maven_profiles=adapter.get_language_settings().maven_profiles,
-                java_maven_local_repository=adapter.get_language_settings().maven_local_repository,
+                java_maven_profiles=(
+                    resolved_java_settings.profiles if resolved_java_settings is not None else ()
+                ),
+                java_maven_profiles_source=(
+                    resolved_java_settings.profiles_source if resolved_java_settings is not None else ""
+                ),
+                java_maven_local_repository=(
+                    resolved_java_settings.local_repository
+                    if resolved_java_settings is not None
+                    else adapter.get_language_settings().maven_local_repository
+                ),
             )
         server = self.get_or_start(adapter, file_path=file_path)
         previous_sequence = server.get_sequence(file_path.resolve().as_uri())
@@ -475,6 +489,7 @@ class LspManager:
             "recent_publish_uris": recent_publish_uris,
             "received_other_file_diagnostics": received_other_file_diagnostics,
             "java_maven_profiles": server.status.java_maven_profiles,
+            "java_maven_profiles_source": server.status.java_maven_profiles_source,
             "java_maven_local_repository": server.status.java_maven_local_repository,
             "java_debug_observation_enabled": settings.java_debug_observation_enabled,
         }
@@ -564,6 +579,7 @@ class LspManager:
             java_project_issue_code=issue.issue_code,
             java_project_state=issue.project_state,
             java_maven_profiles=filtered_result.java_maven_profiles,
+            java_maven_profiles_source=filtered_result.java_maven_profiles_source,
             java_maven_local_repository=filtered_result.java_maven_local_repository,
             java_debug_observation_enabled=filtered_result.java_debug_observation_enabled,
             debug_status_events=filtered_result.debug_status_events,
@@ -578,7 +594,12 @@ class LspManager:
             file_path.resolve(),
             get_workspace().root.resolve(),
         )
-        server_key = adapter.build_server_key(workspace_root)
+        resolved_java_settings = (
+            adapter.resolve_maven_import_config(file_path=file_path.resolve(), workspace_root=workspace_root)
+            if hasattr(adapter, "resolve_maven_import_config")
+            else None
+        )
+        server_key = adapter.build_server_key(workspace_root, file_path=file_path.resolve())
         pending_start: _PendingServerStart | None = None
         should_start = False
         while True:
@@ -629,10 +650,17 @@ class LspManager:
                 language=adapter.language,
                 adapter_mode=adapter.adapter_mode,
                 pid=process.pid,
-                data_dir=str(adapter.build_data_dir(workspace_root)),
+                data_dir=str(adapter.build_data_dir(workspace_root, file_path=file_path.resolve())),
                 workspace_selection_reason=workspace_selection_reason,
-                java_maven_profiles=adapter.get_language_settings().maven_profiles,
-                java_maven_local_repository=adapter.get_language_settings().maven_local_repository,
+                java_maven_profiles=resolved_java_settings.profiles if resolved_java_settings is not None else (),
+                java_maven_profiles_source=(
+                    resolved_java_settings.profiles_source if resolved_java_settings is not None else ""
+                ),
+                java_maven_local_repository=(
+                    resolved_java_settings.local_repository
+                    if resolved_java_settings is not None
+                    else adapter.get_language_settings().maven_local_repository
+                ),
             )
             server = ManagedLspServer(
                 status=status,
@@ -650,7 +678,7 @@ class LspManager:
             )
             server.endpoint.request(
                 "initialize",
-                adapter.build_initialize_params(workspace_root),
+                adapter.build_initialize_params(workspace_root, file_path=file_path.resolve()),
                 timeout_ms=get_lsp_settings().request_timeout_ms,
             )
             server.endpoint.notify("initialized", {})

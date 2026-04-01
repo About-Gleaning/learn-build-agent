@@ -30,7 +30,6 @@ def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True, pyth
                 file_extensions=(".java",),
                 workspace_markers=("pom.xml",),
                 init_options={},
-                maven_profiles=(),
                 maven_local_repository="",
             ),
             "python": LspLanguageSettings(
@@ -39,7 +38,6 @@ def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True, pyth
                 file_extensions=(".py",),
                 workspace_markers=("pyproject.toml", "setup.py", "requirements.txt", "setup.cfg"),
                 init_options={},
-                maven_profiles=(),
                 maven_local_repository="",
             ),
             "typescript": LspLanguageSettings(
@@ -48,7 +46,6 @@ def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True, pyth
                 file_extensions=(".ts",),
                 workspace_markers=("package.json",),
                 init_options={},
-                maven_profiles=(),
                 maven_local_repository="",
             ),
         },
@@ -200,6 +197,7 @@ def test_lsp_client_should_passthrough_project_import_failed(monkeypatch, tmp_pa
                 java_project_issue_code="java_model_exception_969",
                 java_project_state="partial_java_model",
                 java_maven_profiles=("hna",),
+                java_maven_profiles_source="auto_detected",
                 java_maven_local_repository="/custom/maven/repository",
                 lsp_error="Java 工程导入失败，Maven 本地仓库不可写：/Users/liurui/.m2/repository/... Operation not permitted",
             )
@@ -213,6 +211,7 @@ def test_lsp_client_should_passthrough_project_import_failed(monkeypatch, tmp_pa
     assert result.java_project_issue_code == "java_model_exception_969"
     assert result.java_project_state == "partial_java_model"
     assert result.java_maven_profiles == ("hna",)
+    assert result.java_maven_profiles_source == "auto_detected"
     assert result.java_maven_local_repository == "/custom/maven/repository"
     assert "Maven 本地仓库不可写" in (result.lsp_error or "")
 

@@ -323,7 +323,6 @@ class TestBuildDefaultPythonAdapter:
                         file_extensions=(".py", ".pyw"),
                         workspace_markers=("pyproject.toml",),
                         init_options={"pylsp": {"plugins": {"pylint": {"enabled": True}}}},
-                        maven_profiles=(),
                         maven_local_repository="",
                     )
                 },

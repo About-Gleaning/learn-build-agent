@@ -45,6 +45,7 @@
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 停止当前会话；运行时必须按 `session_id` 管理停止标记并统一以 `interrupted/cancelled` 收口。
+- Java LSP 的 Maven profile 仅支持按当前文件路径和 Maven `pom.xml` 自动探测；探测不唯一时直接报错，不再支持手工配置覆盖。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 时间线必须按 `session` 维度累计展示，禁止在新一轮提交时覆盖上一轮执行轨迹。
 - Web 助手消息展示必须优先基于后端返回的 `display_parts` 顺序片段流，仅在旧消息缺少该字段时才回退到兼容渲染。

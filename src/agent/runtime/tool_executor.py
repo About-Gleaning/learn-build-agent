@@ -43,6 +43,7 @@ def _build_lsp_log_fields(metadata: dict[str, Any]) -> dict[str, str] | None:
         "java_project_issue_code": sanitize_log_text(metadata.get("java_project_issue_code", "")),
         "java_project_state": sanitize_log_text(metadata.get("java_project_state", "")),
         "java_maven_profiles": sanitize_log_text(",".join(metadata.get("java_maven_profiles", [])) if isinstance(metadata.get("java_maven_profiles"), list) else metadata.get("java_maven_profiles", "")),
+        "java_maven_profiles_source": sanitize_log_text(metadata.get("java_maven_profiles_source", "")),
         "java_maven_local_repository": sanitize_log_text(metadata.get("java_maven_local_repository", "")),
         "java_debug_observation_enabled": str(metadata.get("java_debug_observation_enabled", "")),
         "debug_status_events": sanitize_log_text(metadata.get("debug_status_events", "")),
@@ -151,6 +152,7 @@ class ToolLoggingHook(ToolHook):
                     "lsp_server_key=%s lsp_snapshot_uri=%s recent_status_summary=%s recent_log_summary=%s "
                     "recent_publish_uris=%s received_other_file_diagnostics=%s "
                     "java_project_issue_code=%s java_project_state=%s java_maven_profiles=%s "
+                    "java_maven_profiles_source=%s "
                     "java_maven_local_repository=%s "
                     "java_debug_observation_enabled=%s debug_status_events=%s debug_log_events=%s "
                     "debug_publish_events=%s debug_issue_probe=%s lsp_error=%s"
@@ -182,6 +184,7 @@ class ToolLoggingHook(ToolHook):
                 lsp_log_fields["java_project_issue_code"],
                 lsp_log_fields["java_project_state"],
                 lsp_log_fields["java_maven_profiles"],
+                lsp_log_fields["java_maven_profiles_source"],
                 lsp_log_fields["java_maven_local_repository"],
                 lsp_log_fields["java_debug_observation_enabled"],
                 lsp_log_fields["debug_status_events"],

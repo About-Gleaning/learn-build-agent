@@ -36,16 +36,19 @@ class LspServerAdapter(ABC):
         suffix = file_path.suffix.lower()
         return suffix in self.get_language_settings().file_extensions
 
-    def build_server_key(self, workspace_root: Path) -> str:
+    def build_server_key(self, workspace_root: Path, *, file_path: Path | None = None) -> str:
+        del file_path
         return f"{self.language}:{workspace_root.resolve()}:{self.adapter_mode}"
 
     def detect_preflight_issue(self, *, file_path: Path, workspace_root: Path) -> LspPreflightIssue | None:
         return None
 
-    def build_data_dir(self, workspace_root: Path) -> Path:
+    def build_data_dir(self, workspace_root: Path, *, file_path: Path | None = None) -> Path:
         workspace = get_workspace()
         # 按 server_key 隔离运行态目录，避免同一 workspace_root 下不同 profile/模式复用旧缓存。
-        digest = hashlib.sha256(self.build_server_key(workspace_root).encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(
+            self.build_server_key(workspace_root, file_path=file_path).encode("utf-8")
+        ).hexdigest()[:16]
         return (workspace.workspace_home / "lsp" / self.language / digest).resolve()
 
     @abstractmethod
@@ -59,7 +62,8 @@ class LspServerAdapter(ABC):
     def build_command(self, workspace_root: Path) -> list[str]:
         raise NotImplementedError
 
-    def build_initialize_params(self, workspace_root: Path) -> dict[str, Any]:
+    def build_initialize_params(self, workspace_root: Path, *, file_path: Path | None = None) -> dict[str, Any]:
+        del file_path
         return {
             "processId": os.getpid(),
             "rootUri": workspace_root.resolve().as_uri(),

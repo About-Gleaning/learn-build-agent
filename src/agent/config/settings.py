@@ -158,7 +158,6 @@ class LspLanguageSettings:
     file_extensions: tuple[str, ...]
     workspace_markers: tuple[str, ...]
     init_options: dict[str, Any]
-    maven_profiles: tuple[str, ...] = ()
     maven_local_repository: str = ""
 
 
@@ -581,14 +580,12 @@ def _load_lsp_language_settings(raw_value: Any, *, language: str) -> LspLanguage
     init_options = raw_value.get("init_options", base.init_options)
     if not isinstance(init_options, dict):
         raise ValueError(f"lsp.languages.{language}.init_options 必须是对象。")
-    maven_profiles: tuple[str, ...] = ()
     maven_local_repository = base.maven_local_repository
     if language == "java":
-        maven_profiles = _parse_string_list(
-            raw_value.get("maven_profiles", list(base.maven_profiles)),
-            field_name="lsp.languages.java.maven_profiles",
-            allow_empty=True,
-        )
+        if "maven_profiles" in raw_value:
+            raise ValueError(
+                "lsp.languages.java.maven_profiles 已废弃，当前仅支持自动探测 Maven profile，请删除该配置。"
+            )
         raw_local_repository = raw_value.get("maven_local_repository", base.maven_local_repository)
         if raw_local_repository is None:
             raw_local_repository = ""
@@ -601,7 +598,6 @@ def _load_lsp_language_settings(raw_value: Any, *, language: str) -> LspLanguage
         file_extensions=file_extensions,
         workspace_markers=workspace_markers,
         init_options=dict(init_options),
-        maven_profiles=maven_profiles,
         maven_local_repository=maven_local_repository,
     )
 

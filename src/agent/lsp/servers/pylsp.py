@@ -62,12 +62,13 @@ class PyLspServerAdapter(LspServerAdapter):
         """
         return list(self._command)
 
-    def build_initialize_params(self, workspace_root: Path) -> dict[str, Any]:
+    def build_initialize_params(self, workspace_root: Path, *, file_path: Path | None = None) -> dict[str, Any]:
         """Build initialization parameters for pylsp.
 
         构建 pylsp 的初始化参数。
         包含进程 ID、工作区 URI、工作区文件夹、客户端能力等配置。
         """
+        del file_path
         workspace_uri = workspace_root.resolve().as_uri()
         return {
             "processId": None,  # 当前进程 ID，设为 None 表示独立进程
@@ -84,12 +85,13 @@ class PyLspServerAdapter(LspServerAdapter):
             "initializationOptions": self._init_options,  # 额外的初始化选项
         }
 
-    def build_server_key(self, workspace_root: Path) -> str:
+    def build_server_key(self, workspace_root: Path, *, file_path: Path | None = None) -> str:
         """Build a unique server key for caching purposes.
 
         构建用于缓存的唯一服务器标识键。
         基于工作区路径的 SHA256 哈希值生成唯一标识符。
         """
+        del file_path
         normalized = workspace_root.resolve().as_posix()
         hashed = hashlib.sha256(normalized.encode()).hexdigest()[:16]
         return f"pylsp_{hashed}"

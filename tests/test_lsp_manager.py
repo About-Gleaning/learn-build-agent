@@ -34,7 +34,6 @@ def _build_lsp_settings(*, ttl_seconds: int = 60) -> LspSettings:
                 file_extensions=(".java",),
                 workspace_markers=("pom.xml", "build.gradle"),
                 init_options={},
-                maven_profiles=(),
                 maven_local_repository="",
             ),
             "python": LspLanguageSettings(
@@ -43,7 +42,6 @@ def _build_lsp_settings(*, ttl_seconds: int = 60) -> LspSettings:
                 file_extensions=(".py",),
                 workspace_markers=("pyproject.toml",),
                 init_options={},
-                maven_profiles=(),
                 maven_local_repository="",
             ),
             "typescript": LspLanguageSettings(
@@ -52,7 +50,6 @@ def _build_lsp_settings(*, ttl_seconds: int = 60) -> LspSettings:
                 file_extensions=(".ts",),
                 workspace_markers=("package.json",),
                 init_options={},
-                maven_profiles=(),
                 maven_local_repository="",
             ),
         },
@@ -698,11 +695,21 @@ def test_lsp_manager_should_override_completed_with_project_import_failed_on_jav
     assert "当前源码包尚未进入 Java Model" in (result.lsp_error or "")
 
 
-def test_lsp_manager_should_detect_maven_profile_conflict_before_start(monkeypatch, tmp_path):
+def test_lsp_manager_should_auto_detect_maven_profile_before_start(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
     clear_document_store()
     monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: _build_lsp_settings())
     monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._resolve_executable",
+        lambda self, executable, launch_env: "/opt/homebrew/bin/jdtls",
+    )
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._detect_java_major_version",
+        lambda self, java_command, launch_env: 21,
+    )
+    monkeypatch.setattr("agent.lsp.manager.subprocess.Popen", lambda *args, **kwargs: _FakeProcess())
+    monkeypatch.setattr("agent.lsp.manager.JsonRpcEndpoint", _FakeEndpoint)
 
     aggregator_root = tmp_path / "flight-instruction"
     module_root = aggregator_root / "instruction-service"
@@ -755,22 +762,100 @@ def test_lsp_manager_should_detect_maven_profile_conflict_before_start(monkeypat
 
     result = manager.collect_diagnostics(adapter, file_path=java_file, content="class Air9hB2cConvertUtil {}")
 
+    assert result.status == "timeout_degraded"
+    assert result.lsp_workspace_selection_reason == "maven_aggregator_root"
+    assert result.java_maven_profiles == ("hna",)
+    assert result.java_maven_profiles_source == "auto_detected"
+
+
+def test_lsp_manager_should_detect_maven_profile_conflict_before_start_when_auto_detect_is_ambiguous(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    clear_document_store()
+    monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+
+    aggregator_root = tmp_path / "flight-instruction"
+    module_root = aggregator_root / "instruction-service"
+    java_file = module_root / "src" / "main" / "java" / "com" / "huoli" / "flight" / "carrier" / "AirCarrierConvertUtil.java"
+    java_file.parent.mkdir(parents=True, exist_ok=True)
+    java_file.write_text("class AirCarrierConvertUtil {}", encoding="utf-8")
+    (aggregator_root / "pom.xml").write_text(
+        """
+        <project>
+          <packaging>pom</packaging>
+          <modules>
+            <module>instruction-service</module>
+          </modules>
+        </project>
+        """.strip(),
+        encoding="utf-8",
+    )
+    (module_root / "pom.xml").write_text(
+        """
+        <project>
+          <profiles>
+            <profile>
+              <id>airchina</id>
+              <activation><activeByDefault>true</activeByDefault></activation>
+              <build>
+                <plugins>
+                  <plugin>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                      <excludes>
+                        <exclude>**/carrier/**</exclude>
+                      </excludes>
+                    </configuration>
+                  </plugin>
+                </plugins>
+              </build>
+            </profile>
+            <profile>
+              <id>hna</id>
+              <activation><activeByDefault>true</activeByDefault></activation>
+              <build>
+                <plugins>
+                  <plugin>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                      <excludes>
+                        <exclude>**/carrier/**</exclude>
+                      </excludes>
+                    </configuration>
+                  </plugin>
+                </plugins>
+              </build>
+            </profile>
+            <profile>
+              <id>ceshi</id>
+            </profile>
+          </profiles>
+        </project>
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    adapter = JdtlsServerAdapter()
+    manager = LspManager()
+
+    result = manager.collect_diagnostics(adapter, file_path=java_file, content="class AirCarrierConvertUtil {}")
+
     assert result.status == "project_import_failed"
     assert result.java_project_issue_code == "maven_profile_conflict"
     assert result.java_project_state == "profile_conflict"
     assert result.lsp_workspace_selection_reason == "maven_aggregator_root"
     assert result.java_maven_profiles == ()
-    assert "maven_profiles=[\"hna\"]" in (result.lsp_error or "")
+    assert result.java_maven_profiles_source == ""
+    assert "自动探测规则" in (result.lsp_error or "")
 
 
-def test_jdtls_should_include_maven_profiles_in_server_key_and_initialize_params(monkeypatch, tmp_path):
+def test_jdtls_should_include_maven_local_repository_in_server_key_and_initialize_params(monkeypatch, tmp_path):
     settings = replace(
         _build_lsp_settings(),
         languages={
             **_build_lsp_settings().languages,
             "java": replace(
                 _build_lsp_settings().languages["java"],
-                maven_profiles=("hna",),
                 maven_local_repository="/custom/maven/repository",
             ),
         },
@@ -782,14 +867,12 @@ def test_jdtls_should_include_maven_profiles_in_server_key_and_initialize_params
     server_key = adapter.build_server_key(workspace_root)
     params = adapter.build_initialize_params(workspace_root)
 
-    assert "maven_profiles=hna" in server_key
     assert "maven_local_repository=/custom/maven/repository" in server_key
     user_settings = (
         params["initializationOptions"]["settings"]["java"]["configuration"]["maven"]["userSettings"]
     )
     assert str(user_settings).endswith("maven-user-settings.xml")
     user_settings_content = Path(user_settings).read_text(encoding="utf-8")
-    assert "hna" in user_settings_content
     assert "/custom/maven/repository" in user_settings_content
 
 
@@ -805,25 +888,75 @@ def test_jdtls_should_isolate_data_dir_by_server_key(monkeypatch, tmp_path):
     default_server_key = default_adapter.build_server_key(workspace_root)
     default_dir = default_adapter.build_data_dir(workspace_root)
 
-    profiled_settings = replace(
+    repository_overridden_settings = replace(
         base_settings,
         languages={
             **base_settings.languages,
             "java": replace(
                 base_settings.languages["java"],
-                maven_profiles=("hna",),
                 maven_local_repository="/custom/maven/repository",
             ),
         },
     )
-    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: profiled_settings)
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: repository_overridden_settings)
 
-    profiled_adapter = JdtlsServerAdapter()
-    profiled_server_key = profiled_adapter.build_server_key(workspace_root)
-    profiled_dir = profiled_adapter.build_data_dir(workspace_root)
+    repository_adapter = JdtlsServerAdapter()
+    repository_server_key = repository_adapter.build_server_key(workspace_root)
+    repository_dir = repository_adapter.build_data_dir(workspace_root)
 
-    assert default_server_key != profiled_server_key
-    assert default_dir != profiled_dir
+    assert default_server_key != repository_server_key
+    assert default_dir != repository_dir
+
+
+def test_jdtls_should_auto_detect_profile_into_server_key_and_initialize_params(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+    adapter = JdtlsServerAdapter()
+    workspace_root = tmp_path / "flight-instruction"
+    module_root = workspace_root / "instruction-service"
+    java_file = module_root / "src" / "main" / "java" / "com" / "demo" / "channel" / "hna" / "Foo.java"
+    java_file.parent.mkdir(parents=True, exist_ok=True)
+    java_file.write_text("class Foo {}", encoding="utf-8")
+    (workspace_root / "pom.xml").write_text(
+        "<project><packaging>pom</packaging><modules><module>instruction-service</module></modules></project>",
+        encoding="utf-8",
+    )
+    (module_root / "pom.xml").write_text(
+        """
+        <project>
+          <profiles>
+            <profile>
+              <id>airchina</id>
+              <activation><activeByDefault>true</activeByDefault></activation>
+              <build>
+                <plugins>
+                  <plugin>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                      <excludes>
+                        <exclude>**/channel/hna/**</exclude>
+                      </excludes>
+                    </configuration>
+                  </plugin>
+                </plugins>
+              </build>
+            </profile>
+            <profile><id>hna</id></profile>
+          </profiles>
+        </project>
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    server_key = adapter.build_server_key(workspace_root, file_path=java_file)
+    params = adapter.build_initialize_params(workspace_root, file_path=java_file)
+    resolved = adapter.resolve_maven_import_config(file_path=java_file, workspace_root=workspace_root)
+
+    assert resolved.profiles == ("hna",)
+    assert resolved.profiles_source == "auto_detected"
+    assert "maven_profiles=hna" in server_key
+    user_settings = params["initializationOptions"]["settings"]["java"]["configuration"]["maven"]["userSettings"]
+    user_settings_content = Path(user_settings).read_text(encoding="utf-8")
+    assert "hna" in user_settings_content
 
 
 def test_jdtls_should_select_topmost_maven_aggregator_root(tmp_path):

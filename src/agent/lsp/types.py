@@ -69,6 +69,7 @@ class LspServerStatus:
     data_dir: str = ""
     workspace_selection_reason: str = ""
     java_maven_profiles: tuple[str, ...] = ()
+    java_maven_profiles_source: str = ""
     java_maven_local_repository: str = ""
 
 
@@ -103,6 +104,7 @@ class LspDiagnosticsResult:
     java_project_issue_code: str | None = None
     java_project_state: str | None = None
     java_maven_profiles: tuple[str, ...] = ()
+    java_maven_profiles_source: str = ""
     java_maven_local_repository: str = ""
     java_debug_observation_enabled: bool = False
     debug_status_events: str = ""
@@ -136,6 +138,8 @@ class LspDiagnosticsResult:
             metadata["java_project_state"] = self.java_project_state
         if self.java_maven_profiles:
             metadata["java_maven_profiles"] = list(self.java_maven_profiles)
+        if self.java_maven_profiles_source:
+            metadata["java_maven_profiles_source"] = self.java_maven_profiles_source
         if self.java_maven_local_repository:
             metadata["java_maven_local_repository"] = self.java_maven_local_repository
         if self.debug_status_events:
@@ -197,6 +201,8 @@ class LspDiagnosticsResult:
             lines.append(f"java_project_state={self.java_project_state}")
         if self.java_maven_profiles:
             lines.append(f"java_maven_profiles={','.join(self.java_maven_profiles)}")
+        if self.java_maven_profiles_source:
+            lines.append(f"java_maven_profiles_source={self.java_maven_profiles_source}")
         if self.java_maven_local_repository:
             lines.append(f"java_maven_local_repository={self.java_maven_local_repository}")
         if not lines:
@@ -252,8 +258,6 @@ class LspDiagnosticsResult:
 
     def _build_llm_hint(self) -> str:
         hints: list[str] = []
-        if self.received_other_file_diagnostics:
-            hints.append("本轮收到了其他文件的 diagnostics，当前文件结果可信度不足。")
         if self.java_project_issue_code:
             issue = self.java_project_issue_code
             if self.java_project_state:
@@ -261,8 +265,6 @@ class LspDiagnosticsResult:
             hints.append(f"工程问题标记：{issue}")
         elif self.java_project_state:
             hints.append(f"工程状态：{self.java_project_state}")
-        if self.java_maven_profiles:
-            hints.append(f"当前 Maven profiles={list(self.java_maven_profiles)}")
         if self.lsp_workspace_selection_reason and self.status in {"timeout_degraded", "project_import_failed"}:
             hints.append(f"workspace_selection_reason={self.lsp_workspace_selection_reason}")
         if self.recent_publish_uris and self.status == "timeout_degraded":
@@ -277,7 +279,6 @@ class LspLanguageServerConfig:
     file_extensions: tuple[str, ...]
     workspace_markers: tuple[str, ...]
     init_options: dict[str, Any] = field(default_factory=dict)
-    maven_profiles: tuple[str, ...] = ()
     maven_local_repository: str = ""
 
 

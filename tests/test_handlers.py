@@ -1089,7 +1089,6 @@ def test_run_write_should_mark_timeout_degraded_but_keep_success(monkeypatch, tm
     assert "摘要：本次 diagnostics 未完整返回，请谨慎依赖本次结果。" in result["output"]
     assert "原因：等待 diagnostics 超时；已补发 didSave 重试，但仍未收到 publishDiagnostics。" in result["output"]
     assert "didSave" in result["output"]
-    assert "本轮收到了其他文件的 diagnostics，当前文件结果可信度不足。" in result["output"]
     assert "workspace_selection_reason=maven_aggregator_root" in result["output"]
     assert "recent_publish=src/Bar.java#1(2)" in result["output"]
     assert "LSP 观测信息" not in result["output"]
@@ -1108,7 +1107,8 @@ def test_run_write_should_surface_project_import_failed_reason(monkeypatch, tmp_
             java_project_issue_code="maven_profile_conflict",
             java_project_state="profile_conflict",
             java_maven_profiles=("hna",),
-            lsp_error="Java 工程导入存在 Maven profile 冲突：当前文件 src/main/java/com/huoli/flight/channel/hna/nineh/b2c/Air9hB2cConvertUtil.java 会被默认激活的 profile airchina 排除；建议在 project_runtime.json 中配置 lsp.languages.java.maven_profiles=[\"hna\"]",
+            java_maven_profiles_source="auto_detected",
+            lsp_error="Java 工程导入存在 Maven profile 冲突：当前文件 src/main/java/com/huoli/flight/channel/hna/nineh/b2c/Air9hB2cConvertUtil.java 会被默认激活的 profile airchina 排除；自动探测建议的 profile 为 hna，如仍失败请调整项目目录结构或补充自动探测规则",
         ),
     )
 
@@ -1119,12 +1119,13 @@ def test_run_write_should_surface_project_import_failed_reason(monkeypatch, tmp_
     assert result["metadata"]["java_project_issue_code"] == "maven_profile_conflict"
     assert result["metadata"]["java_project_state"] == "profile_conflict"
     assert result["metadata"]["java_maven_profiles"] == ["hna"]
+    assert result["metadata"]["java_maven_profiles_source"] == "auto_detected"
     assert "LSP 状态：project_import_failed" in result["output"]
     assert "摘要：工程导入失败，当前 diagnostics 不可用，请先修复工程配置问题。" in result["output"]
     assert "原因：Java 工程导入存在 Maven profile 冲突" in result["output"]
     assert "工程问题标记：maven_profile_conflict（profile_conflict）" in result["output"]
     assert "Maven profile 冲突" in result["output"]
-    assert "maven_profiles=[\"hna\"]" in result["output"]
+    assert "自动探测建议的 profile 为 hna" in result["output"]
 
 
 def test_run_write_should_summarize_completed_without_error_diagnostics(monkeypatch, tmp_path):

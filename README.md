@@ -20,6 +20,7 @@
 - 如需文件写入后的 LSP 诊断：
   - Python 诊断依赖 `python-lsp-server`
   - Java 诊断依赖 `jdtls` 和 JDK 21 兼容环境
+  - 多模块 Maven 项目会按当前文件路径和 `pom.xml` 自动探测导入 profile；探测失败时会直接报错
 
 ## 快速开始
 
@@ -182,6 +183,12 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 - 日志截断
 - 会话历史裁剪
 - LSP 行为与语言服务配置
+
+Java LSP 说明：
+
+- Java Maven profile 仅支持自动探测，不再支持通过 `project_runtime.json` 手工指定
+- 运行时会根据当前 Java 文件路径与 Maven `pom.xml` 自动探测 profile
+- 自动探测无法唯一确认时，会保守返回导入失败提示，并要求调整项目结构或补充探测规则
 
 ## 能力概览
 

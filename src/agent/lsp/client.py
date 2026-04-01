@@ -39,18 +39,32 @@ class LspClient:
                 file_path.resolve(),
                 get_workspace().root.resolve(),
             )
+            resolved_java_settings = (
+                adapter.resolve_maven_import_config(file_path=file_path.resolve(), workspace_root=workspace_root)
+                if hasattr(adapter, "resolve_maven_import_config")
+                else None
+            )
             return LspDiagnosticsResult(
                 status="server_unavailable",
                 lsp_language=adapter.language,
                 lsp_server=adapter.server_name,
                 lsp_workspace_root=str(workspace_root),
-                lsp_data_dir=str(adapter.build_data_dir(workspace_root)),
+                lsp_data_dir=str(adapter.build_data_dir(workspace_root, file_path=file_path.resolve())),
                 lsp_workspace_selection_reason=workspace_selection_reason,
-                lsp_server_key=adapter.build_server_key(workspace_root),
+                lsp_server_key=adapter.build_server_key(workspace_root, file_path=file_path.resolve()),
                 lsp_snapshot_uri=build_file_uri(file_path),
                 lsp_error=str(exc)[:300],
-                java_maven_profiles=language_settings.maven_profiles,
-                java_maven_local_repository=language_settings.maven_local_repository,
+                java_maven_profiles=(
+                    resolved_java_settings.profiles if resolved_java_settings is not None else ()
+                ),
+                java_maven_profiles_source=(
+                    resolved_java_settings.profiles_source if resolved_java_settings is not None else ""
+                ),
+                java_maven_local_repository=(
+                    resolved_java_settings.local_repository
+                    if resolved_java_settings is not None
+                    else language_settings.maven_local_repository
+                ),
             )
         excerpt = render_diagnostics_excerpt(file_path, result.diagnostics)
         return LspDiagnosticsResult(
@@ -83,6 +97,7 @@ class LspClient:
             java_project_issue_code=result.java_project_issue_code,
             java_project_state=result.java_project_state,
             java_maven_profiles=result.java_maven_profiles,
+            java_maven_profiles_source=result.java_maven_profiles_source,
             java_maven_local_repository=result.java_maven_local_repository,
             java_debug_observation_enabled=result.java_debug_observation_enabled,
             debug_status_events=result.debug_status_events,

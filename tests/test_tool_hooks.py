@@ -468,6 +468,7 @@ def test_tool_logging_hook_should_log_java_project_issue_fields(caplog):
                     "java_project_issue_code": "maven_profile_conflict",
                     "java_project_state": "profile_conflict",
                     "java_maven_profiles": ["hna"],
+                    "java_maven_profiles_source": "auto_detected",
                     "java_maven_local_repository": "/custom/maven/repository",
                 },
             }
@@ -491,6 +492,7 @@ def test_tool_logging_hook_should_log_java_project_issue_fields(caplog):
     assert "java_project_issue_code=maven_profile_conflict" in caplog.text
     assert "java_project_state=profile_conflict" in caplog.text
     assert "java_maven_profiles=hna" in caplog.text
+    assert "java_maven_profiles_source=auto_detected" in caplog.text
     assert "java_maven_local_repository=/custom/maven/repository" in caplog.text
     assert "lsp_data_dir=/tmp/.my-agent/lsp/java/server-key-hash" in caplog.text
 
