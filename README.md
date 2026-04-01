@@ -53,6 +53,8 @@ src/
       path_utils.py               # 工具公共路径解析与工作区目录校验
       question_tool.py            # question 工具实现与问题结构归一化
       read_file_tool.py           # read_file 工具实现与读取白名单校验
+      webfetch.py                 # webfetch 工具实现与单页抓取
+      websearch.py                # websearch 工具实现与联网搜索
       write_file_tool.py          # write_file 工具实现与整文件覆盖写入
       specs.py                    # 工具协议定义
       load_skill.txt              # load_skill 工具描述模板
@@ -106,13 +108,16 @@ my-agent web --verbose
 - `my-agent web` 会从安装包源码所在仓库定位 `frontend/` 目录，并以当前工作区作为后端唯一工作区根目录。
 - 可通过 `--workdir /path/to/project` 显式指定工作区；第一版不会自动上跳到 Git 根目录。
 - Web / 运行时正式入口必须显式携带 `session_id`；CLI 与测试辅助入口会在最外层自动生成随机 `session_id`，运行时内部不再回退到默认会话。
-- `~/.my-agent/AGENTS.md` 会先追加到系统提示词中；若当前工作区存在 `AGENTS.md`，则继续追加在其后，让工作区规则优先覆盖全局规则。
+- 当前实现会先尝试读取固定路径 `~/.my-agent/AGENTS.md` 追加到系统提示词中；若当前工作区存在 `AGENTS.md`，则继续追加在其后，让工作区规则优先覆盖全局规则。
 - 文件工具与 bash 工具都以工作区为边界，默认禁止越过当前目录访问上级路径。
 - `glob` 的正式参数为 `pattern` 与可选 `path`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，结果只返回普通文件。
 - `grep` 的正式参数为 `pattern` 与可选 `path`、`include`；`path` 默认使用工作区根目录，仅允许搜索工作区内已存在目录，`include` 用于限制搜索文件范围，结果返回命中的文件路径、行号与行内容。
 - `read_file` 的正式参数为 `file_path`，且必须传绝对路径；同时仅允许读取当前工作区内文件、`~/.my-agent/skills` 下的 skill 文件，以及当前 session 对应的 `plan`、`tool-output`、`sessions` 运行态文件。
 - `write_file` 的正式参数为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；允许写入当前工作区与 `~/.my-agent/skills`。若目标文件已存在，写入前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
 - `edit_file` 的正式参数为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；允许编辑当前工作区与 `~/.my-agent/skills` 的文本文件；编辑已有文件前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
+- `todo_write` / `todo_read` 用于维护当前 session 的待办清单；todo 数据统一持久化到 `~/.my-agent/workspaces/todo/<session_id>.json`，同一时刻只允许一个 `in_progress` 项。
+- `webfetch` 用于抓取单个 URL 内容，适合读取指定页面原文。
+- `websearch` 用于联网搜索，依赖 `EXA_API_KEY`。
 - `load_skill` 的正式参数为 `name`；工具会按名称精确加载单个 skill，返回 `Loaded skill: <name>` 标题、`Base directory` 与原始 `SKILL.md` 全文，避免模型再通过 `glob`/`bash` 自行扫描 skill 目录。
 - `write_file` 会返回结构化 `filepath/exists/diagnostics`；写入 `.java` 或 `.py` 文件后会尝试触发对应语言的 LSP 诊断，当前成功与否会通过 `diagnostics_status` 与可选 `lsp_error` 返回。
 - `edit_file` 会返回结构化 `diff/filediff/diagnostics`；编辑 `.java` 或 `.py` 文件后会尝试触发对应语言的 LSP 诊断，LSP 不可用时不会改变文件工具成功语义，但会在输出和元数据中追加原因。
@@ -124,9 +129,9 @@ my-agent web --verbose
   - 长输出落盘：`~/.my-agent/workspaces/tool-output/<session_id>/`
   - 日志：`~/.my-agent/logs/`
 - 如需覆盖默认运行态目录，可设置环境变量 `MY_AGENT_HOME`。
-- Java LSP 当前采用 `project_runtime.json -> lsp.languages.java.command` 显式绑定 JDK 21 的方式启动；当前仓库在本机推荐固定为 `["/usr/bin/env", "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home", "/opt/homebrew/bin/jdtls"]`。这样即使当前 shell 没有激活 JDK 21，`.java` 文件写入后的 LSP 诊断也会优先使用 JDK 21。
+- Java LSP 当前采用 `project_runtime.json -> lsp.languages.java.command` 显式绑定 JDK 21 的方式启动；当前仓库配置为 `["/usr/bin/env", "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home", "/opt/homebrew/bin/jdtls"]`。这样即使当前 shell 没有激活 JDK 21，`.java` 文件写入后的 LSP 诊断也会优先使用 JDK 21。
 - 当前环境已通过 Homebrew 安装 `jdtls`，默认路径为 `/opt/homebrew/bin/jdtls`；若后续迁移到其他机器，应先确认 `which jdtls` 的实际结果，再同步更新 `project_runtime.json`。若 `JAVA_HOME` 指向的 JDK 版本低于 21，LSP 会返回明确错误提示而不是静默降级。
-- Java LSP 首次按需启动时初始化通常较慢，当前项目已将 `project_runtime.json -> lsp.request_timeout_ms` 调整为 `15000`，避免首次加载 Maven/工作区元数据时过早超时。
+- Java LSP 首次按需启动时初始化通常较慢，当前项目已将 `project_runtime.json -> lsp.request_timeout_ms` 调整为 `60000`，避免首次加载 Maven/工作区元数据时过早超时。
 - Python LSP 采用 `python-lsp-server` (pylsp)，写入 `.py` 文件后会自动触发诊断。标准安装流程 `pip install -r requirements.txt` 或 `pip install -e .` 已默认包含该依赖；如需使用其他可执行命令，可通过 `project_runtime.json -> lsp.languages.python.command` 覆盖，默认值为 `["pylsp"]`。Python LSP 启动较快，不需要像 Java 那样配置较长的超时时间。
 - `write_file` / `edit_file` 现在同时支持 Java 和 Python 的 LSP 诊断，诊断结果会通过 `diagnostics_status`、`lsp_language`、`lsp_server` 等元数据字段返回。
 
@@ -141,7 +146,7 @@ my-agent web --verbose
 - `question` 的问题项支持可选 `custom` 字段，默认 `true`；启用后由后端统一自动追加“不是以上任何选项”兜底项，禁止让模型手写重复兜底选项。
 - `runtime/agents.py` 统一维护所有 agent 的元信息；每个 agent 必须声明 `model`（`primary` 或 `subagent`）与 `description`。
 - 工具实现统一放在 `tools/` 目录内分模块维护，工具协议统一放在 `tools/specs.py`；其中 `read_file` 独立收敛到 `tools/read_file_tool.py`，`write_file` 独立收敛到 `tools/write_file_tool.py`，`edit_file` 独立收敛到 `tools/edit_file_tool.py`，`glob` 独立收敛到 `tools/glob_tool.py`，`grep` 独立收敛到 `tools/grep_tool.py`，路径解析与工作区目录校验统一收敛到 `tools/path_utils.py`，文件工具与 plan 模式拦截统一返回结构化 `ToolResult`，至少包含 `output` 与 `metadata.status`。
-- 主 Agent 模式状态统一放在 `runtime/main_agent_mode.py`（若新增），禁止散落存储。
+- 当前主 Agent 模式状态由 `runtime/session.py` 维护；若后续单独抽模块，必须统一收敛，禁止散落存储。
 - 子 Agent 统一通过 `task` 工具路由；`task` 可见的 subagent 列表必须来自 `runtime/agents.py`，不在会话层硬编码分支逻辑。
 - Web 时间线按 `session` 维度累计展示，前端禁止在新一轮提交时清空既有执行轨迹。
 - `task` 委派子 Agent 时，流式事件必须透传子 Agent 内部进度，并携带后端生成的 `delegation_id` 作为稳定关联键。
@@ -202,7 +207,7 @@ my-agent web --verbose
 - 当前 `compaction` 采用 `default + vendors` 结构：优先读取当前模型厂商 `vendor` 的局部覆盖配置，未命中时回退 `default`。
 - 当前 `file_extraction` 也采用 `default + vendors` 结构；本次默认仅开放 `.pdf`，并使用 `cleanup_mode=async_delete` 做远端异步清理。
 - 当前 `logging` 负责日志截断策略；默认 `truncate_enabled=false`，即不截断普通日志文本，但仍保留换行转义与敏感信息脱敏。
-- 当前 `session_memory` 负责会话历史按消息条数裁剪策略；默认 `trim_enabled=true`、`max_messages=24`，即最多保留最近 24 条非 `system` 消息。
+- 当前 `session_memory` 负责会话历史按消息条数裁剪策略；当前仓库配置为 `trim_enabled=true`、`max_messages=50`，即最多保留最近 50 条非 `system` 消息。
 - `session_memory.trim_enabled=false` 仅关闭按条数裁剪，不关闭基于 compaction checkpoint 的历史收口与非法前缀修复。
 - 当前支持的压缩参数包括：
   - `tool_result_prune_enabled`
@@ -212,7 +217,7 @@ my-agent web --verbose
   - `summary_max_tokens`
   - `tool_output_max_lines`
   - `tool_output_max_bytes`
-- `tool_result_keep_recent` 的计数口径固定为 `role=tool` 消息数量。
+- `tool_result_keep_recent` 的计数口径固定为 `role=tool` 消息数量；当前仓库配置值为 `5`。
 - 缺省值必须保持兼容当前行为，厂商配置只覆盖显式填写的字段，未填写字段继续继承 `default`。
 
 ### 3) 新增 Tool Hook
