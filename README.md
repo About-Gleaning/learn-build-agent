@@ -114,8 +114,8 @@ my-agent web --verbose
 - `write_file` 的正式参数为 `filePath` 与 `content`；语义为整文件覆盖写入，正式建议传绝对路径，若传相对路径则按工作区根目录解析；允许写入当前工作区与 `~/.my-agent/skills`。若目标文件已存在，写入前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
 - `edit_file` 的正式参数为 `filePath`、`oldString`、`newString` 与可选 `replaceAll`；允许编辑当前工作区与 `~/.my-agent/skills` 的文本文件；编辑已有文件前必须先通过 `read_file` 读取同一文件，且读取后若文件再被修改，必须重新读取。
 - `load_skill` 的正式参数为 `name`；工具会按名称精确加载单个 skill，返回 `Loaded skill: <name>` 标题、`Base directory` 与原始 `SKILL.md` 全文，避免模型再通过 `glob`/`bash` 自行扫描 skill 目录。
-- `write_file` 会返回结构化 `filepath/exists/diagnostics`；写入 `.java` 文件后会尝试触发 Java LSP 诊断，当前成功与否会通过 `diagnostics_status` 与可选 `lsp_error` 返回。
-- `edit_file` 会返回结构化 `diff/filediff/diagnostics`；编辑 `.java` 文件后会尝试触发 Java LSP 诊断，LSP 不可用时不会改变文件工具成功语义，但会在输出和元数据中追加原因。
+- `write_file` 会返回结构化 `filepath/exists/diagnostics`；写入 `.java` 或 `.py` 文件后会尝试触发对应语言的 LSP 诊断，当前成功与否会通过 `diagnostics_status` 与可选 `lsp_error` 返回。
+- `edit_file` 会返回结构化 `diff/filediff/diagnostics`；编辑 `.java` 或 `.py` 文件后会尝试触发对应语言的 LSP 诊断，LSP 不可用时不会改变文件工具成功语义，但会在输出和元数据中追加原因。
 - `tool.response` 会继续打印工具输出；当 `edit_file` / `write_file` 的返回元数据包含 `diagnostics_status` 时，日志还会额外输出 `tool.lsp_result` 摘要，直接展示 LSP 是否触发、诊断数量、摘要以及 `lsp_error`。
 - 运行态数据默认落到 `~/.my-agent/`：
   - 会话历史：`~/.my-agent/workspaces/sessions/`
@@ -127,6 +127,8 @@ my-agent web --verbose
 - Java LSP 当前采用 `project_runtime.json -> lsp.languages.java.command` 显式绑定 JDK 21 的方式启动；当前仓库在本机推荐固定为 `["/usr/bin/env", "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home", "/opt/homebrew/bin/jdtls"]`。这样即使当前 shell 没有激活 JDK 21，`.java` 文件写入后的 LSP 诊断也会优先使用 JDK 21。
 - 当前环境已通过 Homebrew 安装 `jdtls`，默认路径为 `/opt/homebrew/bin/jdtls`；若后续迁移到其他机器，应先确认 `which jdtls` 的实际结果，再同步更新 `project_runtime.json`。若 `JAVA_HOME` 指向的 JDK 版本低于 21，LSP 会返回明确错误提示而不是静默降级。
 - Java LSP 首次按需启动时初始化通常较慢，当前项目已将 `project_runtime.json -> lsp.request_timeout_ms` 调整为 `15000`，避免首次加载 Maven/工作区元数据时过早超时。
+- Python LSP 采用 `python-lsp-server` (pylsp)，写入 `.py` 文件后会自动触发诊断。标准安装流程 `pip install -r requirements.txt` 或 `pip install -e .` 已默认包含该依赖；如需使用其他可执行命令，可通过 `project_runtime.json -> lsp.languages.python.command` 覆盖，默认值为 `["pylsp"]`。Python LSP 启动较快，不需要像 Java 那样配置较长的超时时间。
+- `write_file` / `edit_file` 现在同时支持 Java 和 Python 的 LSP 诊断，诊断结果会通过 `diagnostics_status`、`lsp_language`、`lsp_server` 等元数据字段返回。
 
 ## 分层职责约束（必须遵守）
 

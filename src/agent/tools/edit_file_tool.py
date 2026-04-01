@@ -223,21 +223,7 @@ def _build_success_result(file_path: Path, before: str, after: str) -> dict[str,
     additions, deletions = _count_line_changes(before, after)
     diagnostics_result = collect_file_diagnostics(file_path=file_path, content=after)
     output = f"编辑成功：{file_path}。"
-    if diagnostics_result.status == "server_unavailable" and diagnostics_result.lsp_error:
-        output += f"\nLSP 当前不可用：{diagnostics_result.lsp_error}"
-    elif diagnostics_result.status == "project_import_failed" and diagnostics_result.lsp_error:
-        output += f"\nLSP 暂时无法返回 diagnostics：{diagnostics_result.lsp_error}"
-    elif diagnostics_result.status == "timeout_degraded" and diagnostics_result.lsp_error:
-        output += f"\nLSP 诊断暂未返回，已降级跳过本次 diagnostics：{diagnostics_result.lsp_error}"
-    elif diagnostics_result.status == "not_enabled":
-        output += "\n当前未启用 LSP diagnostics。"
-    elif diagnostics_result.status == "unsupported_language":
-        output += "\n当前文件类型暂未接入 LSP diagnostics。"
-    elif diagnostics_result.output_excerpt:
-        output += diagnostics_result.output_excerpt
-    observation_excerpt = diagnostics_result.build_observation_excerpt()
-    if observation_excerpt:
-        output += observation_excerpt
+    output += diagnostics_result.build_llm_excerpt()
     return {
         "title": str(file_path),
         "output": output,

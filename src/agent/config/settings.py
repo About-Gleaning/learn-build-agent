@@ -64,6 +64,9 @@ DEFAULT_JAVA_LSP_COMMAND = (
 )
 DEFAULT_JAVA_FILE_EXTENSIONS = (".java",)
 DEFAULT_JAVA_WORKSPACE_MARKERS = ("pom.xml", "build.gradle", "settings.gradle")
+DEFAULT_PYTHON_LSP_COMMAND = ("pylsp",)
+DEFAULT_PYTHON_FILE_EXTENSIONS = (".py",)
+DEFAULT_PYTHON_WORKSPACE_MARKERS = ("pyproject.toml", "setup.py", "requirements.txt", "setup.cfg")
 
 
 @dataclass(frozen=True)
@@ -535,10 +538,10 @@ def _load_lsp_language_settings(raw_value: Any, *, language: str) -> LspLanguage
             maven_local_repository="",
         ),
         "python": LspLanguageSettings(
-            enabled=False,
-            command=(),
-            file_extensions=(".py",),
-            workspace_markers=("pyproject.toml", "setup.py", "requirements.txt"),
+            enabled=True,
+            command=DEFAULT_PYTHON_LSP_COMMAND,
+            file_extensions=DEFAULT_PYTHON_FILE_EXTENSIONS,
+            workspace_markers=DEFAULT_PYTHON_WORKSPACE_MARKERS,
             init_options={},
             maven_local_repository="",
         ),

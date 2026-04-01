@@ -33,21 +33,7 @@ def _build_success_result(target: Path, *, existed_before: bool, content: str) -
     title = _build_write_title(target)
     diagnostics_result = collect_file_diagnostics(file_path=target, content=content)
     output = f"写入成功：{title}。"
-    if diagnostics_result.status == "server_unavailable" and diagnostics_result.lsp_error:
-        output += f"\nLSP 当前不可用：{diagnostics_result.lsp_error}"
-    elif diagnostics_result.status == "project_import_failed" and diagnostics_result.lsp_error:
-        output += f"\nLSP 暂时无法返回 diagnostics：{diagnostics_result.lsp_error}"
-    elif diagnostics_result.status == "timeout_degraded" and diagnostics_result.lsp_error:
-        output += f"\nLSP 诊断暂未返回，已降级跳过本次 diagnostics：{diagnostics_result.lsp_error}"
-    elif diagnostics_result.status == "not_enabled":
-        output += "\n当前未启用 LSP diagnostics。"
-    elif diagnostics_result.status == "unsupported_language":
-        output += "\n当前文件类型暂未接入 LSP diagnostics。"
-    elif diagnostics_result.output_excerpt:
-        output += diagnostics_result.output_excerpt
-    observation_excerpt = diagnostics_result.build_observation_excerpt()
-    if observation_excerpt:
-        output += observation_excerpt
+    output += diagnostics_result.build_llm_excerpt()
     return {
         "title": title,
         "output": output,

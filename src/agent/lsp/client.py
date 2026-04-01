@@ -8,12 +8,16 @@ from .filters import render_diagnostics_excerpt
 from .manager import clear_lsp_manager_state, get_lsp_manager
 from .servers.base import LspServerAdapter
 from .servers.jdtls import build_default_java_adapter
+from .servers.pylsp import build_default_python_adapter
 from .types import LspDiagnosticsResult, build_file_uri
 
 
 class LspClient:
     def __init__(self) -> None:
-        self._adapters: tuple[LspServerAdapter, ...] = (build_default_java_adapter(),)
+        self._adapters: tuple[LspServerAdapter, ...] = (
+            build_default_java_adapter(),
+            build_default_python_adapter(),
+        )
 
     def collect_diagnostics(self, *, file_path: Path, content: str) -> LspDiagnosticsResult:
         settings = get_lsp_settings()

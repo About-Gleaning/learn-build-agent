@@ -964,6 +964,8 @@ def test_run_write_should_append_lsp_errors_into_output(monkeypatch, tmp_path):
     assert result["metadata"]["diagnostics_status"] == "completed"
     assert result["metadata"]["raw_diagnostics_total"] == 0
     assert result["metadata"]["diagnostics_settled"] is False
+    assert "LSP 状态：completed" in result["output"]
+    assert "摘要：当前文件存在 1 个error，请继续修复当前文件。" in result["output"]
     assert "LSP 检测到当前文件存在错误" in result["output"]
     assert "ERROR [12:8] cannot find symbol" in result["output"]
 
@@ -1053,7 +1055,9 @@ def test_run_edit_should_mark_server_unavailable_but_keep_success(monkeypatch, t
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics_status"] == "server_unavailable"
     assert result["metadata"]["lsp_error"] == "jdtls 未安装"
-    assert "LSP 当前不可用" in result["output"]
+    assert "LSP 状态：server_unavailable" in result["output"]
+    assert "摘要：LSP 当前不可用，本次无法提供 diagnostics。" in result["output"]
+    assert "原因：jdtls 未安装" in result["output"]
 
 
 def test_run_write_should_mark_timeout_degraded_but_keep_success(monkeypatch, tmp_path):
@@ -1081,13 +1085,15 @@ def test_run_write_should_mark_timeout_degraded_but_keep_success(monkeypatch, tm
 
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics_status"] == "timeout_degraded"
-    assert "LSP 诊断暂未返回" in result["output"]
+    assert "LSP 状态：timeout_degraded" in result["output"]
+    assert "摘要：本次 diagnostics 未完整返回，请谨慎依赖本次结果。" in result["output"]
+    assert "原因：等待 diagnostics 超时；已补发 didSave 重试，但仍未收到 publishDiagnostics。" in result["output"]
     assert "didSave" in result["output"]
-    assert "LSP 观测信息" in result["output"]
-    assert "workspace_root=" in result["output"]
+    assert "本轮收到了其他文件的 diagnostics，当前文件结果可信度不足。" in result["output"]
     assert "workspace_selection_reason=maven_aggregator_root" in result["output"]
     assert "recent_publish=src/Bar.java#1(2)" in result["output"]
-    assert "received_other_file_diagnostics=true" in result["output"]
+    assert "LSP 观测信息" not in result["output"]
+    assert "workspace_root=" not in result["output"]
 
 
 def test_run_write_should_surface_project_import_failed_reason(monkeypatch, tmp_path):
@@ -1113,9 +1119,35 @@ def test_run_write_should_surface_project_import_failed_reason(monkeypatch, tmp_
     assert result["metadata"]["java_project_issue_code"] == "maven_profile_conflict"
     assert result["metadata"]["java_project_state"] == "profile_conflict"
     assert result["metadata"]["java_maven_profiles"] == ["hna"]
-    assert "LSP 暂时无法返回 diagnostics" in result["output"]
+    assert "LSP 状态：project_import_failed" in result["output"]
+    assert "摘要：工程导入失败，当前 diagnostics 不可用，请先修复工程配置问题。" in result["output"]
+    assert "原因：Java 工程导入存在 Maven profile 冲突" in result["output"]
+    assert "工程问题标记：maven_profile_conflict（profile_conflict）" in result["output"]
     assert "Maven profile 冲突" in result["output"]
     assert "maven_profiles=[\"hna\"]" in result["output"]
+
+
+def test_run_write_should_summarize_completed_without_error_diagnostics(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    monkeypatch.setattr(
+        "agent.tools.write_file_tool.collect_file_diagnostics",
+        lambda **_: LspDiagnosticsResult(
+            status="completed",
+            diagnostics=(),
+            diagnostics_total=0,
+            diagnostics_summary="",
+            lsp_language="python",
+            lsp_server="pylsp",
+        ),
+    )
+
+    result = run_write("demo.py", "print('ok')")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["diagnostics_status"] == "completed"
+    assert "LSP 状态：completed" in result["output"]
+    assert "摘要：当前文件未发现 error 级别 diagnostics。" in result["output"]
 
 
 def test_run_edit_should_fail_when_file_changed_after_read(tmp_path):

@@ -95,10 +95,10 @@
         "init_options": {}
       },
       "python": {
-        "enabled": false,
-        "command": [],
+        "enabled": true,
+        "command": ["pylsp"],
         "file_extensions": [".py"],
-        "workspace_markers": ["pyproject.toml", "setup.py", "requirements.txt"],
+        "workspace_markers": ["pyproject.toml", "setup.py", "requirements.txt", "setup.cfg"],
         "init_options": {}
       },
       "typescript": {

@@ -203,6 +203,72 @@ class LspDiagnosticsResult:
             return ""
         return "\nLSP 观测信息：\n" + "\n".join(lines)
 
+    def build_llm_excerpt(self) -> str:
+        lines: list[str] = [f"LSP 状态：{self.status}"]
+
+        summary = self._build_llm_summary()
+        if summary:
+            lines.append(f"摘要：{summary}")
+
+        reason = self._build_llm_reason()
+        if reason:
+            lines.append(f"原因：{reason}")
+
+        hint = self._build_llm_hint()
+        if hint:
+            lines.append(f"补充：{hint}")
+
+        if self.output_excerpt:
+            lines.append(self.output_excerpt.lstrip("\n"))
+
+        return "\n" + "\n".join(lines)
+
+    def _has_error_diagnostics(self) -> bool:
+        return any(item.severity == "error" for item in self.diagnostics)
+
+    def _build_llm_summary(self) -> str:
+        if self.status in {"completed", "filtered_empty"}:
+            if self._has_error_diagnostics():
+                if self.diagnostics_summary:
+                    return f"当前文件存在 {self.diagnostics_summary}，请继续修复当前文件。"
+                return "当前文件存在 error 级别 diagnostics，请继续修复当前文件。"
+            return "当前文件未发现 error 级别 diagnostics。"
+        if self.status == "server_unavailable":
+            return "LSP 当前不可用，本次无法提供 diagnostics。"
+        if self.status == "project_import_failed":
+            return "工程导入失败，当前 diagnostics 不可用，请先修复工程配置问题。"
+        if self.status == "timeout_degraded":
+            return "本次 diagnostics 未完整返回，请谨慎依赖本次结果。"
+        if self.status == "not_enabled":
+            return "当前未启用 LSP diagnostics。"
+        if self.status == "unsupported_language":
+            return "当前文件类型暂未接入 LSP diagnostics。"
+        return ""
+
+    def _build_llm_reason(self) -> str:
+        if self.lsp_error:
+            return self.lsp_error
+        return ""
+
+    def _build_llm_hint(self) -> str:
+        hints: list[str] = []
+        if self.received_other_file_diagnostics:
+            hints.append("本轮收到了其他文件的 diagnostics，当前文件结果可信度不足。")
+        if self.java_project_issue_code:
+            issue = self.java_project_issue_code
+            if self.java_project_state:
+                issue += f"（{self.java_project_state}）"
+            hints.append(f"工程问题标记：{issue}")
+        elif self.java_project_state:
+            hints.append(f"工程状态：{self.java_project_state}")
+        if self.java_maven_profiles:
+            hints.append(f"当前 Maven profiles={list(self.java_maven_profiles)}")
+        if self.lsp_workspace_selection_reason and self.status in {"timeout_degraded", "project_import_failed"}:
+            hints.append(f"workspace_selection_reason={self.lsp_workspace_selection_reason}")
+        if self.recent_publish_uris and self.status == "timeout_degraded":
+            hints.append(f"recent_publish={self.recent_publish_uris}")
+        return "；".join(hints)
+
 
 @dataclass(frozen=True)
 class LspLanguageServerConfig:

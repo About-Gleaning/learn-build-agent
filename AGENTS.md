@@ -142,6 +142,7 @@
 
 ## 变更记录
 
+- 2026-04-01：修复 Python LSP 接入的 3 个问题：`PyLspServerAdapter` 现在只会在传入的 `workspace_root` 边界内向上搜索 `pyproject.toml` / `setup.py` / `.git` 等标记，避免把 workspace root 抬升到当前工作区之外；Python LSP 的运行态目录改为复用基类 `build_data_dir()`，统一落到 `workspace.workspace_home` / `MY_AGENT_HOME` 体系下；同时将 `python-lsp-server` 固定加入 `requirements.txt` 与 `pyproject.toml`，保证默认启用 Python LSP 时标准安装流程开箱可用。
 - 2026-03-30：Java LSP 新增 `project_runtime.json -> lsp.languages.java.maven_local_repository`，用于显式对齐 IDE 使用的非默认 Maven 本地仓库；`JdtlsServerAdapter` 现在会把该路径写入运行态 `settings.xml` 的 `<localRepository>`，并将其纳入 `server_key` / `data_dir` 隔离维度，同时在 metadata、文件工具输出与 `tool.lsp_result` 日志中新增 `java_maven_local_repository` 字段，避免 `jdtls` 回落到 `~/.m2` 后解析不到私有依赖。
 - 2026-03-30：修复 Java LSP 运行态缓存隔离粒度；`LspServerAdapter.build_data_dir()` 不再仅按 `workspace_root` 生成目录，而是改为按 `server_key`（包含 `adapter_mode`、`maven_profiles` 等关键维度）做哈希，避免同一 Maven 工程在不同 profile/模式下复用旧的 Eclipse workspace 缓存；同时新增 `lsp_data_dir` 透传到 metadata、文件工具输出与 `tool.lsp_result` 日志，便于直接确认本次 `jdtls` 是否落到了新的隔离目录。
 - 2026-03-30：增强 Java LSP 对 `Java Model Exception (code 969)` 的工程态失败识别；`manager.py` 现在会把“当前源码包未进入 Java Model / 多模块 Maven 仅部分导入成功”场景直接收口为 `project_import_failed`，并新增 `java_project_issue_code`、`java_project_state` 透传到 metadata、文件工具输出与 `tool.lsp_result` 日志，避免继续把这类场景误判为当前文件仅有少量 warning。

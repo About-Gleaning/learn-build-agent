@@ -8,7 +8,7 @@ from agent.lsp.filters import filter_diagnostics
 from agent.lsp.types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspRange
 
 
-def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True) -> LspSettings:
+def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True, python_enabled: bool = True) -> LspSettings:
     return LspSettings(
         enabled=enabled,
         ide_enabled=False,
@@ -34,10 +34,10 @@ def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True) -> L
                 maven_local_repository="",
             ),
             "python": LspLanguageSettings(
-                enabled=False,
-                command=(),
+                enabled=python_enabled,
+                command=("pylsp",),
                 file_extensions=(".py",),
-                workspace_markers=("pyproject.toml",),
+                workspace_markers=("pyproject.toml", "setup.py", "requirements.txt", "setup.cfg"),
                 init_options={},
                 maven_profiles=(),
                 maven_local_repository="",
@@ -326,3 +326,43 @@ def test_filter_diagnostics_should_keep_wait_metadata():
     assert result.diagnostics_settled is True
     assert result.lsp_workspace_root == "/tmp/project"
     assert result.lsp_workspace_selection_reason == "maven_aggregator_root"
+
+
+def test_lsp_client_should_route_python_file_to_manager(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def collect_diagnostics(self, adapter, *, file_path, content):
+            captured["language"] = adapter.language
+            captured["server_name"] = adapter.server_name
+            captured["file_path"] = file_path
+            captured["content"] = content
+            return LspDiagnosticsResult(
+                status="completed",
+                diagnostics=(),
+                diagnostics_total=0,
+                lsp_language="python",
+                lsp_server="pylsp",
+            )
+
+    monkeypatch.setattr("agent.lsp.client.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.client.get_lsp_manager", lambda: FakeManager())
+
+    target = tmp_path / "foo.py"
+    result = LspClient().collect_diagnostics(file_path=target, content="def foo(): pass")
+
+    assert result.status == "completed"
+    assert captured["language"] == "python"
+    assert captured["server_name"] == "pylsp"
+    assert captured["file_path"] == target
+    assert result.lsp_language == "python"
+    assert result.lsp_server == "pylsp"
+
+
+def test_lsp_client_should_return_not_enabled_for_python_when_python_disabled(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.lsp.client.get_lsp_settings", lambda: _build_lsp_settings(python_enabled=False))
+
+    result = LspClient().collect_diagnostics(file_path=tmp_path / "foo.py", content="def foo(): pass")
+
+    assert result.status == "not_enabled"
+    assert result.diagnostics == ()
