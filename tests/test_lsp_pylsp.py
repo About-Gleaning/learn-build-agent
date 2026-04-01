@@ -208,6 +208,20 @@ class TestPyLspServerAdapter:
         assert root == pkg_dir
         assert reason == "workspace_boundary_fallback"
 
+    def test_select_workspace_root_with_reason_should_fallback_to_boundary_when_file_outside_workspace(self, tmp_path):
+        adapter = PyLspServerAdapter()
+        workspace_root = tmp_path / "workspace"
+        external_root = tmp_path / "external"
+        external_root.mkdir()
+        workspace_root.mkdir()
+        (external_root / "pyproject.toml").write_text("[project]\nname='external'")
+        file_path = external_root / "skills" / "tool.py"
+
+        root, reason = adapter.select_workspace_root_with_reason(file_path, workspace_root)
+
+        assert root == workspace_root
+        assert reason == "workspace_boundary_fallback"
+
     def test_diagnostics_settle_ms_should_return_zero(self):
         adapter = PyLspServerAdapter()
 

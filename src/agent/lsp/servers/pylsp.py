@@ -145,8 +145,8 @@ class PyLspServerAdapter(LspServerAdapter):
             if (parent / ".git").exists():
                 return parent, "found_git_root"
 
-        # 边界内未命中任何 marker 时，继续使用当前文件目录，避免抬升到工作区外。
-        return current, "workspace_boundary_fallback"
+        # fallback 必须服从 boundary 裁剪后的搜索范围，避免把 pylsp 根目录抬到工作区外。
+        return search_roots[0], "workspace_boundary_fallback"
 
     def diagnostics_settle_ms(self) -> int:
         """Return the milliseconds to wait for diagnostics to settle.

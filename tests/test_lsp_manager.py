@@ -116,6 +116,39 @@ class _NotifyingInitializeEndpoint(_FakeEndpoint):
         return {}
 
 
+class _EarlyEventInitializeEndpoint(_FakeEndpoint):
+    def __init__(self, process, *, notification_handler):
+        super().__init__(process, notification_handler=notification_handler)
+        self._uri = ""
+
+    def request(self, method, params, *, timeout_ms):
+        self.requests.append((method, params, timeout_ms))
+        if method == "initialize":
+            workspace_folders = params.get("workspaceFolders") or []
+            if workspace_folders:
+                self._uri = str(workspace_folders[0].get("uri", ""))
+            target_uri = f"{self._uri}/Foo.java" if self._uri else "file:///tmp/Foo.java"
+            self.notification_handler("language/status", {"type": "Starting", "message": "Init..."})
+            self.notification_handler("window/logMessage", {"type": 3, "message": "Booting workspace"})
+            self.notification_handler(
+                "textDocument/publishDiagnostics",
+                {
+                    "uri": target_uri,
+                    "diagnostics": [
+                        {
+                            "severity": 2,
+                            "message": "early warning",
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 1},
+                            },
+                        }
+                    ],
+                },
+            )
+        return {}
+
+
 class _BlockingInitializeEndpoint(_FakeEndpoint):
     wait_event = threading.Event()
     created = []
@@ -340,6 +373,41 @@ def test_lsp_manager_should_not_deadlock_when_initialize_emits_notification(monk
     assert not thread.is_alive()
     assert "error" not in error_holder
     assert result_holder["server"].status.server_name == "jdtls"
+
+
+def test_lsp_manager_should_preserve_initialize_notifications_before_server_registration(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    clear_document_store()
+    monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._resolve_executable",
+        lambda self, executable, launch_env: "/opt/homebrew/bin/jdtls",
+    )
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._detect_java_major_version",
+        lambda self, java_command, launch_env: 21,
+    )
+    monkeypatch.setattr("agent.lsp.manager.subprocess.Popen", lambda *args, **kwargs: _FakeProcess())
+    monkeypatch.setattr("agent.lsp.manager.JsonRpcEndpoint", _EarlyEventInitializeEndpoint)
+
+    adapter = JdtlsServerAdapter()
+    manager = LspManager()
+    file_path = tmp_path / "Foo.java"
+    file_path.write_text("class Foo {}", encoding="utf-8")
+
+    server = manager.get_or_start(adapter, file_path=file_path)
+    published = server.get_published(file_path.resolve().as_uri())
+
+    assert len(server.status_events) == 1
+    assert server.status_events[0].message == "Init..."
+    assert len(server.log_events) == 1
+    assert server.log_events[0].message == "Booting workspace"
+    assert len(server.publish_events) == 1
+    assert server.publish_events[0].uri == file_path.resolve().as_uri()
+    assert published.sequence == 1
+    assert len(published.diagnostics) == 1
+    assert published.diagnostics[0].message == "early warning"
 
 
 def test_lsp_manager_should_share_single_startup_for_same_workspace(monkeypatch, tmp_path):

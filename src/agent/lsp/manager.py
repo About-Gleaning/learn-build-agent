@@ -640,6 +640,8 @@ class LspManager:
                 endpoint=JsonRpcEndpoint(process, notification_handler=lambda method, params: self._handle_message(server_key, method, params)),
                 process=process,
             )
+            with pending_start.condition:
+                pending_start.server = server
             logger.info(
                 "LSP 开始启动并等待 initialize: server_key=%s workspace_root=%s pid=%s",
                 server_key,
@@ -676,6 +678,7 @@ class LspManager:
             with self._lock:
                 self._starting_servers.pop(server_key, None)
             with pending_start.condition:
+                pending_start.server = None
                 pending_start.error = exc
                 pending_start.completed = True
                 pending_start.condition.notify_all()
@@ -753,6 +756,9 @@ class LspManager:
     def _handle_message(self, server_key: str, method: str, params: Any) -> None:
         with self._lock:
             server = self._servers.get(server_key)
+            if server is None:
+                pending_start = self._starting_servers.get(server_key)
+                server = None if pending_start is None else pending_start.server
         if server is None:
             return
 
