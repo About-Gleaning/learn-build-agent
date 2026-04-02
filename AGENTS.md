@@ -48,6 +48,9 @@
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 停止当前会话；运行时必须按 `session_id` 管理停止标记并统一以 `interrupted/cancelled` 收口。
+- `my-agent web` 支持按工作区并行启动多套实例；端口冲突时必须自动分配空闲端口，并把实际前后端地址写入当前工作区的 `web-dev/<workspace_id>/state.json`。
+- `my-agent web prune` 必须扫描 `~/.my-agent/workspaces/web-dev/` 下全部工作区状态文件，只清理 `degraded/stale` 异常残留，保留其他工作区健康实例，并输出逐项处理结果。
+- Web 前端必须校验后端返回的 `workspace_root` 是否与当前实例预期工作区一致；若不一致，必须阻断继续聊天，避免误连旧 backend。
 - Java LSP 的 Maven profile 仅支持按当前文件路径和 Maven `pom.xml` 自动探测；探测不唯一时直接报错，不再支持手工配置覆盖。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 时间线必须按 `session` 维度累计展示，禁止在新一轮提交时覆盖上一轮执行轨迹。
@@ -58,8 +61,9 @@
 ## 常用命令
 
 - `pip install -e .`：安装 `my-agent` 命令。
-- `my-agent`：在当前目录启动 CLI。
-- `my-agent web --host 127.0.0.1 --port 8000`：在当前目录启动 Web 前后端。
+- `my-agent`：在当前目录启动 CLI；不带子命令时会直接进入持续对话模式。
+- `my-agent help`：输出常用命令、核心参数与典型示例，优先用它快速确认 CLI 用法。
+- `my-agent web --host 127.0.0.1 --port 8000`：在当前目录启动 Web 前后端；后端从 `--port` 开始自动选择空闲端口，前端默认从 `5173` 开始自动选择空闲端口。
 - `python3 src/main.py`：兼容 CLI 入口。
 - `pytest -q`：执行测试。
 - `PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`：语法检查。

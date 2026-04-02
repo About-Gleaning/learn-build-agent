@@ -67,6 +67,16 @@ EXA_API_KEY=
 my-agent
 ```
 
+如果你记不清命令，可以先看：
+
+```bash
+my-agent help
+```
+
+说明：
+
+- 不带子命令时，`my-agent` 会直接进入持续对话模式
+
 常见参数：
 
 ```bash
@@ -97,10 +107,11 @@ pnpm install
 my-agent web --host 127.0.0.1 --port 8000
 ```
 
-默认会同时启动：
+默认会同时启动当前工作区专属的一组前后端实例：
 
-- 后端：`http://127.0.0.1:8000`
-- 前端：`http://127.0.0.1:5173`
+- 后端默认从 `8000` 开始自动探测空闲端口
+- 前端默认从 `5173` 开始自动探测空闲端口
+- 启动成功后会输出当前实例的实际访问地址
 
 如需在控制台打印前后端启动和停止日志：
 
@@ -122,6 +133,9 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 - `my-agent` 与 `my-agent web` 默认使用启动命令时的当前目录作为工作区
 - 可通过 `--workdir /path/to/project` 显式指定工作区
 - 当前实现不会自动上跳到 Git 根目录
+- `my-agent web` 支持在不同工作区并行启动；每个工作区会自动选择自己的前后端端口
+- `my-agent web status` / `my-agent web stop` 只作用于当前工作区对应的 Web 实例
+- `my-agent web prune` 会扫描 `~/.my-agent/workspaces/web-dev/` 下全部工作区状态，并清理异常残留或失效实例
 
 ### 会话
 
@@ -139,6 +153,7 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 - `~/.my-agent/workspaces/todo/`：待办数据
 - `~/.my-agent/workspaces/plan/`：plan 占位文件
 - `~/.my-agent/workspaces/tool-output/`：长工具输出
+- `~/.my-agent/workspaces/web-dev/<workspace_id>/`：当前工作区的 Web 状态文件与前后端日志
 - `~/.my-agent/logs/`：运行日志
 
 ## 配置说明
@@ -270,14 +285,23 @@ docs/
 ```bash
 pip install -e .
 my-agent
+my-agent help
 my-agent web --host 127.0.0.1 --port 8000
 pytest -q
 ```
+
+Web 说明：
+
+- `--port` 作为后端端口的起始候选值；若被占用，会自动尝试后续空闲端口
+- 前端端口默认从 `5173` 开始自动探测空闲端口
+- 控制台输出与 `my-agent web status` 会展示当前工作区实例的实际前后端地址
+- `my-agent web prune` 会保留健康运行的其他工作区实例，只清理 `degraded/stale` 残留，并输出每个实例的处理结果
 
 常见失败场景：
 
 - `my-agent web` 报错缺少 `pnpm`：先安装 `pnpm`
 - `my-agent web` 报错缺少 `frontend/node_modules`：先在 `frontend/` 下执行 `pnpm install`
+- 页面命中了旧 backend：先执行 `my-agent web prune` 清理跨工作区异常残留；若目标工作区实例仍健康运行，再切到对应工作区执行 `my-agent web stop`
 - 模型调用失败：检查对应 provider 的 API Key 是否已配置
 - `websearch` 不可用：检查 `EXA_API_KEY`
 

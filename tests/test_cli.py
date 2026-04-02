@@ -1,6 +1,24 @@
 from agent import cli as cli_module
 
 
+def test_main_should_print_help_and_skip_workspace_configuration(monkeypatch, capsys):
+    called = {"configured": False}
+
+    monkeypatch.setattr(
+        cli_module,
+        "configure_workspace",
+        lambda *args, **kwargs: called.update({"configured": True}),
+    )
+
+    cli_module.main(["help"])
+
+    output = capsys.readouterr().out
+    assert called == {"configured": False}
+    assert "my-agent 命令总览" in output
+    assert "my-agent web prune" in output
+    assert "--workdir PATH" in output
+
+
 def test_main_should_generate_random_session_id_when_session_not_provided(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
 
@@ -88,3 +106,14 @@ def test_main_should_route_web_stop(monkeypatch, tmp_path):
     cli_module.main(["--workdir", str(tmp_path), "web", "stop"])
 
     assert captured == {"stop": True}
+
+
+def test_main_should_route_web_prune(monkeypatch, tmp_path):
+    captured: dict[str, bool] = {}
+
+    monkeypatch.setattr(cli_module, "configure_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_module, "run_web_prune", lambda: captured.update({"prune": True}))
+
+    cli_module.main(["--workdir", str(tmp_path), "web", "prune"])
+
+    assert captured == {"prune": True}

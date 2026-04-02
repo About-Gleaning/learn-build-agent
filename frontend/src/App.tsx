@@ -135,6 +135,10 @@ type RuntimeOptionsResp = {
     models: string[];
     api_mode: "responses" | "chat_completions";
   }>;
+  workspace_root: string;
+  workspace_name: string;
+  has_agents_md: boolean;
+  launch_mode: string;
 };
 
 type ProviderModelOption = {
@@ -280,6 +284,7 @@ function resolveApiBase(): string {
 const API_BASE = resolveApiBase();
 const AUTO_SCROLL_THRESHOLD = 56;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const EXPECTED_WORKSPACE_ROOT = (import.meta.env.VITE_EXPECTED_WORKSPACE_ROOT as string | undefined)?.trim() || "";
 
 function buildId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -1758,9 +1763,24 @@ export function App() {
       ? latestAssistantMessage
       : null;
   const activeQuestion = latestPendingQuestionMessage?.question || null;
+  const workspaceMismatchMessage = useMemo(() => {
+    const actualWorkspaceRoot = runtimeOptions?.workspace_root?.trim() || "";
+    if (!EXPECTED_WORKSPACE_ROOT || !actualWorkspaceRoot || EXPECTED_WORKSPACE_ROOT === actualWorkspaceRoot) {
+      return "";
+    }
+    return `当前前端预期连接工作区 ${EXPECTED_WORKSPACE_ROOT}，但后端返回的工作区是 ${actualWorkspaceRoot}。请先停止异常残留实例，再重新执行 my-agent web。`;
+  }, [runtimeOptions]);
+  const hasWorkspaceMismatch = Boolean(workspaceMismatchMessage);
   const canSubmit = useMemo(
-    () => input.trim().length > 0 && !activeQuestion && !isStreaming && !isApplyingModeSwitch && !isStopping && !isLoadingSession,
-    [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping, isLoadingSession],
+    () =>
+      input.trim().length > 0 &&
+      !activeQuestion &&
+      !isStreaming &&
+      !isApplyingModeSwitch &&
+      !isStopping &&
+      !isLoadingSession &&
+      !hasWorkspaceMismatch,
+    [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping, isLoadingSession, hasWorkspaceMismatch],
   );
 
   const modeDefaults = useMemo(() => {
@@ -1905,7 +1925,7 @@ export function App() {
     questionOptionsRef.current?.focus();
   }, [activeQuestion, questionCursor, questionFocus]);
 
-  const isSessionInteractionLocked = isRuntimeBusy || isLoadingSession;
+  const isSessionInteractionLocked = isRuntimeBusy || isLoadingSession || hasWorkspaceMismatch;
 
   const resetTransientUiState = () => {
     setError("");
@@ -2981,6 +3001,13 @@ export function App() {
                   {isLoadingSession ? "加载中..." : "加载会话"}
                 </button>
               </div>
+            </div>
+          ) : null}
+
+          {workspaceMismatchMessage ? (
+            <div className="terminal-alert" role="alert">
+              <strong>[workspace]</strong>
+              <span>{workspaceMismatchMessage}</span>
             </div>
           ) : null}
 

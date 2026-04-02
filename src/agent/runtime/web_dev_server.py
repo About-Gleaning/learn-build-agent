@@ -20,6 +20,7 @@ LOOPBACK_HOST = "127.0.0.1"
 STARTUP_TIMEOUT_SECONDS = 15.0
 PORT_CHECK_INTERVAL_SECONDS = 0.2
 SHUTDOWN_TIMEOUT_SECONDS = 5.0
+PORT_DISCOVERY_MAX_ATTEMPTS = 50
 STATE_FILENAME = "state.json"
 BACKEND_LOG_FILENAME = "backend.log"
 FRONTEND_LOG_FILENAME = "frontend.log"
@@ -56,9 +57,28 @@ class WebStackState:
     started_at: float
     status: str
     frontend_bind_host: str = FRONTEND_HOST
+    frontend_port: int = FRONTEND_PORT
     frontend_local_url: str = ""
     frontend_network_url: str = ""
     share_frontend: bool = False
+
+
+@dataclass(frozen=True)
+class WebStackInspection:
+    state_path: Path
+    state: WebStackState
+    status: str
+    backend_alive: bool
+    frontend_alive: bool
+    backend_ready: bool
+    frontend_ready: bool
+
+
+@dataclass(frozen=True)
+class WebStackPruneResult:
+    inspection: WebStackInspection
+    action: str
+    error: str = ""
 
 
 def resolve_project_root() -> Path:
@@ -92,6 +112,27 @@ def create_service_endpoint(name: str, host: str, port: int) -> ServiceEndpoint:
     return ServiceEndpoint(name=name, host=connect_host, port=port)
 
 
+def find_available_port(host: str, preferred_port: int, *, attempts: int = PORT_DISCOVERY_MAX_ATTEMPTS) -> int:
+    normalized_port = int(preferred_port)
+    if normalized_port <= 0:
+        raise WebStackError(f"端口必须是正整数：{preferred_port}")
+
+    bind_host = "0.0.0.0" if host in {"", "::"} else host
+    for offset in range(attempts):
+        candidate = normalized_port + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((bind_host, candidate))
+            except OSError:
+                continue
+        return candidate
+
+    raise WebStackError(
+        f"未能从端口 {normalized_port} 开始找到可用端口，已尝试 {attempts} 个候选端口。"
+    )
+
+
 def get_web_dev_runtime_dir() -> Path:
     workspace = get_workspace()
     return (workspace.web_dev_root / workspace.workspace_id).resolve()
@@ -99,6 +140,13 @@ def get_web_dev_runtime_dir() -> Path:
 
 def get_web_dev_state_path() -> Path:
     return (get_web_dev_runtime_dir() / STATE_FILENAME).resolve()
+
+
+def iter_web_dev_state_paths() -> list[Path]:
+    web_dev_root = get_workspace().web_dev_root
+    if not web_dev_root.is_dir():
+        return []
+    return sorted(path.resolve() for path in web_dev_root.glob(f"*/{STATE_FILENAME}") if path.is_file())
 
 
 def _build_runtime_file_path(file_name: str) -> Path:
@@ -166,6 +214,7 @@ def start_frontend_dev_server(
     host: str,
     port: int,
     backend_url: str,
+    workspace_root: Path,
     log_path: Path,
 ) -> subprocess.Popen[bytes]:
     command = [
@@ -180,7 +229,10 @@ def start_frontend_dev_server(
         command,
         cwd=frontend_dir,
         log_path=log_path,
-        env={"MY_AGENT_VITE_BACKEND_URL": backend_url},
+        env={
+            "MY_AGENT_VITE_BACKEND_URL": backend_url,
+            "VITE_EXPECTED_WORKSPACE_ROOT": str(workspace_root.resolve()),
+        },
     )
 
 
@@ -277,18 +329,32 @@ def _write_state(state: WebStackState) -> None:
     state_path.write_text(json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _remove_state_file() -> None:
-    state_path = get_web_dev_state_path()
+def _remove_state_file(state_path: Path | None = None) -> None:
+    state_path = get_web_dev_state_path() if state_path is None else state_path.resolve()
     if state_path.exists():
         state_path.unlink()
 
 
-def _load_state() -> WebStackState | None:
-    state_path = get_web_dev_state_path()
+def _load_state_from_path(state_path: Path) -> WebStackState | None:
+    state_path = state_path.resolve()
     if not state_path.is_file():
         return None
     payload = json.loads(state_path.read_text(encoding="utf-8"))
+    if "frontend_port" not in payload:
+        payload["frontend_port"] = FRONTEND_PORT
+    if "frontend_bind_host" not in payload:
+        payload["frontend_bind_host"] = FRONTEND_HOST
+    if "frontend_local_url" not in payload:
+        payload["frontend_local_url"] = payload.get("frontend_url", "")
+    if "frontend_network_url" not in payload:
+        payload["frontend_network_url"] = ""
+    if "share_frontend" not in payload:
+        payload["share_frontend"] = False
     return WebStackState(**payload)
+
+
+def _load_state() -> WebStackState | None:
+    return _load_state_from_path(get_web_dev_state_path())
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -331,24 +397,106 @@ def _stop_pid(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+def inspect_web_stack_state(state: WebStackState, *, state_path: Path | None = None) -> WebStackInspection:
+    backend_endpoint = create_service_endpoint("后端服务", state.host, state.port)
+    frontend_endpoint = create_service_endpoint("前端服务", state.frontend_bind_host, state.frontend_port)
+    backend_alive = _is_process_alive(state.backend_pid)
+    frontend_alive = _is_process_alive(state.frontend_pid)
+    backend_ready = is_tcp_port_open(backend_endpoint.host, state.port)
+    frontend_ready = is_tcp_port_open(frontend_endpoint.host, state.frontend_port)
+    if backend_alive and frontend_alive and backend_ready and frontend_ready:
+        status = "running"
+    elif backend_alive or frontend_alive or backend_ready or frontend_ready:
+        status = "degraded"
+    else:
+        status = "stale"
+    resolved_state_path = get_web_dev_state_path() if state_path is None else state_path.resolve()
+    return WebStackInspection(
+        state_path=resolved_state_path,
+        state=state,
+        status=status,
+        backend_alive=backend_alive,
+        frontend_alive=frontend_alive,
+        backend_ready=backend_ready,
+        frontend_ready=frontend_ready,
+    )
+
+
+def inspect_all_web_dev_stacks() -> list[WebStackInspection]:
+    inspections: list[WebStackInspection] = []
+    for state_path in iter_web_dev_state_paths():
+        state = _load_state_from_path(state_path)
+        if state is None:
+            continue
+        inspections.append(inspect_web_stack_state(state, state_path=state_path))
+    return inspections
+
+
+def _format_stack_health(inspection: WebStackInspection) -> str:
+    flags = [
+        f"backend_pid={'up' if inspection.backend_alive else 'down'}",
+        f"backend_port={'ready' if inspection.backend_ready else 'closed'}",
+        f"frontend_pid={'up' if inspection.frontend_alive else 'down'}",
+        f"frontend_port={'ready' if inspection.frontend_ready else 'closed'}",
+    ]
+    return ", ".join(flags)
+
+
+def format_web_stack_prune_report(results: list[WebStackPruneResult]) -> str:
+    if not results:
+        return "未发现任何 Web 开发栈状态文件。"
+
+    action_label = {
+        "removed": "已清理",
+        "kept": "保留",
+        "failed": "清理失败",
+    }
+    lines: list[str] = []
+    removed_count = sum(1 for item in results if item.action == "removed")
+    kept_count = sum(1 for item in results if item.action == "kept")
+    failed_count = sum(1 for item in results if item.action == "failed")
+    lines.append(
+        f"扫描完成：共 {len(results)} 个实例，已清理 {removed_count} 个，保留 {kept_count} 个，失败 {failed_count} 个。"
+    )
+    for item in results:
+        inspection = item.inspection
+        lines.extend(
+            [
+                f"- {action_label.get(item.action, item.action)} | {inspection.status} | 工作区: {inspection.state.workspace_root}",
+                f"  状态文件: {inspection.state_path}",
+                f"  后端: {inspection.state.backend_url} (PID {inspection.state.backend_pid})",
+                f"  前端: {(inspection.state.frontend_local_url or inspection.state.frontend_url)} (PID {inspection.state.frontend_pid})",
+                f"  健康检查: {_format_stack_health(inspection)}",
+            ]
+        )
+        if item.error:
+            lines.append(f"  错误: {item.error}")
+    return "\n".join(lines)
+
+
+def prune_web_dev_stacks() -> list[WebStackPruneResult]:
+    results: list[WebStackPruneResult] = []
+    for inspection in inspect_all_web_dev_stacks():
+        if inspection.status == "running":
+            results.append(WebStackPruneResult(inspection=inspection, action="kept"))
+            continue
+        try:
+            _stop_pid(inspection.state.frontend_pid)
+            _stop_pid(inspection.state.backend_pid)
+            _remove_state_file(inspection.state_path)
+        except OSError as exc:
+            results.append(WebStackPruneResult(inspection=inspection, action="failed", error=str(exc)))
+            continue
+        results.append(WebStackPruneResult(inspection=inspection, action="removed"))
+    return results
+
+
 def get_web_stack_status() -> tuple[str, WebStackState | None]:
     state = _load_state()
     if state is None:
         return "stopped", None
-
-    backend_alive = _is_process_alive(state.backend_pid)
-    frontend_alive = _is_process_alive(state.frontend_pid)
-    backend_ready = is_tcp_port_open(create_service_endpoint("后端服务", state.host, state.port).host, state.port)
-    frontend_ready = is_tcp_port_open(
-        create_service_endpoint("前端服务", state.frontend_bind_host, FRONTEND_PORT).host,
-        FRONTEND_PORT,
-    )
-
-    if backend_alive and frontend_alive and backend_ready and frontend_ready:
-        return "running", state
-    if backend_alive or frontend_alive or backend_ready or frontend_ready:
-        return "degraded", state
-    return "stopped", state
+    inspection = inspect_web_stack_state(state)
+    return inspection.status, state
 
 
 def _ensure_not_running() -> None:
@@ -356,9 +504,9 @@ def _ensure_not_running() -> None:
     if status in {"running", "degraded"} and state is not None:
         raise WebStackError(
             "当前工作区已有 Web 开发栈实例正在运行或处于异常残留状态。"
-            "请先执行 `my-agent web status` 查看详情，必要时执行 `my-agent web stop` 清理。"
+            "请先执行 `my-agent web status` 查看详情；若怀疑存在跨工作区残留，执行 `my-agent web prune` 统一清理异常实例。"
         )
-    if status == "stopped":
+    if status in {"stopped", "stale"}:
         _remove_state_file()
 
 
@@ -384,11 +532,13 @@ def start_web_dev_stack(
     frontend_process: subprocess.Popen[bytes] | None = None
     backend_bind_host = LOOPBACK_HOST if share_frontend else host
     frontend_bind_host = host if share_frontend else FRONTEND_HOST
-    backend_endpoint = create_service_endpoint("后端服务", backend_bind_host, port)
-    frontend_endpoint = create_service_endpoint("前端服务", frontend_bind_host, FRONTEND_PORT)
+    backend_port = find_available_port(backend_bind_host, port)
+    frontend_port = find_available_port(frontend_bind_host, FRONTEND_PORT)
+    backend_endpoint = create_service_endpoint("后端服务", backend_bind_host, backend_port)
+    frontend_endpoint = create_service_endpoint("前端服务", frontend_bind_host, frontend_port)
     frontend_local_url, frontend_network_url = build_frontend_urls(
         frontend_bind_host=frontend_bind_host,
-        frontend_port=FRONTEND_PORT,
+        frontend_port=frontend_port,
         share_frontend=share_frontend,
     )
 
@@ -398,7 +548,7 @@ def start_web_dev_stack(
         backend_process = start_backend_dev_server(
             workspace_root=workspace_root,
             host=backend_bind_host,
-            port=port,
+            port=backend_port,
             log_path=backend_log_path,
         )
         wait_for_process_port(backend_process, backend_endpoint)
@@ -409,8 +559,9 @@ def start_web_dev_stack(
             frontend_dir=frontend_dir,
             pnpm_binary=pnpm_binary,
             host=frontend_bind_host,
-            port=FRONTEND_PORT,
+            port=frontend_port,
             backend_url=backend_endpoint.url,
+            workspace_root=workspace_root,
             log_path=frontend_log_path,
         )
         wait_for_process_port(frontend_process, frontend_endpoint)
@@ -419,7 +570,7 @@ def start_web_dev_stack(
         state = WebStackState(
             workspace_root=str(workspace_root),
             host=backend_bind_host,
-            port=port,
+            port=backend_port,
             backend_pid=backend_process.pid,
             frontend_pid=frontend_process.pid,
             backend_url=backend_endpoint.url,
@@ -429,6 +580,7 @@ def start_web_dev_stack(
             started_at=time.time(),
             status="running",
             frontend_bind_host=frontend_bind_host,
+            frontend_port=frontend_port,
             frontend_local_url=frontend_local_url,
             frontend_network_url=frontend_network_url,
             share_frontend=share_frontend,
@@ -456,6 +608,7 @@ def format_web_stack_status(status: str, state: WebStackState | None) -> str:
     status_label = {
         "running": "运行中",
         "degraded": "异常残留",
+        "stale": "失效残留",
         "stopped": "已停止",
     }.get(status, status)
     lines = [
@@ -463,6 +616,7 @@ def format_web_stack_status(status: str, state: WebStackState | None) -> str:
         f"工作区: {state.workspace_root}",
         f"后端监听地址: {state.host}:{state.port}",
         f"后端访问地址: {state.backend_url}",
+        f"前端监听地址: {state.frontend_bind_host}:{state.frontend_port}",
         f"前端本机访问地址: {state.frontend_local_url or state.frontend_url}",
     ]
     if state.frontend_network_url:
