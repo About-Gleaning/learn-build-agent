@@ -112,6 +112,7 @@ type ProgressEntry = {
   resultFull?: string;
   resultLineCount?: number;
   toolCallId?: string;
+  toolName?: string;
   meta: string[];
   isFinal?: boolean;
   isReasoning?: boolean;
@@ -447,6 +448,121 @@ function shouldEnableContentToggle(preview?: string, full?: string): boolean {
 
 function getToolContentToggleKey(messageId: string, entryId: string, blockType: "request" | "result"): string {
   return `${messageId}:${entryId}:${blockType}`;
+}
+
+// Todo 列表类型定义
+interface TodoItem {
+  id?: string;
+  text: string;
+  status?: "pending" | "in_progress" | "completed" | "cancelled";
+  priority?: "high" | "medium" | "low";
+}
+
+// Todo 列表渲染组件
+function TodoListRenderer({ content }: { content: string }) {
+  const [parsedTodos, setParsedTodos] = useState<TodoItem[]>([]);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    try {
+      const normalized = content.trim();
+      if (!normalized) {
+        setParsedTodos([]);
+        return;
+      }
+
+      const data = JSON.parse(normalized);
+      const todos = data.todo_list || data.todos || data;
+
+      if (Array.isArray(todos)) {
+        setParsedTodos(todos);
+      } else {
+        setError("无法解析 todo 列表数据");
+      }
+    } catch (e) {
+      setError("解析失败");
+    }
+  }, [content]);
+
+  if (error) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  if (parsedTodos.length === 0) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  const getStatusIcon = (status?: string) => {
+    switch (status) {
+      case "completed":
+        return "✓";
+      case "in_progress":
+        return "▶";
+      case "cancelled":
+        return "✗";
+      default:
+        return "○";
+    }
+  };
+
+  const getStatusClass = (status?: string) => {
+    switch (status) {
+      case "completed":
+        return "todo-status-completed";
+      case "in_progress":
+        return "todo-status-in-progress";
+      case "cancelled":
+        return "todo-status-cancelled";
+      default:
+        return "todo-status-pending";
+    }
+  };
+
+  const getPriorityClass = (priority?: string) => {
+    switch (priority) {
+      case "high":
+        return "todo-priority-high";
+      case "medium":
+        return "todo-priority-medium";
+      case "low":
+        return "todo-priority-low";
+      default:
+        return "todo-priority-medium";
+    }
+  };
+
+  const getPriorityLabel = (priority?: string) => {
+    switch (priority) {
+      case "high":
+        return "高";
+      case "medium":
+        return "中";
+      case "low":
+        return "低";
+      default:
+        return "中";
+    }
+  };
+
+  return (
+    <div className="todo-list-container">
+      {parsedTodos.map((todo, index) => (
+        <div key={todo.id || `todo-${index}`} className={`todo-item ${getStatusClass(todo.status)}`}>
+          <span className="todo-status-icon">{getStatusIcon(todo.status)}</span>
+          <span className="todo-text">{todo.text}</span>
+          {todo.priority && (
+            <span className={`todo-priority ${getPriorityClass(todo.priority)}`}>
+              {getPriorityLabel(todo.priority)}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function formatToolRequestContent(text?: string): string {
@@ -1423,6 +1539,7 @@ function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: str
     resultFull: part.kind === "tool_result" ? part.detail : undefined,
     resultLineCount: part.kind === "tool_result" ? countLogicalLines(part.detail) : 0,
     toolCallId: part.toolCallId,
+    toolName: part.toolName,
     meta: buildProgressMeta(item),
   };
 }
@@ -1501,6 +1618,7 @@ function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
       resultFull: item.kind === "tool_result" ? item.detail : undefined,
       resultLineCount: item.kind === "tool_result" ? countLogicalLines(item.detail) : 0,
       toolCallId: item.toolCallId,
+      toolName: item.toolName,
       meta: buildProgressMeta(item),
     });
   }
@@ -1603,7 +1721,11 @@ function renderAssistantTimeline(params: {
               >
                 <div className="assistant-timeline-entry-content">
                   <div className="assistant-timeline-entry-label">参数</div>
-                  <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{requestText}</pre>
+                  {entry.toolName === "todo_write" ? (
+                    <TodoListRenderer content={entry.requestFull || ""} />
+                  ) : (
+                    <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{requestText}</pre>
+                  )}
                 </div>
               </div>
             ) : null}
