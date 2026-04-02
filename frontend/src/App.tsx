@@ -1,3 +1,11 @@
+/**
+ * @file App.tsx
+ * @author codex
+ * @date 2026-04-02
+ * @description my-agent Web 前端主组件，提供 Agent 对话交互工作台。支持流式对话、会话管理、Agent 模式切换（build/plan）、
+ * 工具调用过程展示、时间线渲染、question 工具交互、停止会话等功能。作为前端核心入口组件，管理消息状态、运行时配置及 UI 交互。
+ */
+
 import { FormEvent, KeyboardEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -87,6 +95,7 @@ type QuestionItem = {
   header: string;
   options: QuestionOption[];
   multiple: boolean;
+  custom?: boolean;
 };
 
 type QuestionInfo = {
@@ -559,6 +568,81 @@ function TodoListRenderer({ content }: { content: string }) {
               {getPriorityLabel(todo.priority)}
             </span>
           )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Question 工具渲染组件
+function QuestionRenderer({ content }: { content: string }) {
+  const [parsedQuestions, setParsedQuestions] = useState<{ questions: QuestionItem[] } | null>(null);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    try {
+      const normalized = content.trim();
+      if (!normalized) {
+        setParsedQuestions(null);
+        return;
+      }
+
+      const data = JSON.parse(normalized);
+      const questions = data.questions || [];
+
+      if (Array.isArray(questions)) {
+        setParsedQuestions({ questions });
+      } else {
+        setError("无法解析 question 数据");
+      }
+    } catch (e) {
+      setError("解析失败");
+    }
+  }, [content]);
+
+  if (error) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  if (!parsedQuestions || parsedQuestions.questions.length === 0) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  return (
+    <div className="question-list-container">
+      {parsedQuestions.questions.map((question, index) => (
+        <div key={`question-${index}`} className="question-item">
+          <div className="question-header">
+            {question.header ? question.header : question.question}
+          </div>
+          {question.options && question.options.length > 0 ? (
+            <div className="question-options">
+              {question.options.map((option, optIndex) => (
+                <div key={`option-${optIndex}`} className="question-option">
+                  <span className="question-option-label">
+                    {question.multiple ? "□" : "○"} {option.label}
+                  </span>
+                  {option.description && (
+                    <div className="question-option-desc">
+                      {option.description}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="question-options">
+              <em>无选项</em>
+            </div>
+          )}
+          <div className="question-meta">
+            {question.multiple ? "[多选]" : "[单选]"}
+            {question.custom !== false && " · 支持自定义输入"}
+          </div>
         </div>
       ))}
     </div>
@@ -1723,6 +1807,8 @@ function renderAssistantTimeline(params: {
                   <div className="assistant-timeline-entry-label">参数</div>
                   {entry.toolName === "todo_write" ? (
                     <TodoListRenderer content={entry.requestFull || ""} />
+                  ) : entry.toolName === "question" ? (
+                    <QuestionRenderer content={entry.requestFull || ""} />
                   ) : (
                     <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{requestText}</pre>
                   )}

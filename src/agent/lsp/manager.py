@@ -846,7 +846,7 @@ class LspManager:
             opened = self._documents.open_document(
                 server.status.server_key,
                 file_path,
-                language_id=server.adapter.language_id,
+                language_id=server.adapter.get_language_id(file_path),
                 text=content,
             )
             server.endpoint.notify(

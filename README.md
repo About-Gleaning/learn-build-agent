@@ -21,6 +21,7 @@
 - 如需文件写入后的 LSP 诊断：
   - Python 诊断依赖 `python-lsp-server`
   - Java 诊断依赖 `jdtls` 和 JDK 21 兼容环境
+  - TypeScript / JavaScript 诊断依赖 `typescript-language-server`
   - 多模块 Maven 项目会按当前文件路径和 `pom.xml` 自动探测导入 profile；探测失败时会直接报错
 - 如需使用 `lsp` 查询工具：
   - 仍依赖对应语言的 LSP 服务
@@ -209,6 +210,12 @@ Java LSP 说明：
 - 运行时会根据当前 Java 文件路径与 Maven `pom.xml` 自动探测 profile
 - 自动探测无法唯一确认时，会保守返回导入失败提示，并要求调整项目结构或补充探测规则
 
+TypeScript / JavaScript LSP 说明：
+
+- 默认支持 `.ts`、`.tsx`、`.js`、`.jsx`
+- 默认通过 `typescript-language-server --stdio` 启动语言服务
+- 若本机未安装 `typescript-language-server`，LSP 工具与写后 diagnostics 会返回明确提示，但不会改变主流程成功语义
+
 ## 能力概览
 
 ### Agent 模式
@@ -231,7 +238,7 @@ Java LSP 说明：
 
 - `read_file` 仅支持绝对路径
 - `write_file` 与 `edit_file` 支持工作区内路径和 `skills` 目录路径
-- `lsp` 支持工作区内绝对路径或相对路径，适合定义、引用、hover、symbol、调用层级等只读查询
+- `lsp` 支持工作区内绝对路径或相对路径，适合 Java / Python / TypeScript / JavaScript 文件的定义、引用、hover、symbol、调用层级等只读查询
 - 覆盖写入和编辑已有文件前，需要先通过 `read_file` 读取同一文件
 - 文件工具默认受工作区边界限制
 

@@ -9,6 +9,7 @@ from .manager import clear_lsp_manager_state, get_lsp_manager
 from .servers.base import LspServerAdapter
 from .servers.jdtls import build_default_java_adapter
 from .servers.pylsp import build_default_python_adapter
+from .servers.typescript import build_default_typescript_adapter
 from .types import LspDiagnosticsResult, LspQueryResult, build_file_uri
 
 
@@ -17,6 +18,7 @@ class LspClient:
         self._adapters: tuple[LspServerAdapter, ...] = (
             build_default_java_adapter(),
             build_default_python_adapter(),
+            build_default_typescript_adapter(),
         )
 
     def collect_diagnostics(self, *, file_path: Path, content: str) -> LspDiagnosticsResult:
