@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..lsp import collect_file_diagnostics
 from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path
 from .file_edit_state import get_file_state, record_file_edit
@@ -220,9 +221,12 @@ def _count_line_changes(before: str, after: str) -> tuple[int, int]:
 
 def _build_success_result(file_path: Path, before: str, after: str) -> dict[str, Any]:
     additions, deletions = _count_line_changes(before, after)
+    diagnostics_result = collect_file_diagnostics(file_path=file_path, content=after)
+    output = f"编辑成功：{file_path}。"
+    output += diagnostics_result.build_llm_excerpt()
     return {
         "title": str(file_path),
-        "output": f"编辑成功：{file_path}。当前未启用 LSP diagnostics。",
+        "output": output,
         "metadata": {
             "status": "completed",
             "diff": _build_unified_diff(file_path, before, after),
@@ -233,8 +237,7 @@ def _build_success_result(file_path: Path, before: str, after: str) -> dict[str,
                 "additions": additions,
                 "deletions": deletions,
             },
-            "diagnostics": [],
-            "diagnostics_status": "not_enabled",
+            **diagnostics_result.to_metadata(),
         },
     }
 

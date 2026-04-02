@@ -894,6 +894,28 @@ def test_write_file_tool_schema_should_use_file_path_and_content():
     assert write_tool["function"]["parameters"]["required"] == ["filePath", "content"]
 
 
+def test_lsp_tool_schema_should_expose_operation_file_path_and_position():
+    tools = build_base_tools()
+    lsp_tool = next(tool for tool in tools if tool["function"]["name"] == "lsp")
+    properties = lsp_tool["function"]["parameters"]["properties"]
+
+    assert properties["operation"]["enum"] == [
+        "goToDefinition",
+        "findReferences",
+        "hover",
+        "documentSymbol",
+        "workspaceSymbol",
+        "goToImplementation",
+        "prepareCallHierarchy",
+        "incomingCalls",
+        "outgoingCalls",
+    ]
+    assert "filePath" in properties
+    assert "line" in properties
+    assert "character" in properties
+    assert lsp_tool["function"]["parameters"]["required"] == ["operation", "filePath", "line", "character"]
+
+
 def test_run_session_should_route_write_file_arguments(monkeypatch):
     handlers = session_module._build_tool_handlers(
         session_id="s_write_file_route",
@@ -972,6 +994,51 @@ def test_run_session_should_route_camel_case_edit_file_arguments(monkeypatch):
         "old_string": "old",
         "new_string": "new",
         "replace_all": True,
+    }
+
+
+def test_run_session_should_route_lsp_arguments(monkeypatch):
+    handlers = session_module._build_tool_handlers(
+        session_id="s_lsp_route",
+        get_mode=lambda: "build",
+        get_latest_model=lambda: "qwen-plus",
+        get_current_runtime=lambda: ResolvedLLMConfig(
+            agent="build",
+            provider="qwen",
+            vendor="qwen",
+            model="qwen3-coder-next",
+            api_mode="responses",
+            base_url="https://example.com",
+            api_key="test",
+            timeout_seconds=60,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_lsp(operation, file_path, line, character):
+        captured.update(
+            operation=operation,
+            file_path=file_path,
+            line=line,
+            character=character,
+        )
+        return {"output": "ok", "metadata": {"status": "completed"}}
+
+    monkeypatch.setattr(session_module, "run_lsp", fake_run_lsp)
+
+    result = handlers["lsp"](
+        operation="hover",
+        filePath="src/demo.py",
+        line=10,
+        character=8,
+    )
+
+    assert result["metadata"]["status"] == "completed"
+    assert captured == {
+        "operation": "hover",
+        "file_path": "src/demo.py",
+        "line": 10,
+        "character": 8,
     }
 
 
@@ -3185,6 +3252,13 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.logging.truncate_limit == 500
         assert settings.session_memory.trim_enabled is True
         assert settings.session_memory.max_messages == 24
+        assert settings.lsp.enabled is True
+        assert settings.lsp.languages["java"].enabled is True
+        assert settings.lsp.languages["java"].command == (
+            "/usr/bin/env",
+            "JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home",
+            "jdtls",
+        )
     finally:
         clear_runtime_settings_cache()
 
@@ -3353,6 +3427,105 @@ def test_get_project_runtime_settings_should_read_session_memory_config(tmp_path
         settings = get_project_runtime_settings()
         assert settings.session_memory.trim_enabled is False
         assert settings.session_memory.max_messages == 128
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_read_lsp_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "lsp": {
+            "enabled": true,
+            "server_idle_ttl_seconds": 123,
+            "request_timeout_ms": 4567,
+            "max_diagnostics": 9,
+            "max_chars": 1024,
+            "include_severity": ["error", "warning", "information"],
+            "strict_unavailable": true,
+            "languages": {
+              "java": {
+                "enabled": true,
+                "command": ["custom-jdtls"],
+                "maven_local_repository": "/custom/maven/repository",
+                "file_extensions": [".java"],
+                "workspace_markers": ["pom.xml"],
+                "init_options": {
+                  "bundles": []
+                }
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.lsp.enabled is True
+        assert settings.lsp.server_idle_ttl_seconds == 123
+        assert settings.lsp.request_timeout_ms == 4567
+        assert settings.lsp.max_diagnostics == 9
+        assert settings.lsp.max_chars == 1024
+        assert settings.lsp.include_severity == ("error", "warning", "information")
+        assert settings.lsp.strict_unavailable is True
+        assert settings.lsp.languages["java"].command == ("custom-jdtls",)
+        assert settings.lsp.languages["java"].maven_local_repository == "/custom/maven/repository"
+        assert settings.lsp.languages["java"].workspace_markers == ("pom.xml",)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_java_maven_profiles_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "lsp": {
+            "languages": {
+              "java": {
+                "maven_profiles": ["hna"]
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        with pytest.raises(ValueError, match="maven_profiles 已废弃"):
+            get_project_runtime_settings()
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_invalid_lsp_severity(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "lsp": {
+            "include_severity": ["fatal"]
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 lsp.include_severity 配置抛出异常")
+    except ValueError as exc:
+        assert "lsp.include_severity" in str(exc)
     finally:
         clear_runtime_settings_cache()
 

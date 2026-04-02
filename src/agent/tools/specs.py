@@ -26,6 +26,8 @@ EDIT_FILE_DESC_FILE = Path(__file__).with_name("edit_file.txt")
 EDIT_FILE_TOOL_DESCRIPTION = EDIT_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 WRITE_FILE_DESC_FILE = Path(__file__).with_name("write_file.txt")
 WRITE_FILE_TOOL_DESCRIPTION = WRITE_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
+LSP_DESC_FILE = Path(__file__).with_name("lsp.txt")
+LSP_TOOL_DESCRIPTION = LSP_DESC_FILE.read_text(encoding="utf-8").strip()
 QUESTION_DESC_FILE = Path(__file__).with_name("question.txt")
 QUESTION_TOOL_DESCRIPTION = QUESTION_DESC_FILE.read_text(encoding="utf-8").strip()
 LOAD_SKILL_DESC_FILE = Path(__file__).with_name("load_skill.txt")
@@ -235,6 +237,46 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                         "replaceAll": {"type": "boolean", "description": "是否替换 oldString 的所有出现位置（默认为 false）。"},
                     },
                     "required": ["filePath", "oldString", "newString"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "lsp",
+                "description": LSP_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": [
+                                "goToDefinition",
+                                "findReferences",
+                                "hover",
+                                "documentSymbol",
+                                "workspaceSymbol",
+                                "goToImplementation",
+                                "prepareCallHierarchy",
+                                "incomingCalls",
+                                "outgoingCalls",
+                            ],
+                            "description": "要执行的 LSP 操作",
+                        },
+                        "filePath": {
+                            "type": "string",
+                            "description": "文件的绝对路径或相对路径",
+                        },
+                        "line": {
+                            "type": "integer",
+                            "description": "行号（从1开始计数，如编辑器中所示）",
+                        },
+                        "character": {
+                            "type": "integer",
+                            "description": "字符偏移量（从1开始计数，如编辑器中所示）",
+                        },
+                    },
+                    "required": ["operation", "filePath", "line", "character"],
                 },
             },
         },

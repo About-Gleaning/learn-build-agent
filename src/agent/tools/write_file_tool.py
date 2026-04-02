@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..lsp import collect_file_diagnostics
 from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path, get_workspace
 from .file_edit_state import get_file_state, record_file_edit
@@ -28,17 +29,19 @@ def _build_write_title(target: Path) -> str:
     return str(target)
 
 
-def _build_success_result(target: Path, *, existed_before: bool) -> dict[str, Any]:
+def _build_success_result(target: Path, *, existed_before: bool, content: str) -> dict[str, Any]:
     title = _build_write_title(target)
+    diagnostics_result = collect_file_diagnostics(file_path=target, content=content)
+    output = f"写入成功：{title}。"
+    output += diagnostics_result.build_llm_excerpt()
     return {
         "title": title,
-        "output": f"写入成功：{title}。当前未启用 LSP diagnostics。",
+        "output": output,
         "metadata": {
             "status": "completed",
             "filepath": str(target),
             "exists": existed_before,
-            "diagnostics": [],
-            "diagnostics_status": "not_enabled",
+            **diagnostics_result.to_metadata(),
         },
     }
 
@@ -77,7 +80,7 @@ def run_write(file_path: str, content: str) -> dict[str, Any]:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         record_file_edit(target, mtime_ns=target.stat().st_mtime_ns)
-        return _build_success_result(target, existed_before=existed_before)
+        return _build_success_result(target, existed_before=existed_before, content=content)
     except ValueError as exc:
         message = str(exc)
         error_code = "write_path_forbidden" if "超出允许范围" in message else "write_failed"

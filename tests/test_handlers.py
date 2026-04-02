@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.lsp.types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspQueryResult, LspRange
 from agent.core.context import set_session_id
 from agent.tools.bash_tool import (
     DEFAULT_TIMEOUT,
@@ -26,6 +27,7 @@ from agent.tools.handlers import (
 )
 from agent.tools.question_tool import CUSTOM_OPTION_LABEL, run_question
 from agent.tools.read_file_tool import resolve_readable_file_path, run_read
+from agent.tools.lsp_tool import run_lsp
 from agent.tools.skill_tool import run_load_skill
 from agent.tools.todo_manager import TodoManager
 from agent.tools.write_file_tool import run_write
@@ -720,6 +722,101 @@ def test_run_read_should_allow_skills_file_under_runtime_home(tmp_path, monkeypa
     assert result["output"] == "skill reference"
 
 
+def test_run_lsp_should_resolve_relative_path_and_return_formatted_json(tmp_path, monkeypatch):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-relative")
+    target = tmp_path / "src" / "demo.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('hi')\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_query_lsp(*, operation, file_path, content, line, character):
+        captured.update(
+            operation=operation,
+            file_path=str(file_path),
+            content=content,
+            line=line,
+            character=character,
+        )
+        return LspQueryResult(
+            status="completed",
+            operation=operation,
+            result=[{"uri": file_path.as_uri()}],
+            lsp_language="python",
+            lsp_server="pylsp",
+        )
+
+    monkeypatch.setattr("agent.tools.lsp_tool.query_lsp", fake_query_lsp)
+
+    result = run_lsp("goToDefinition", "src/demo.py", 1, 1)
+
+    assert result["title"] == "goToDefinition src/demo.py:1:1"
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["result"] == [{"uri": target.as_uri()}]
+    assert '"uri": "' in result["output"]
+    assert captured == {
+        "operation": "goToDefinition",
+        "file_path": str(target),
+        "content": "print('hi')\n",
+        "line": 0,
+        "character": 0,
+    }
+
+
+def test_run_lsp_should_return_no_results_message(tmp_path, monkeypatch):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-empty")
+    target = tmp_path / "demo.py"
+    target.write_text("print('hi')", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "agent.tools.lsp_tool.query_lsp",
+        lambda **kwargs: LspQueryResult(status="completed", operation=kwargs["operation"], result=[]),
+    )
+
+    result = run_lsp("findReferences", str(target), 1, 1)
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "No results found for findReferences"
+
+
+def test_run_lsp_should_fail_for_out_of_range_position(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-position")
+    target = tmp_path / "demo.py"
+    target.write_text("print('hi')", encoding="utf-8")
+
+    result = run_lsp("hover", str(target), 3, 1)
+
+    assert result["title"] == "hover demo.py:3:1"
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "lsp_position_invalid"
+
+
+def test_run_lsp_should_fail_for_query_error_status(tmp_path, monkeypatch):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-failed")
+    target = tmp_path / "Foo.java"
+    target.write_text("class Foo {}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "agent.tools.lsp_tool.query_lsp",
+        lambda **kwargs: LspQueryResult(
+            status="operation_unsupported",
+            operation=kwargs["operation"],
+            lsp_error="当前 LSP 不支持 outgoingCalls",
+            lsp_language="java",
+            lsp_server="jdtls",
+        ),
+    )
+
+    result = run_lsp("outgoingCalls", str(target), 1, 1)
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "lsp_operation_unsupported"
+    assert "当前 LSP 不支持 outgoingCalls" in result["output"]
+
+
 def test_run_load_skill_should_return_structured_success(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
     configure_workspace(tmp_path / "workspace")
@@ -809,7 +906,7 @@ def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
     assert result["metadata"]["filepath"] == str((tmp_path / "notes.txt").resolve())
     assert result["metadata"]["exists"] is False
     assert result["metadata"]["diagnostics"] == []
-    assert result["metadata"]["diagnostics_status"] == "not_enabled"
+    assert result["metadata"]["diagnostics_status"] == "unsupported_language"
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
 
 
@@ -918,11 +1015,236 @@ def test_run_edit_should_succeed_after_read_and_return_diff(tmp_path):
 
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics"] == []
-    assert result["metadata"]["diagnostics_status"] == "not_enabled"
+    assert result["metadata"]["diagnostics_status"] == "unsupported_language"
     assert result["metadata"]["filediff"]["before"] == "hello\nworld\n"
     assert result["metadata"]["filediff"]["after"] == "hello\nagent\n"
     assert "+agent" in result["metadata"]["diff"]
     assert file_path.read_text(encoding="utf-8") == "hello\nagent\n"
+
+
+def test_run_write_should_append_lsp_errors_into_output(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    diagnostic = LspDiagnostic(
+        severity="error",
+        code="E001",
+        message="cannot find symbol",
+        source="jdtls",
+        range=LspRange(
+            start=LspPosition(line=11, character=7),
+            end=LspPosition(line=11, character=10),
+        ),
+    )
+    monkeypatch.setattr(
+        "agent.tools.write_file_tool.collect_file_diagnostics",
+        lambda **_: LspDiagnosticsResult(
+            status="completed",
+            diagnostics=(diagnostic,),
+            diagnostics_total=1,
+            diagnostics_summary="1 个error",
+            lsp_language="java",
+            lsp_server="jdtls",
+            output_excerpt=(
+                "\nLSP 检测到当前文件存在错误，请继续修复：\n"
+                f"<diagnostics file=\"{(tmp_path / 'Foo.java').resolve()}\">\n"
+                "ERROR [12:8] cannot find symbol\n"
+                "</diagnostics>"
+            ),
+        ),
+    )
+
+    result = run_write("Foo.java", "class Foo {}")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["diagnostics_status"] == "completed"
+    assert result["metadata"]["raw_diagnostics_total"] == 0
+    assert result["metadata"]["diagnostics_settled"] is False
+    assert "LSP 状态：completed" in result["output"]
+    assert "摘要：当前文件存在 1 个error，请继续修复当前文件。" in result["output"]
+    assert "LSP 检测到当前文件存在错误" in result["output"]
+    assert "ERROR [12:8] cannot find symbol" in result["output"]
+
+
+def test_lsp_result_metadata_should_include_wait_fields():
+    diagnostic = LspDiagnostic(
+        severity="error",
+        code="E001",
+        message="cannot find symbol",
+        source="jdtls",
+        range=LspRange(
+            start=LspPosition(line=1, character=1),
+            end=LspPosition(line=1, character=2),
+        ),
+    )
+
+    metadata = LspDiagnosticsResult(
+        status="completed",
+        diagnostics=(diagnostic,),
+        diagnostics_total=1,
+        raw_diagnostics_total=3,
+        diagnostics_sequence=2,
+        diagnostics_previous_sequence=1,
+        diagnostics_latest_sequence=2,
+        diagnostics_wait_rounds=1,
+        diagnostics_wait_ms=830,
+        diagnostics_settled=True,
+        lsp_workspace_root="/tmp/project",
+        lsp_data_dir="/tmp/.my-agent/lsp/java/abc123",
+        lsp_workspace_selection_reason="maven_aggregator_root",
+        lsp_server_key="java:/tmp/project:direct_lsp",
+        lsp_snapshot_uri="file:///tmp/project/src/Foo.java",
+        recent_status_summary="Starting:Init...",
+        recent_log_summary="1:build running",
+        recent_publish_uris="src/Foo.java#2(3)",
+        received_other_file_diagnostics=False,
+    ).to_metadata()
+
+    assert metadata["raw_diagnostics_total"] == 3
+    assert metadata["diagnostics_sequence"] == 2
+    assert metadata["diagnostics_previous_sequence"] == 1
+    assert metadata["diagnostics_latest_sequence"] == 2
+    assert metadata["diagnostics_wait_rounds"] == 1
+    assert metadata["diagnostics_wait_ms"] == 830
+    assert metadata["diagnostics_settled"] is True
+    assert metadata["lsp_workspace_root"] == "/tmp/project"
+    assert metadata["lsp_data_dir"] == "/tmp/.my-agent/lsp/java/abc123"
+    assert metadata["lsp_workspace_selection_reason"] == "maven_aggregator_root"
+    assert metadata["recent_publish_uris"] == "src/Foo.java#2(3)"
+
+
+def test_lsp_result_metadata_should_include_debug_observation_fields():
+    metadata = LspDiagnosticsResult(
+        status="timeout_degraded",
+        java_debug_observation_enabled=True,
+        debug_status_events="1:Starting:Refreshing '/instruction-service/src/main/java'.",
+        debug_log_events="2:1:Error in Java Model (code 969)",
+        debug_publish_events="3:src/Foo.java#1(0)",
+        debug_issue_probe="contains_code_969=True",
+    ).to_metadata()
+
+    assert metadata["java_debug_observation_enabled"] is True
+    assert "Refreshing" in metadata["debug_status_events"]
+    assert "code 969" in metadata["debug_log_events"]
+    assert metadata["debug_publish_events"] == "3:src/Foo.java#1(0)"
+    assert metadata["debug_issue_probe"] == "contains_code_969=True"
+
+
+def test_run_edit_should_mark_server_unavailable_but_keep_success(monkeypatch, tmp_path):
+    file_path = tmp_path / "Foo.java"
+    file_path.write_text("class Foo {}", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+    monkeypatch.setattr(
+        "agent.tools.edit_file_tool.collect_file_diagnostics",
+        lambda **_: LspDiagnosticsResult(
+            status="server_unavailable",
+            lsp_language="java",
+            lsp_server="jdtls",
+            lsp_error="jdtls 未安装",
+        ),
+    )
+
+    result = run_edit("Foo.java", "Foo", "Bar")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["diagnostics_status"] == "server_unavailable"
+    assert result["metadata"]["lsp_error"] == "jdtls 未安装"
+    assert "LSP 状态：server_unavailable" in result["output"]
+    assert "摘要：LSP 当前不可用，本次无法提供 diagnostics。" in result["output"]
+    assert "原因：jdtls 未安装" in result["output"]
+
+
+def test_run_write_should_mark_timeout_degraded_but_keep_success(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    monkeypatch.setattr(
+        "agent.tools.write_file_tool.collect_file_diagnostics",
+        lambda **_: LspDiagnosticsResult(
+            status="timeout_degraded",
+            lsp_language="java",
+            lsp_server="jdtls",
+            lsp_workspace_root=str(tmp_path.resolve()),
+            lsp_workspace_selection_reason="maven_aggregator_root",
+            lsp_server_key=f"java:{tmp_path.resolve()}:direct_lsp",
+            lsp_snapshot_uri=(tmp_path / "Foo.java").resolve().as_uri(),
+            recent_status_summary="Starting:Init...",
+            recent_log_summary="1:still indexing",
+            recent_publish_uris="src/Bar.java#1(2)",
+            received_other_file_diagnostics=True,
+            lsp_error="等待 diagnostics 超时；已补发 didSave 重试，但仍未收到 publishDiagnostics。",
+        ),
+    )
+
+    result = run_write("Foo.java", "class Foo {}")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["diagnostics_status"] == "timeout_degraded"
+    assert "LSP 状态：timeout_degraded" in result["output"]
+    assert "摘要：本次 diagnostics 未完整返回，请谨慎依赖本次结果。" in result["output"]
+    assert "原因：等待 diagnostics 超时；已补发 didSave 重试，但仍未收到 publishDiagnostics。" in result["output"]
+    assert "didSave" in result["output"]
+    assert "workspace_selection_reason=maven_aggregator_root" in result["output"]
+    assert "recent_publish=src/Bar.java#1(2)" in result["output"]
+    assert "LSP 观测信息" not in result["output"]
+    assert "workspace_root=" not in result["output"]
+
+
+def test_run_write_should_surface_project_import_failed_reason(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    monkeypatch.setattr(
+        "agent.tools.write_file_tool.collect_file_diagnostics",
+        lambda **_: LspDiagnosticsResult(
+            status="project_import_failed",
+            lsp_language="java",
+            lsp_server="jdtls",
+            java_project_issue_code="maven_profile_conflict",
+            java_project_state="profile_conflict",
+            java_maven_profiles=("hna",),
+            java_maven_profiles_source="auto_detected",
+            lsp_error="Java 工程导入存在 Maven profile 冲突：当前文件 src/main/java/com/huoli/flight/channel/hna/nineh/b2c/Air9hB2cConvertUtil.java 会被默认激活的 profile airchina 排除；自动探测建议的 profile 为 hna，如仍失败请调整项目目录结构或补充自动探测规则",
+        ),
+    )
+
+    result = run_write("Foo.java", "class Foo {}")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["diagnostics_status"] == "project_import_failed"
+    assert result["metadata"]["java_project_issue_code"] == "maven_profile_conflict"
+    assert result["metadata"]["java_project_state"] == "profile_conflict"
+    assert result["metadata"]["java_maven_profiles"] == ["hna"]
+    assert result["metadata"]["java_maven_profiles_source"] == "auto_detected"
+    assert "LSP 状态：project_import_failed" in result["output"]
+    assert "摘要：工程导入失败，当前 diagnostics 不可用，请先修复工程配置问题。" in result["output"]
+    assert "原因：Java 工程导入存在 Maven profile 冲突" in result["output"]
+    assert "工程问题标记：maven_profile_conflict（profile_conflict）" in result["output"]
+    assert "Maven profile 冲突" in result["output"]
+    assert "自动探测建议的 profile 为 hna" in result["output"]
+
+
+def test_run_write_should_summarize_completed_without_error_diagnostics(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    monkeypatch.setattr(
+        "agent.tools.write_file_tool.collect_file_diagnostics",
+        lambda **_: LspDiagnosticsResult(
+            status="completed",
+            diagnostics=(),
+            diagnostics_total=0,
+            diagnostics_summary="",
+            lsp_language="python",
+            lsp_server="pylsp",
+        ),
+    )
+
+    result = run_write("demo.py", "print('ok')")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["diagnostics_status"] == "completed"
+    assert "LSP 状态：completed" in result["output"]
+    assert "摘要：当前文件未发现 error 级别 diagnostics。" in result["output"]
 
 
 def test_run_edit_should_fail_when_file_changed_after_read(tmp_path):
