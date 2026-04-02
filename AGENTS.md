@@ -23,6 +23,7 @@
 - `src/agent/tools/`：工具实现目录；优先按职责拆分到独立模块。
 - `src/agent/tools/path_utils.py`：路径解析与工作区边界校验公共逻辑。
 - `src/agent/tools/specs.py`：工具 schema 与描述模板装配。
+- `src/agent/tools/lsp_tool.py`：LSP 查询工具归口，负责路径/位置校验、查询分发与结果整形。
 - `src/agent/web/serializers.py`：Web 序列化唯一归口。
 - `tests/`：`pytest` 回归、集成与边界测试。
 
@@ -34,6 +35,8 @@
 - 协议级转换统一收敛到 `adapters/llm/protocols.py`，厂商差异统一收敛到 `adapters/llm/vendors.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model` 与 `description`。
 - 工具实现统一放在 `tools/` 目录内分模块维护；公共路径校验统一收敛到 `tools/path_utils.py`。
+- 查询型 `lsp` 工具统一通过 `tools/lsp_tool.py` -> `lsp/client.py` -> `lsp/manager.py` 链路收敛，避免在会话层或其他工具中散落直接调用 JSON-RPC。
+- 查询型 `lsp` 工具只暴露只读导航能力；写入后的 diagnostics 仍由 `edit_file` / `write_file` 链路负责，二者不要混在同一层拼装。
 - Web 层消息序列化统一收敛在 `web/serializers.py`，不要在 `web/app.py` 手工散落映射逻辑。
 - 项目级运行时策略统一从 `project_runtime.json` / `llm_runtime.json` 读取，禁止在业务模块扩散硬编码配置。
 - `task` 工具中的 subagent 名单与说明，必须从 `runtime/agents.py` 动态生成。

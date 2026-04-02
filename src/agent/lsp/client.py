@@ -9,7 +9,7 @@ from .manager import clear_lsp_manager_state, get_lsp_manager
 from .servers.base import LspServerAdapter
 from .servers.jdtls import build_default_java_adapter
 from .servers.pylsp import build_default_python_adapter
-from .types import LspDiagnosticsResult, build_file_uri
+from .types import LspDiagnosticsResult, LspQueryResult, build_file_uri
 
 
 class LspClient:
@@ -106,6 +106,70 @@ class LspClient:
             debug_issue_probe=result.debug_issue_probe,
         )
 
+    def query(
+        self,
+        *,
+        operation: str,
+        file_path: Path,
+        content: str,
+        line: int,
+        character: int,
+    ) -> LspQueryResult:
+        settings = get_lsp_settings()
+        if not settings.enabled:
+            return LspQueryResult(status="not_enabled", operation=operation)
+
+        adapter = self._match_adapter(file_path)
+        if adapter is None:
+            return LspQueryResult(status="unsupported_language", operation=operation)
+
+        language_settings = settings.languages.get(adapter.language)
+        if language_settings is None or not language_settings.enabled:
+            return LspQueryResult(status="not_enabled", operation=operation)
+
+        try:
+            return get_lsp_manager().execute_operation(
+                adapter,
+                operation=operation,
+                file_path=file_path,
+                content=content,
+                line=line,
+                character=character,
+            )
+        except Exception as exc:
+            workspace_root, workspace_selection_reason = adapter.select_workspace_root_with_reason(
+                file_path.resolve(),
+                get_workspace().root.resolve(),
+            )
+            resolved_java_settings = (
+                adapter.resolve_maven_import_config(file_path=file_path.resolve(), workspace_root=workspace_root)
+                if hasattr(adapter, "resolve_maven_import_config")
+                else None
+            )
+            return LspQueryResult(
+                status="server_unavailable",
+                operation=operation,
+                lsp_language=adapter.language,
+                lsp_server=adapter.server_name,
+                lsp_workspace_root=str(workspace_root),
+                lsp_data_dir=str(adapter.build_data_dir(workspace_root, file_path=file_path.resolve())),
+                lsp_workspace_selection_reason=workspace_selection_reason,
+                lsp_server_key=adapter.build_server_key(workspace_root, file_path=file_path.resolve()),
+                lsp_snapshot_uri=build_file_uri(file_path),
+                lsp_error=str(exc)[:300],
+                java_maven_profiles=(
+                    resolved_java_settings.profiles if resolved_java_settings is not None else ()
+                ),
+                java_maven_profiles_source=(
+                    resolved_java_settings.profiles_source if resolved_java_settings is not None else ""
+                ),
+                java_maven_local_repository=(
+                    resolved_java_settings.local_repository
+                    if resolved_java_settings is not None
+                    else language_settings.maven_local_repository
+                ),
+            )
+
     def _match_adapter(self, file_path: Path) -> LspServerAdapter | None:
         for adapter in self._adapters:
             if adapter.supports_file(file_path):
@@ -122,6 +186,23 @@ def get_lsp_client() -> LspClient:
 
 def collect_file_diagnostics(*, file_path: Path, content: str) -> LspDiagnosticsResult:
     return _LSP_CLIENT.collect_diagnostics(file_path=file_path, content=content)
+
+
+def query_lsp(
+    *,
+    operation: str,
+    file_path: Path,
+    content: str,
+    line: int,
+    character: int,
+) -> LspQueryResult:
+    return _LSP_CLIENT.query(
+        operation=operation,
+        file_path=file_path,
+        content=content,
+        line=line,
+        character=character,
+    )
 
 
 def clear_lsp_runtime_state() -> None:

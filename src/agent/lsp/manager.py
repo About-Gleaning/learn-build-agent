@@ -16,7 +16,7 @@ from .documents import get_document_store
 from .filters import filter_diagnostics
 from .protocol import JsonRpcEndpoint
 from .servers.base import LspServerAdapter
-from .types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspRange, LspServerStatus
+from .types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspQueryResult, LspRange, LspServerStatus
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ class ManagedLspServer:
     adapter: LspServerAdapter
     endpoint: JsonRpcEndpoint
     process: subprocess.Popen[bytes]
+    capabilities: dict[str, Any] = field(default_factory=dict)
     diagnostics_by_uri: dict[str, _PublishedDiagnostics] = field(default_factory=dict)
     publish_events: list[_PublishEvent] = field(default_factory=list)
     status_events: list[_ServerEvent] = field(default_factory=list)
@@ -253,6 +254,119 @@ class LspManager:
             diagnostics_wait_rounds=diagnostics_wait_rounds,
             diagnostics_wait_ms=diagnostics_wait_ms,
             diagnostics_settled=diagnostics_settled,
+        )
+
+    def execute_operation(
+        self,
+        adapter: LspServerAdapter,
+        *,
+        operation: str,
+        file_path: Path,
+        content: str,
+        line: int,
+        character: int,
+    ) -> LspQueryResult:
+        workspace_root, workspace_selection_reason = adapter.select_workspace_root_with_reason(
+            file_path.resolve(),
+            get_workspace().root.resolve(),
+        )
+        preflight_issue = adapter.detect_preflight_issue(file_path=file_path.resolve(), workspace_root=workspace_root)
+        if preflight_issue is not None:
+            resolved_java_settings = (
+                adapter.resolve_maven_import_config(file_path=file_path.resolve(), workspace_root=workspace_root)
+                if hasattr(adapter, "resolve_maven_import_config")
+                else None
+            )
+            return LspQueryResult(
+                status="project_import_failed",
+                operation=operation,
+                lsp_language=adapter.language,
+                lsp_server=adapter.server_name,
+                lsp_workspace_root=str(workspace_root),
+                lsp_data_dir=str(adapter.build_data_dir(workspace_root, file_path=file_path.resolve())),
+                lsp_workspace_selection_reason=workspace_selection_reason,
+                lsp_server_key=adapter.build_server_key(workspace_root, file_path=file_path.resolve()),
+                lsp_snapshot_uri=file_path.resolve().as_uri(),
+                lsp_error=preflight_issue.message,
+                java_project_issue_code=preflight_issue.issue_code,
+                java_project_state=preflight_issue.project_state,
+                java_maven_profiles=(
+                    resolved_java_settings.profiles if resolved_java_settings is not None else ()
+                ),
+                java_maven_profiles_source=(
+                    resolved_java_settings.profiles_source if resolved_java_settings is not None else ""
+                ),
+                java_maven_local_repository=(
+                    resolved_java_settings.local_repository
+                    if resolved_java_settings is not None
+                    else adapter.get_language_settings().maven_local_repository
+                ),
+            )
+
+        server = self.get_or_start(adapter, file_path=file_path)
+        snapshot = self.sync_document(server, file_path=file_path, content=content)
+        if not self._is_operation_supported(server, operation):
+            return LspQueryResult(
+                status="operation_unsupported",
+                operation=operation,
+                lsp_language=server.status.language,
+                lsp_server=server.status.server_name,
+                lsp_server_pid=server.status.pid,
+                lsp_error=f"当前 LSP 不支持 {operation}",
+                **self._build_observation_fields(server, snapshot_uri=snapshot.uri),
+            )
+
+        request_payload = self._build_operation_request(
+            operation=operation,
+            snapshot_uri=snapshot.uri,
+            line=line,
+            character=character,
+        )
+        selected_item: dict[str, Any] | None = None
+        try:
+            if request_payload["method"] == "__call_hierarchy_follow_up__":
+                hierarchy_result = server.endpoint.request(
+                    "textDocument/prepareCallHierarchy",
+                    request_payload["prepare_params"],
+                    timeout_ms=get_lsp_settings().request_timeout_ms,
+                )
+                hierarchy_items = self._normalize_call_hierarchy_items(hierarchy_result)
+                if not hierarchy_items:
+                    return self._build_query_result(
+                        server,
+                        operation=operation,
+                        snapshot_uri=snapshot.uri,
+                        result=hierarchy_result if hierarchy_result not in (None, []) else [],
+                        call_hierarchy_item=None,
+                    )
+                selected_item = hierarchy_items[0]
+                result = server.endpoint.request(
+                    request_payload["follow_up_method"],
+                    {"item": selected_item},
+                    timeout_ms=get_lsp_settings().request_timeout_ms,
+                )
+            else:
+                result = server.endpoint.request(
+                    request_payload["method"],
+                    request_payload["params"],
+                    timeout_ms=get_lsp_settings().request_timeout_ms,
+                )
+        except Exception as exc:
+            return LspQueryResult(
+                status="request_failed",
+                operation=operation,
+                lsp_language=server.status.language,
+                lsp_server=server.status.server_name,
+                lsp_server_pid=server.status.pid,
+                lsp_error=str(exc)[:300],
+                **self._build_observation_fields(server, snapshot_uri=snapshot.uri),
+            )
+        return self._build_query_result(
+            server,
+            operation=operation,
+            snapshot_uri=snapshot.uri,
+            result=result,
+            call_hierarchy_item=selected_item,
         )
 
     def _retry_collect_diagnostics_after_save(
@@ -676,11 +790,15 @@ class LspManager:
                 workspace_root,
                 process.pid,
             )
-            server.endpoint.request(
+            initialize_result = server.endpoint.request(
                 "initialize",
                 adapter.build_initialize_params(workspace_root, file_path=file_path.resolve()),
                 timeout_ms=get_lsp_settings().request_timeout_ms,
             )
+            if isinstance(initialize_result, dict):
+                capabilities = initialize_result.get("capabilities")
+                if isinstance(capabilities, dict):
+                    server.capabilities = capabilities
             server.endpoint.notify("initialized", {})
             elapsed_ms = int((time.monotonic() - initialize_started_at) * 1000)
             logger.info("LSP initialize 成功: server_key=%s pid=%s elapsed_ms=%s", server_key, process.pid, elapsed_ms)
@@ -824,6 +942,102 @@ class LspManager:
             server.publish_events = server.publish_events[-20:]
             server.condition.notify_all()
 
+    def _build_query_result(
+        self,
+        server: ManagedLspServer,
+        *,
+        operation: str,
+        snapshot_uri: str,
+        result: Any,
+        call_hierarchy_item: dict[str, Any] | None,
+    ) -> LspQueryResult:
+        return LspQueryResult(
+            status="completed",
+            operation=operation,
+            result=result,
+            result_count=_count_lsp_result_items(result),
+            call_hierarchy_item=call_hierarchy_item,
+            lsp_language=server.status.language,
+            lsp_server=server.status.server_name,
+            lsp_server_pid=server.status.pid,
+            **self._build_observation_fields(server, snapshot_uri=snapshot_uri),
+        )
+
+    def _is_operation_supported(self, server: ManagedLspServer, operation: str) -> bool:
+        capabilities = server.capabilities
+        if operation == "goToDefinition":
+            return _capability_enabled(capabilities.get("definitionProvider"))
+        if operation == "findReferences":
+            return _capability_enabled(capabilities.get("referencesProvider"))
+        if operation == "hover":
+            return _capability_enabled(capabilities.get("hoverProvider"))
+        if operation == "documentSymbol":
+            return _capability_enabled(capabilities.get("documentSymbolProvider"))
+        if operation == "workspaceSymbol":
+            return _capability_enabled(capabilities.get("workspaceSymbolProvider"))
+        if operation == "goToImplementation":
+            return _capability_enabled(capabilities.get("implementationProvider"))
+        if operation == "prepareCallHierarchy":
+            return _capability_enabled(capabilities.get("callHierarchyProvider"))
+        if operation in {"incomingCalls", "outgoingCalls"}:
+            return _capability_enabled(capabilities.get("callHierarchyProvider"))
+        return False
+
+    def _build_operation_request(
+        self,
+        *,
+        operation: str,
+        snapshot_uri: str,
+        line: int,
+        character: int,
+    ) -> dict[str, Any]:
+        text_document = {"uri": snapshot_uri}
+        position = {"line": line, "character": character}
+        if operation == "goToDefinition":
+            return {"method": "textDocument/definition", "params": {"textDocument": text_document, "position": position}}
+        if operation == "findReferences":
+            return {
+                "method": "textDocument/references",
+                "params": {
+                    "textDocument": text_document,
+                    "position": position,
+                    "context": {"includeDeclaration": False},
+                },
+            }
+        if operation == "hover":
+            return {"method": "textDocument/hover", "params": {"textDocument": text_document, "position": position}}
+        if operation == "documentSymbol":
+            return {"method": "textDocument/documentSymbol", "params": {"textDocument": text_document}}
+        if operation == "workspaceSymbol":
+            return {"method": "workspace/symbol", "params": {"query": ""}}
+        if operation == "goToImplementation":
+            return {"method": "textDocument/implementation", "params": {"textDocument": text_document, "position": position}}
+        if operation == "prepareCallHierarchy":
+            return {
+                "method": "textDocument/prepareCallHierarchy",
+                "params": {"textDocument": text_document, "position": position},
+            }
+        if operation == "incomingCalls":
+            return {
+                "method": "__call_hierarchy_follow_up__",
+                "prepare_params": {"textDocument": text_document, "position": position},
+                "follow_up_method": "callHierarchy/incomingCalls",
+            }
+        if operation == "outgoingCalls":
+            return {
+                "method": "__call_hierarchy_follow_up__",
+                "prepare_params": {"textDocument": text_document, "position": position},
+                "follow_up_method": "callHierarchy/outgoingCalls",
+            }
+        raise ValueError(f"未支持的 LSP operation: {operation}")
+
+    def _normalize_call_hierarchy_items(self, result: Any) -> list[dict[str, Any]]:
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        if isinstance(result, dict):
+            return [result]
+        return []
+
 
 def _convert_diagnostic(payload: dict[str, Any]) -> LspDiagnostic:
     raw_range = payload.get("range") if isinstance(payload.get("range"), dict) else {}
@@ -852,6 +1066,22 @@ def _convert_diagnostic(payload: dict[str, Any]) -> LspDiagnostic:
             ),
         ),
     )
+
+
+def _capability_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, dict)
+
+
+def _count_lsp_result_items(result: Any) -> int | None:
+    if result is None:
+        return 0
+    if isinstance(result, list):
+        return len(result)
+    if isinstance(result, dict):
+        return 1
+    return None
 
 
 _JAVA_PROJECT_ERROR_PATTERNS = (

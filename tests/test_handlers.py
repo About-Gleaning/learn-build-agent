@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.lsp.types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspRange
+from agent.lsp.types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspQueryResult, LspRange
 from agent.core.context import set_session_id
 from agent.tools.bash_tool import (
     DEFAULT_TIMEOUT,
@@ -27,6 +27,7 @@ from agent.tools.handlers import (
 )
 from agent.tools.question_tool import CUSTOM_OPTION_LABEL, run_question
 from agent.tools.read_file_tool import resolve_readable_file_path, run_read
+from agent.tools.lsp_tool import run_lsp
 from agent.tools.skill_tool import run_load_skill
 from agent.tools.todo_manager import TodoManager
 from agent.tools.write_file_tool import run_write
@@ -719,6 +720,101 @@ def test_run_read_should_allow_skills_file_under_runtime_home(tmp_path, monkeypa
 
     assert result["metadata"]["status"] == "completed"
     assert result["output"] == "skill reference"
+
+
+def test_run_lsp_should_resolve_relative_path_and_return_formatted_json(tmp_path, monkeypatch):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-relative")
+    target = tmp_path / "src" / "demo.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('hi')\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_query_lsp(*, operation, file_path, content, line, character):
+        captured.update(
+            operation=operation,
+            file_path=str(file_path),
+            content=content,
+            line=line,
+            character=character,
+        )
+        return LspQueryResult(
+            status="completed",
+            operation=operation,
+            result=[{"uri": file_path.as_uri()}],
+            lsp_language="python",
+            lsp_server="pylsp",
+        )
+
+    monkeypatch.setattr("agent.tools.lsp_tool.query_lsp", fake_query_lsp)
+
+    result = run_lsp("goToDefinition", "src/demo.py", 1, 1)
+
+    assert result["title"] == "goToDefinition src/demo.py:1:1"
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["result"] == [{"uri": target.as_uri()}]
+    assert '"uri": "' in result["output"]
+    assert captured == {
+        "operation": "goToDefinition",
+        "file_path": str(target),
+        "content": "print('hi')\n",
+        "line": 0,
+        "character": 0,
+    }
+
+
+def test_run_lsp_should_return_no_results_message(tmp_path, monkeypatch):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-empty")
+    target = tmp_path / "demo.py"
+    target.write_text("print('hi')", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "agent.tools.lsp_tool.query_lsp",
+        lambda **kwargs: LspQueryResult(status="completed", operation=kwargs["operation"], result=[]),
+    )
+
+    result = run_lsp("findReferences", str(target), 1, 1)
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["output"] == "No results found for findReferences"
+
+
+def test_run_lsp_should_fail_for_out_of_range_position(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-position")
+    target = tmp_path / "demo.py"
+    target.write_text("print('hi')", encoding="utf-8")
+
+    result = run_lsp("hover", str(target), 3, 1)
+
+    assert result["title"] == "hover demo.py:3:1"
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "lsp_position_invalid"
+
+
+def test_run_lsp_should_fail_for_query_error_status(tmp_path, monkeypatch):
+    configure_workspace(tmp_path)
+    _set_test_session("lsp-failed")
+    target = tmp_path / "Foo.java"
+    target.write_text("class Foo {}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "agent.tools.lsp_tool.query_lsp",
+        lambda **kwargs: LspQueryResult(
+            status="operation_unsupported",
+            operation=kwargs["operation"],
+            lsp_error="当前 LSP 不支持 outgoingCalls",
+            lsp_language="java",
+            lsp_server="jdtls",
+        ),
+    )
+
+    result = run_lsp("outgoingCalls", str(target), 1, 1)
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "lsp_operation_unsupported"
+    assert "当前 LSP 不支持 outgoingCalls" in result["output"]
 
 
 def test_run_load_skill_should_return_structured_success(tmp_path, monkeypatch):

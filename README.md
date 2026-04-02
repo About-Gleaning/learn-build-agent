@@ -9,7 +9,8 @@
 - CLI 模式：在当前目录启动持续对话式编码代理。
 - Web 模式：启动 FastAPI 后端和前端开发服务器，提供 SSE 流式会话体验。
 - 多模型支持：当前内置 `qwen`、`gpt`、`gemini`、`kimi` provider。
-- 工具能力：支持文件读写、代码编辑、搜索、Shell、网页抓取、联网搜索、提问澄清、待办管理与子 Agent 委派。
+- 工具能力：支持文件读写、代码编辑、LSP 查询、搜索、Shell、网页抓取、联网搜索、提问澄清、待办管理与子 Agent 委派。
+- 代码导航：支持通过 `lsp` 工具执行定义、引用、hover、符号搜索与调用层级查询。
 - 安全边界：文件和命令默认受工作区限制，避免越界访问。
 
 ## 环境要求
@@ -21,6 +22,9 @@
   - Python 诊断依赖 `python-lsp-server`
   - Java 诊断依赖 `jdtls` 和 JDK 21 兼容环境
   - 多模块 Maven 项目会按当前文件路径和 `pom.xml` 自动探测导入 profile；探测失败时会直接报错
+- 如需使用 `lsp` 查询工具：
+  - 仍依赖对应语言的 LSP 服务
+  - 当前查询工具受 `project_runtime.json` 中的 `lsp.enabled` 控制
 
 ## 快速开始
 
@@ -201,6 +205,7 @@ Java LSP 说明：
 ### 核心工具
 
 - 文件类：`read_file`、`write_file`、`edit_file`
+- 代码导航类：`lsp`
 - 搜索类：`glob`、`grep`
 - 执行类：`bash`
 - 网络类：`webfetch`、`websearch`
@@ -211,6 +216,7 @@ Java LSP 说明：
 
 - `read_file` 仅支持绝对路径
 - `write_file` 与 `edit_file` 支持工作区内路径和 `skills` 目录路径
+- `lsp` 支持工作区内绝对路径或相对路径，适合定义、引用、hover、symbol、调用层级等只读查询
 - 覆盖写入和编辑已有文件前，需要先通过 `read_file` 读取同一文件
 - 文件工具默认受工作区边界限制
 

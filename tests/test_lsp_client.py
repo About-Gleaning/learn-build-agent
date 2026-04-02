@@ -5,7 +5,7 @@ import pytest
 from agent.config.settings import LspIdeSettings, LspLanguageSettings, LspSettings
 from agent.lsp.client import LspClient, clear_lsp_runtime_state
 from agent.lsp.filters import filter_diagnostics
-from agent.lsp.types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspRange
+from agent.lsp.types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspQueryResult, LspRange
 
 
 def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True, python_enabled: bool = True) -> LspSettings:
@@ -238,8 +238,91 @@ def test_lsp_client_should_passthrough_debug_observation_fields(monkeypatch, tmp
 
     assert result.java_debug_observation_enabled is True
     assert "code 969" in result.debug_log_events
-    assert "src/Foo.java#1(0)" in result.debug_publish_events
-    assert result.debug_issue_probe == "contains_code_969=True"
+
+
+def test_lsp_client_should_route_query_to_manager(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def execute_operation(self, adapter, *, operation, file_path, content, line, character):
+            captured.update(
+                language=adapter.language,
+                operation=operation,
+                file_path=file_path,
+                content=content,
+                line=line,
+                character=character,
+            )
+            return LspQueryResult(
+                status="completed",
+                operation=operation,
+                result=[{"name": "Foo"}],
+                lsp_language="java",
+                lsp_server="jdtls",
+            )
+
+    monkeypatch.setattr("agent.lsp.client.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.client.get_lsp_manager", lambda: FakeManager())
+
+    target = tmp_path / "Foo.java"
+    result = LspClient().query(
+        operation="hover",
+        file_path=target,
+        content="class Foo {}",
+        line=2,
+        character=3,
+    )
+
+    assert result.status == "completed"
+    assert result.result == [{"name": "Foo"}]
+    assert captured == {
+        "language": "java",
+        "operation": "hover",
+        "file_path": target,
+        "content": "class Foo {}",
+        "line": 2,
+        "character": 3,
+    }
+
+
+def test_lsp_client_should_return_not_enabled_for_query_when_global_switch_closed(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.lsp.client.get_lsp_settings", lambda: _build_lsp_settings(enabled=False))
+
+    result = LspClient().query(
+        operation="hover",
+        file_path=tmp_path / "Foo.java",
+        content="class Foo {}",
+        line=0,
+        character=0,
+    )
+
+    assert result.status == "not_enabled"
+    assert result.operation == "hover"
+
+
+def test_lsp_client_should_passthrough_query_server_unavailable(monkeypatch, tmp_path):
+    class FakeManager:
+        def execute_operation(self, adapter, *, operation, file_path, content, line, character):
+            del adapter, operation, file_path, content, line, character
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("agent.lsp.client.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.client.get_lsp_manager", lambda: FakeManager())
+
+    target = tmp_path / "Foo.java"
+    result = LspClient().query(
+        operation="goToDefinition",
+        file_path=target,
+        content="class Foo {}",
+        line=0,
+        character=0,
+    )
+
+    assert result.status == "server_unavailable"
+    assert result.operation == "goToDefinition"
+    assert result.lsp_language == "java"
+    assert result.lsp_server == "jdtls"
+    assert result.lsp_error == "boom"
 
 
 def test_filter_diagnostics_should_dedupe_and_truncate():

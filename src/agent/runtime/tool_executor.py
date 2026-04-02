@@ -54,6 +54,39 @@ def _build_lsp_log_fields(metadata: dict[str, Any]) -> dict[str, str] | None:
     }
 
 
+def _build_lsp_query_log_fields(metadata: dict[str, Any]) -> dict[str, str] | None:
+    operation = str(metadata.get("lsp_operation", "")).strip()
+    if not operation:
+        return None
+    result = metadata.get("result")
+    if isinstance(result, list):
+        result_kind = "list"
+        result_count = str(len(result))
+    elif isinstance(result, dict):
+        result_kind = "object"
+        result_count = "1"
+    elif result is None:
+        result_kind = "null"
+        result_count = "0"
+    else:
+        result_kind = type(result).__name__
+        result_count = str(metadata.get("result_count", ""))
+    return {
+        "lsp_operation": operation,
+        "result_kind": result_kind,
+        "result_count": result_count,
+        "lsp_language": sanitize_log_text(metadata.get("lsp_language", "")),
+        "lsp_server": sanitize_log_text(metadata.get("lsp_server", "")),
+        "lsp_server_pid": str(metadata.get("lsp_server_pid", "")),
+        "lsp_workspace_root": sanitize_log_text(metadata.get("lsp_workspace_root", "")),
+        "lsp_data_dir": sanitize_log_text(metadata.get("lsp_data_dir", "")),
+        "lsp_workspace_selection_reason": sanitize_log_text(metadata.get("lsp_workspace_selection_reason", "")),
+        "lsp_server_key": sanitize_log_text(metadata.get("lsp_server_key", "")),
+        "lsp_snapshot_uri": sanitize_log_text(metadata.get("lsp_snapshot_uri", "")),
+        "lsp_error": sanitize_log_text(metadata.get("lsp_error", "")),
+    }
+
+
 class ToolHookContext(TypedDict, total=False):
     session_id: str
     agent: str
@@ -192,6 +225,30 @@ class ToolLoggingHook(ToolHook):
                 lsp_log_fields["debug_publish_events"],
                 lsp_log_fields["debug_issue_probe"],
                 lsp_log_fields["lsp_error"],
+                extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
+            )
+        lsp_query_log_fields = _build_lsp_query_log_fields(metadata)
+        if lsp_query_log_fields is not None:
+            logger.info(
+                (
+                    "tool.lsp_query_result tool=%s lsp_operation=%s result_kind=%s result_count=%s "
+                    "lsp_language=%s lsp_server=%s lsp_server_pid=%s lsp_workspace_root=%s "
+                    "lsp_data_dir=%s lsp_workspace_selection_reason=%s lsp_server_key=%s "
+                    "lsp_snapshot_uri=%s lsp_error=%s"
+                ),
+                ctx.get("tool_name", ""),
+                lsp_query_log_fields["lsp_operation"],
+                lsp_query_log_fields["result_kind"],
+                lsp_query_log_fields["result_count"],
+                lsp_query_log_fields["lsp_language"],
+                lsp_query_log_fields["lsp_server"],
+                lsp_query_log_fields["lsp_server_pid"],
+                lsp_query_log_fields["lsp_workspace_root"],
+                lsp_query_log_fields["lsp_data_dir"],
+                lsp_query_log_fields["lsp_workspace_selection_reason"],
+                lsp_query_log_fields["lsp_server_key"],
+                lsp_query_log_fields["lsp_snapshot_uri"],
+                lsp_query_log_fields["lsp_error"],
                 extra=build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", "")),
             )
         if metadata.get("truncated") is True:

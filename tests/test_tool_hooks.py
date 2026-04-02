@@ -516,6 +516,45 @@ def test_tool_logging_hook_should_skip_lsp_summary_for_non_lsp_tools(caplog):
     assert "tool.lsp_result" not in caplog.text
 
 
+def test_tool_logging_hook_should_log_lsp_query_result(caplog):
+    executor = ToolExecutor(
+        {
+            "lsp": lambda: {
+                "output": "{\n  \"contents\": \"demo\"\n}",
+                "metadata": {
+                    "status": "completed",
+                    "lsp_operation": "hover",
+                    "result": {"contents": "demo"},
+                    "result_count": 1,
+                    "lsp_language": "java",
+                    "lsp_server": "jdtls",
+                    "lsp_server_pid": 321,
+                    "lsp_workspace_root": "/tmp/project",
+                    "lsp_workspace_selection_reason": "maven_aggregator_root",
+                    "lsp_server_key": "java:/tmp/project:direct_lsp",
+                    "lsp_snapshot_uri": "file:///tmp/project/src/Foo.java",
+                },
+            }
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        executor.execute(
+            "lsp",
+            "{}",
+            session_id="s_lsp_query_log",
+            tool_call_id="call_lsp_query_log",
+            round_no=1,
+            hooks=[ToolLoggingHook()],
+            agent="build",
+            model="demo-model",
+            task_available=False,
+        )
+
+    assert "tool.lsp_query_result tool=lsp lsp_operation=hover result_kind=object result_count=1" in caplog.text
+    assert "lsp_language=java lsp_server=jdtls lsp_server_pid=321" in caplog.text
+
+
 def test_tool_logging_hook_should_not_truncate_long_arguments_when_disabled(caplog, monkeypatch):
     executor = ToolExecutor({"demo_tool": lambda value: f"len:{len(value)}"})
     long_value = "x" * 800

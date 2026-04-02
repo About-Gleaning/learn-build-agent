@@ -273,6 +273,92 @@ class LspDiagnosticsResult:
 
 
 @dataclass(frozen=True)
+class LspQueryResult:
+    status: str
+    operation: str
+    result: Any = None
+    result_count: int | None = None
+    call_hierarchy_item: dict[str, Any] | None = None
+    lsp_language: str | None = None
+    lsp_server: str | None = None
+    lsp_server_pid: int | None = None
+    lsp_error: str | None = None
+    lsp_workspace_root: str | None = None
+    lsp_data_dir: str | None = None
+    lsp_workspace_selection_reason: str | None = None
+    lsp_server_key: str | None = None
+    lsp_snapshot_uri: str | None = None
+    recent_status_summary: str = ""
+    recent_log_summary: str = ""
+    recent_publish_uris: str = ""
+    received_other_file_diagnostics: bool = False
+    java_project_issue_code: str | None = None
+    java_project_state: str | None = None
+    java_maven_profiles: tuple[str, ...] = ()
+    java_maven_profiles_source: str = ""
+    java_maven_local_repository: str = ""
+    java_debug_observation_enabled: bool = False
+    debug_status_events: str = ""
+    debug_log_events: str = ""
+    debug_publish_events: str = ""
+    debug_issue_probe: str = ""
+
+    def to_metadata(self) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "lsp_operation": self.operation,
+            "result": self.result,
+            "result_count": self.result_count,
+        }
+        if self.call_hierarchy_item is not None:
+            metadata["call_hierarchy_item"] = self.call_hierarchy_item
+        if self.java_project_issue_code:
+            metadata["java_project_issue_code"] = self.java_project_issue_code
+        if self.java_project_state:
+            metadata["java_project_state"] = self.java_project_state
+        if self.java_maven_profiles:
+            metadata["java_maven_profiles"] = list(self.java_maven_profiles)
+        if self.java_maven_profiles_source:
+            metadata["java_maven_profiles_source"] = self.java_maven_profiles_source
+        if self.java_maven_local_repository:
+            metadata["java_maven_local_repository"] = self.java_maven_local_repository
+        if self.debug_status_events:
+            metadata["debug_status_events"] = self.debug_status_events
+        if self.debug_log_events:
+            metadata["debug_log_events"] = self.debug_log_events
+        if self.debug_publish_events:
+            metadata["debug_publish_events"] = self.debug_publish_events
+        if self.debug_issue_probe:
+            metadata["debug_issue_probe"] = self.debug_issue_probe
+        if self.lsp_language:
+            metadata["lsp_language"] = self.lsp_language
+        if self.lsp_server:
+            metadata["lsp_server"] = self.lsp_server
+        if self.lsp_server_pid is not None:
+            metadata["lsp_server_pid"] = self.lsp_server_pid
+        if self.lsp_workspace_root:
+            metadata["lsp_workspace_root"] = self.lsp_workspace_root
+        if self.lsp_data_dir:
+            metadata["lsp_data_dir"] = self.lsp_data_dir
+        if self.lsp_workspace_selection_reason:
+            metadata["lsp_workspace_selection_reason"] = self.lsp_workspace_selection_reason
+        if self.lsp_server_key:
+            metadata["lsp_server_key"] = self.lsp_server_key
+        if self.lsp_snapshot_uri:
+            metadata["lsp_snapshot_uri"] = self.lsp_snapshot_uri
+        if self.recent_status_summary:
+            metadata["recent_status_summary"] = self.recent_status_summary
+        if self.recent_log_summary:
+            metadata["recent_log_summary"] = self.recent_log_summary
+        if self.recent_publish_uris:
+            metadata["recent_publish_uris"] = self.recent_publish_uris
+        metadata["received_other_file_diagnostics"] = self.received_other_file_diagnostics
+        metadata["java_debug_observation_enabled"] = self.java_debug_observation_enabled
+        if self.lsp_error:
+            metadata["lsp_error"] = self.lsp_error
+        return metadata
+
+
+@dataclass(frozen=True)
 class LspLanguageServerConfig:
     enabled: bool
     command: tuple[str, ...]

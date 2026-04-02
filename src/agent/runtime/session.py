@@ -48,6 +48,7 @@ from ..tools.handlers import (
     run_plan_enter,
     run_plan_exit,
 )
+from ..tools.lsp_tool import run_lsp
 from ..tools.question_tool import run_question
 from ..tools.read_file_tool import run_read
 from ..tools.skill_tool import run_load_skill
@@ -2838,6 +2839,12 @@ def _build_tool_handlers(
             kw.get("oldString") or kw.get("old_text") or kw["old_string"],
             kw.get("newString") or kw.get("new_text") or kw["new_string"],
             bool(kw.get("replaceAll", kw.get("replace_all", False))),
+        ),
+        "lsp": lambda **kw: run_lsp(
+            kw["operation"],
+            kw.get("filePath") or kw.get("path") or kw["file_path"],
+            kw["line"],
+            kw["character"],
         ),
         "webfetch": lambda **kw: webfetch(kw),
         "websearch": lambda **kw: websearch(kw),

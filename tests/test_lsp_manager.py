@@ -113,6 +113,58 @@ class _NotifyingInitializeEndpoint(_FakeEndpoint):
         return {}
 
 
+class _QueryEndpoint(_FakeEndpoint):
+    def request(self, method, params, *, timeout_ms):
+        self.requests.append((method, params, timeout_ms))
+        if method == "initialize":
+            return {
+                "capabilities": {
+                    "hoverProvider": True,
+                    "referencesProvider": True,
+                    "workspaceSymbolProvider": True,
+                    "callHierarchyProvider": True,
+                }
+            }
+        if method == "textDocument/hover":
+            return {"contents": "demo"}
+        if method == "textDocument/references":
+            return [{"uri": "file:///tmp/Foo.java"}]
+        if method == "workspace/symbol":
+            return [{"name": "Foo"}]
+        if method == "textDocument/prepareCallHierarchy":
+            return [
+                {
+                    "name": "demo",
+                    "kind": 6,
+                    "uri": "file:///tmp/Foo.java",
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 4},
+                    },
+                    "selectionRange": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 4},
+                    },
+                },
+                {
+                    "name": "ignored",
+                    "kind": 6,
+                    "uri": "file:///tmp/Bar.java",
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 7},
+                    },
+                    "selectionRange": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 7},
+                    },
+                },
+            ]
+        if method == "callHierarchy/incomingCalls":
+            return [{"from": {"name": "caller"}}]
+        return {}
+
+
 class _EarlyEventInitializeEndpoint(_FakeEndpoint):
     def __init__(self, process, *, notification_handler):
         super().__init__(process, notification_handler=notification_handler)
@@ -226,6 +278,150 @@ def test_lsp_manager_should_send_did_open_then_did_change(_patched_manager_env, 
 
     assert server.endpoint.notifications[1][0] == "textDocument/didOpen"
     assert server.endpoint.notifications[2][0] == "textDocument/didChange"
+
+
+def test_lsp_manager_should_execute_hover_query(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    clear_document_store()
+    monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._resolve_executable",
+        lambda self, executable, launch_env: "/opt/homebrew/bin/jdtls",
+    )
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._detect_java_major_version",
+        lambda self, java_command, launch_env: 21,
+    )
+    monkeypatch.setattr("agent.lsp.manager.subprocess.Popen", lambda *args, **kwargs: _FakeProcess())
+    monkeypatch.setattr("agent.lsp.manager.JsonRpcEndpoint", _QueryEndpoint)
+
+    adapter = JdtlsServerAdapter()
+    manager = LspManager()
+    file_path = tmp_path / "Foo.java"
+    file_path.write_text("class Foo {}", encoding="utf-8")
+
+    result = manager.execute_operation(
+        adapter,
+        operation="hover",
+        file_path=file_path,
+        content="class Foo {}",
+        line=0,
+        character=0,
+    )
+    server = manager.get_or_start(adapter, file_path=file_path)
+
+    assert result.status == "completed"
+    assert result.result == {"contents": "demo"}
+    assert any(request[0] == "textDocument/hover" for request in server.endpoint.requests)
+
+
+def test_lsp_manager_should_build_references_request_without_include_declaration(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    clear_document_store()
+    monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._resolve_executable",
+        lambda self, executable, launch_env: "/opt/homebrew/bin/jdtls",
+    )
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._detect_java_major_version",
+        lambda self, java_command, launch_env: 21,
+    )
+    monkeypatch.setattr("agent.lsp.manager.subprocess.Popen", lambda *args, **kwargs: _FakeProcess())
+    monkeypatch.setattr("agent.lsp.manager.JsonRpcEndpoint", _QueryEndpoint)
+
+    adapter = JdtlsServerAdapter()
+    manager = LspManager()
+    file_path = tmp_path / "Foo.java"
+    file_path.write_text("class Foo {}", encoding="utf-8")
+
+    manager.execute_operation(
+        adapter,
+        operation="findReferences",
+        file_path=file_path,
+        content="class Foo {}",
+        line=0,
+        character=0,
+    )
+    server = manager.get_or_start(adapter, file_path=file_path)
+    request = next(item for item in server.endpoint.requests if item[0] == "textDocument/references")
+
+    assert request[1]["context"]["includeDeclaration"] is False
+
+
+def test_lsp_manager_should_use_empty_query_for_workspace_symbol(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    clear_document_store()
+    monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._resolve_executable",
+        lambda self, executable, launch_env: "/opt/homebrew/bin/jdtls",
+    )
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._detect_java_major_version",
+        lambda self, java_command, launch_env: 21,
+    )
+    monkeypatch.setattr("agent.lsp.manager.subprocess.Popen", lambda *args, **kwargs: _FakeProcess())
+    monkeypatch.setattr("agent.lsp.manager.JsonRpcEndpoint", _QueryEndpoint)
+
+    adapter = JdtlsServerAdapter()
+    manager = LspManager()
+    file_path = tmp_path / "Foo.java"
+    file_path.write_text("class Foo {}", encoding="utf-8")
+
+    manager.execute_operation(
+        adapter,
+        operation="workspaceSymbol",
+        file_path=file_path,
+        content="class Foo {}",
+        line=0,
+        character=0,
+    )
+    server = manager.get_or_start(adapter, file_path=file_path)
+    request = next(item for item in server.endpoint.requests if item[0] == "workspace/symbol")
+
+    assert request[1] == {"query": ""}
+
+
+def test_lsp_manager_should_pick_first_call_hierarchy_item_for_incoming_calls(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    clear_document_store()
+    monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: _build_lsp_settings())
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._resolve_executable",
+        lambda self, executable, launch_env: "/opt/homebrew/bin/jdtls",
+    )
+    monkeypatch.setattr(
+        "agent.lsp.servers.jdtls.JdtlsServerAdapter._detect_java_major_version",
+        lambda self, java_command, launch_env: 21,
+    )
+    monkeypatch.setattr("agent.lsp.manager.subprocess.Popen", lambda *args, **kwargs: _FakeProcess())
+    monkeypatch.setattr("agent.lsp.manager.JsonRpcEndpoint", _QueryEndpoint)
+
+    adapter = JdtlsServerAdapter()
+    manager = LspManager()
+    file_path = tmp_path / "Foo.java"
+    file_path.write_text("class Foo {}", encoding="utf-8")
+
+    result = manager.execute_operation(
+        adapter,
+        operation="incomingCalls",
+        file_path=file_path,
+        content="class Foo {}",
+        line=0,
+        character=0,
+    )
+    server = manager.get_or_start(adapter, file_path=file_path)
+    request = next(item for item in server.endpoint.requests if item[0] == "callHierarchy/incomingCalls")
+
+    assert result.status == "completed"
+    assert result.result == [{"from": {"name": "caller"}}]
+    assert result.call_hierarchy_item["name"] == "demo"
+    assert request[1]["item"]["name"] == "demo"
 
 
 def test_lsp_manager_should_retry_with_did_save_after_timeout(_patched_manager_env, monkeypatch, tmp_path):
