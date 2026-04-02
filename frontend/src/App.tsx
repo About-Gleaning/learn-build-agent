@@ -252,7 +252,32 @@ type QuestionDraft = {
 
 type QuestionFocusTarget = "options" | "notes";
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "http://127.0.0.1:8000";
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
+}
+
+function resolveApiBase(): string {
+  const configuredApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "";
+  if (!configuredApiBase) {
+    return "";
+  }
+  try {
+    const apiUrl = new URL(configuredApiBase, window.location.origin);
+    const pageHostname = window.location.hostname.trim().toLowerCase();
+    const apiHostname = apiUrl.hostname.trim().toLowerCase();
+    // `--share-frontend` 场景下，局域网设备访问前端时不能再直连浏览器自己的 127.0.0.1，
+    // 必须回退为同源 `/api`，交给 Vite 代理转发到本机后端。
+    if (!isLoopbackHostname(pageHostname) && isLoopbackHostname(apiHostname)) {
+      return "";
+    }
+  } catch {
+    return configuredApiBase;
+  }
+  return configuredApiBase;
+}
+
+const API_BASE = resolveApiBase();
 const AUTO_SCROLL_THRESHOLD = 56;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 

@@ -22,6 +22,7 @@ class WorkspaceRuntime:
     todo_root: Path
     plan_root: Path
     tool_output_root: Path
+    web_dev_root: Path
     logs_dir: Path
 
     @property
@@ -95,6 +96,7 @@ def _build_workspace_runtime(root: Path, *, launch_mode: str) -> WorkspaceRuntim
         todo_root=(workspaces_root / "todo").resolve(),
         plan_root=(workspaces_root / "plan").resolve(),
         tool_output_root=(workspaces_root / "tool-output").resolve(),
+        web_dev_root=(workspaces_root / "web-dev").resolve(),
         logs_dir=(runtime_home / "logs").resolve(),
     )
 

@@ -6,7 +6,13 @@ from pathlib import Path
 from .config.logging_setup import init_logging
 from .core.message import get_message_text
 from .runtime.session import clear_session_memory, generate_session_id, run_session
-from .runtime.web_dev_server import WebStackError, run_web_dev_stack
+from .runtime.web_dev_server import (
+    WebStackError,
+    format_web_stack_status,
+    get_web_stack_status,
+    start_web_dev_stack,
+    stop_web_dev_stack,
+)
 from .runtime.workspace import configure_workspace, get_workspace
 
 
@@ -18,9 +24,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
     web_parser = subparsers.add_parser("web", help="启动绑定当前工作区的 Web 服务。")
-    web_parser.add_argument("--host", default="127.0.0.1", help="监听地址。")
+    web_parser.add_argument("web_action", nargs="?", choices=("start", "status", "stop"), default="start", help="Web 管理动作，默认 start。")
+    web_parser.add_argument("--host", default="0.0.0.0", help="监听地址。")
     web_parser.add_argument("--port", type=int, default=8000, help="监听端口。")
-    web_parser.add_argument("--verbose", action="store_true", help="输出 Web 前后端启动与停止日志。")
+    web_parser.add_argument(
+        "--share-frontend",
+        action="store_true",
+        help="仅将前端页面开放给局域网访问；后端继续只监听本机，并由前端开发代理转发。",
+    )
+    web_parser.add_argument("--verbose", action="store_true", help="输出 Web 启动过程与状态提示，不输出业务日志。")
     return parser
 
 
@@ -57,12 +69,36 @@ def run_cli_session(*, session_id: str, mode: str) -> None:
         print(f"\n助手：{get_message_text(result)}")
 
 
-def run_web_server(*, host: str, port: int, verbose: bool = False) -> None:
-    init_logging(get_workspace().logs_dir)
+def run_web_start(*, host: str, port: int, share_frontend: bool = False, verbose: bool = False) -> None:
+    init_logging(get_workspace().logs_dir, console_enabled=False)
     try:
-        run_web_dev_stack(workspace_root=get_workspace().root, host=host, port=port, verbose=verbose)
+        state = start_web_dev_stack(
+            workspace_root=get_workspace().root,
+            host=host,
+            port=port,
+            share_frontend=share_frontend,
+            verbose=verbose,
+        )
     except WebStackError as exc:
         raise SystemExit(str(exc)) from exc
+    print("Web 开发栈启动成功。")
+    print(format_web_stack_status("running", state))
+
+
+def run_web_status() -> None:
+    init_logging(get_workspace().logs_dir, console_enabled=False)
+    status, state = get_web_stack_status()
+    print(format_web_stack_status(status, state))
+
+
+def run_web_stop() -> None:
+    init_logging(get_workspace().logs_dir, console_enabled=False)
+    status, state = stop_web_dev_stack()
+    if state is None:
+        print("当前工作区 Web 开发栈未运行。")
+        return
+    print("Web 开发栈已停止。")
+    print(format_web_stack_status(status, state))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -70,7 +106,19 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     configure_workspace(Path(args.workdir), launch_mode="web" if args.command == "web" else "cli")
     if args.command == "web":
-        run_web_server(host=args.host, port=args.port, verbose=bool(getattr(args, "verbose", False)))
+        web_action = getattr(args, "web_action", "start") or "start"
+        if web_action == "status":
+            run_web_status()
+            return
+        if web_action == "stop":
+            run_web_stop()
+            return
+        run_web_start(
+            host=args.host,
+            port=args.port,
+            share_frontend=bool(getattr(args, "share_frontend", False)),
+            verbose=bool(getattr(args, "verbose", False)),
+        )
         return
     session_id = (args.session or "").strip() or generate_session_id("cli")
     run_cli_session(session_id=session_id, mode=args.mode)

@@ -60,7 +60,7 @@ def build_log_extra(*, agent: str | None = None, model: str | None = None) -> di
     }
 
 
-def init_logging(base_dir: Path | None = None) -> Path:
+def init_logging(base_dir: Path | None = None, *, console_enabled: bool = True) -> Path:
     """初始化统一日志输出，重复调用时保持幂等。"""
     global _LOGGER_INITIALIZED
 
@@ -83,12 +83,12 @@ def init_logging(base_dir: Path | None = None) -> Path:
     file_handler.setFormatter(formatter)
     file_handler.addFilter(context_filter)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    console_handler.addFilter(context_filter)
-
     root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
+    if console_enabled:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        console_handler.addFilter(context_filter)
+        root_logger.addHandler(console_handler)
 
     # 压低第三方 SDK 的成功访问日志，只保留异常级别，避免污染业务主链路日志。
     for logger_name in _QUIET_THIRD_PARTY_LOGGERS:
