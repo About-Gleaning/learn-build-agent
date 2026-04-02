@@ -255,7 +255,15 @@ type ActiveTurn = {
   kind: "chat" | "mode_switch_confirm" | "question_answer" | "question_reject";
   assistantMessageId: string;
   userMessageId?: string;
-  turnStartedAt: string;
+  localTurnStartedAt: string;
+  serverTurnStartedAt: string;
+  serverMessageId: string;
+};
+
+type StreamCompletion = {
+  receivedTerminalDone: boolean;
+  finalPayload: Record<string, unknown> | null;
+  closedWithoutTerminalDone: boolean;
 };
 
 type QuestionDraft = {
@@ -1011,6 +1019,56 @@ function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, f
   };
 }
 
+function applyServerTurnIdentity(activeTurn: ActiveTurn, payload: Record<string, unknown>): ActiveTurn {
+  const serverTurnStartedAt = readString(payload, "turn_started_at", readString(payload, "started_at", activeTurn.serverTurnStartedAt));
+  const serverMessageId = readString(payload, "message_id", activeTurn.serverMessageId);
+  if (serverTurnStartedAt === activeTurn.serverTurnStartedAt && serverMessageId === activeTurn.serverMessageId) {
+    return activeTurn;
+  }
+  return {
+    ...activeTurn,
+    serverTurnStartedAt,
+    serverMessageId,
+  };
+}
+
+function findRecoveredAssistantMessage(history: UiMessage[], activeTurn: ActiveTurn): UiMessage | null {
+  // 终态回补必须优先使用服务端身份字段，避免把本地占位时间戳误当成真实 turn 标识。
+  if (activeTurn.serverMessageId) {
+    return (
+      [...history]
+        .reverse()
+        .find((msg) => msg.role === "assistant" && msg.id === activeTurn.serverMessageId && msg.status !== "running") || null
+    );
+  }
+  if (activeTurn.serverTurnStartedAt) {
+    return (
+      [...history]
+        .reverse()
+        .find((msg) => msg.role === "assistant" && msg.turnStartedAt === activeTurn.serverTurnStartedAt && msg.status !== "running") || null
+    );
+  }
+  return null;
+}
+
+function getMatchedTurnMessages(history: UiMessage[], activeTurn: ActiveTurn): UiMessage[] {
+  if (activeTurn.serverMessageId) {
+    const matchedAssistant = history.find((msg) => msg.id === activeTurn.serverMessageId);
+    if (!matchedAssistant) {
+      return [];
+    }
+    const serverTurnStartedAt = matchedAssistant.turnStartedAt;
+    if (serverTurnStartedAt) {
+      return history.filter((msg) => msg.turnStartedAt === serverTurnStartedAt);
+    }
+    return history.filter((msg) => msg.id === activeTurn.serverMessageId);
+  }
+  if (activeTurn.serverTurnStartedAt) {
+    return history.filter((msg) => msg.turnStartedAt === activeTurn.serverTurnStartedAt);
+  }
+  return [];
+}
+
 async function loadHistory(sessionId: string): Promise<UiMessage[]> {
   const resp = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=50`);
   if (!resp.ok) {
@@ -1088,10 +1146,11 @@ async function applyModeSwitchAction(params: {
 async function streamSse(params: {
   url: string;
   body: Record<string, unknown>;
+  expectedSessionId: string;
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
   signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<StreamCompletion> {
   const resp = await fetch(params.url, {
     method: "POST",
     headers: {
@@ -1109,14 +1168,18 @@ async function streamSse(params: {
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let hasDoneEvent = false;
+  let finalPayload: Record<string, unknown> | null = null;
 
   const isTerminalDoneEvent = (eventName: string, payload: Record<string, unknown>): boolean => {
     if (eventName !== "done") {
       return false;
     }
-    const agentKind = readString(payload, "agent_kind", "primary");
     const depth = readNumber(payload, "depth", 0);
-    return agentKind === "primary" && depth === 0;
+    const eventSessionId = readString(payload, "session_id");
+    if (eventSessionId && eventSessionId !== params.expectedSessionId) {
+      return false;
+    }
+    return depth === 0;
   };
 
   const parseEvent = (rawEvent: string): { event: string; data: string } => {
@@ -1154,6 +1217,7 @@ async function streamSse(params: {
 
         if (isTerminalDoneEvent(event.event, payload)) {
           hasDoneEvent = true;
+          finalPayload = payload;
         }
 
         if (event.event === "error") {
@@ -1172,6 +1236,12 @@ async function streamSse(params: {
       break;
     }
   }
+
+  return {
+    receivedTerminalDone: hasDoneEvent,
+    finalPayload,
+    closedWithoutTerminalDone: !hasDoneEvent,
+  };
 }
 
 async function streamChat(params: {
@@ -1183,8 +1253,8 @@ async function streamChat(params: {
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
   signal?: AbortSignal;
-}): Promise<void> {
-  await streamSse({
+}): Promise<StreamCompletion> {
+  return streamSse({
     url: `${API_BASE}/api/chat/stream`,
     body: {
       session_id: params.sessionId,
@@ -1193,6 +1263,7 @@ async function streamChat(params: {
       provider: params.provider,
       model: params.model,
     },
+    expectedSessionId: params.sessionId,
     onDelta: params.onDelta,
     onEvent: params.onEvent,
     signal: params.signal,
@@ -1205,12 +1276,13 @@ async function streamModeSwitchAction(params: {
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
   signal?: AbortSignal;
-}): Promise<void> {
-  await streamSse({
+}): Promise<StreamCompletion> {
+  return streamSse({
     url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/mode-switch/stream`,
     body: {
       action: params.action,
     },
+    expectedSessionId: params.sessionId,
     onDelta: params.onDelta,
     onEvent: params.onEvent,
     signal: params.signal,
@@ -1224,12 +1296,13 @@ async function streamQuestionAnswer(params: {
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
   signal?: AbortSignal;
-}): Promise<void> {
-  await streamSse({
+}): Promise<StreamCompletion> {
+  return streamSse({
     url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/questions/${encodeURIComponent(params.requestId)}/answer/stream`,
     body: {
       answers: params.answers,
     },
+    expectedSessionId: params.sessionId,
     onDelta: params.onDelta,
     onEvent: params.onEvent,
     signal: params.signal,
@@ -1242,10 +1315,11 @@ async function streamQuestionReject(params: {
   onDelta: (delta: string) => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
   signal?: AbortSignal;
-}): Promise<void> {
-  await streamSse({
+}): Promise<StreamCompletion> {
+  return streamSse({
     url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/questions/${encodeURIComponent(params.requestId)}/reject/stream`,
     body: {},
+    expectedSessionId: params.sessionId,
     onDelta: params.onDelta,
     onEvent: params.onEvent,
     signal: params.signal,
@@ -2165,12 +2239,36 @@ export function App() {
     setError("");
     try {
       const history = await loadHistory(targetSessionId);
+      applySessionRuntimeFromHistory(history);
       startTransition(() => {
         setMessages(filterConversationMessages(history));
       });
+      return history;
     } catch (err) {
       setError((err as Error).message || "历史加载失败");
+      return null;
     }
+  };
+
+  const recoverStreamResultFromHistory = async (activeTurn: ActiveTurn, targetSessionId = sessionId): Promise<boolean> => {
+    const maxAttempts = 12;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const history = filterConversationMessages(await loadHistory(targetSessionId));
+        const recoveredAssistant = findRecoveredAssistantMessage(history, activeTurn);
+        if (recoveredAssistant) {
+          applySessionRuntimeFromHistory(history);
+          startTransition(() => {
+            setMessages(history);
+          });
+          return true;
+        }
+      } catch {
+        // 这里只做最终态回补轮询，单次失败时继续重试，避免瞬时落库延迟导致误判。
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    return false;
   };
 
   const openSessionLoadPanel = () => {
@@ -2251,7 +2349,7 @@ export function App() {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         const history = filterConversationMessages(await loadHistory(sessionId));
-        const matchedTurnMessages = history.filter((msg) => msg.turnStartedAt === activeTurn.turnStartedAt);
+        const matchedTurnMessages = getMatchedTurnMessages(history, activeTurn);
         const stoppedAssistantMessage = matchedTurnMessages.find(
           (msg) => msg.role === "assistant" && msg.status === "interrupted" && msg.finishReason === "cancelled",
         );
@@ -2436,11 +2534,12 @@ export function App() {
       kind: "chat",
       assistantMessageId: assistantId,
       userMessageId: userMessage.id,
-      turnStartedAt: now,
+      localTurnStartedAt: now,
+      serverTurnStartedAt: "",
+      serverMessageId: "",
     };
 
     let finalStatus = "completed";
-    let finalPayload: Record<string, unknown> = {};
     const controller = new AbortController();
     activeStreamControllerRef.current = controller;
     let wasAborted = false;
@@ -2455,7 +2554,7 @@ export function App() {
         : null);
 
     try {
-      await streamChat({
+      const completion = await streamChat({
         sessionId,
         userInput: trimmed,
         mode,
@@ -2463,6 +2562,9 @@ export function App() {
         model: selectedRuntime?.model || "",
         onDelta: () => {},
         onEvent: (eventName, payload) => {
+          if (activeTurnRef.current?.assistantMessageId === assistantId) {
+            activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+          }
           if (eventName === "text_delta") {
             const delta = readString(payload, "delta");
             setMessages((prev) =>
@@ -2521,20 +2623,31 @@ export function App() {
           }
           if (eventName === "done") {
             finalStatus = readString(payload, "status", "completed");
-            finalPayload = payload;
           }
         },
         signal: controller.signal,
       });
 
-      setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id !== assistantId) {
-            return msg;
-          }
-          return mergeMessageWithFinalPayload(msg, finalStatus, finalPayload);
-        }),
-      );
+      if (completion.finalPayload) {
+        finalStatus = readString(completion.finalPayload, "status", finalStatus);
+      }
+
+      if (completion.receivedTerminalDone && completion.finalPayload) {
+        const terminalPayload = completion.finalPayload;
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.id !== assistantId) {
+              return msg;
+            }
+            return mergeMessageWithFinalPayload(msg, finalStatus, terminalPayload);
+          }),
+        );
+      } else if (activeTurnRef.current) {
+        const recovered = await recoverStreamResultFromHistory(activeTurnRef.current, sessionId);
+        if (!recovered) {
+          setError("本轮结果已结束，但终态消息同步失败，请重新加载会话确认结果。");
+        }
+      }
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         wasAborted = true;
@@ -2613,21 +2726,26 @@ export function App() {
         activeTurnRef.current = {
           kind: "mode_switch_confirm",
           assistantMessageId: assistantId,
-          turnStartedAt: now,
+          localTurnStartedAt: now,
+          serverTurnStartedAt: "",
+          serverMessageId: "",
         };
 
         let finalStatus = "completed";
-        let finalPayload: Record<string, unknown> = {};
+        let finalPayload: Record<string, unknown> | null = null;
         const controller = new AbortController();
         activeStreamControllerRef.current = controller;
         let wasAborted = false;
 
         try {
-          await streamModeSwitchAction({
+          const completion = await streamModeSwitchAction({
             sessionId,
             action,
             onDelta: () => {},
             onEvent: (eventName, payload) => {
+              if (activeTurnRef.current?.assistantMessageId === assistantId) {
+                activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+              }
               if (eventName === "text_delta") {
                 const delta = readString(payload, "delta");
                 setMessages((prev) =>
@@ -2692,16 +2810,31 @@ export function App() {
             signal: controller.signal,
           });
 
-          setMessages((prev) =>
-            prev.map((msg) => {
-              if (msg.id !== assistantId) {
-                return msg;
-              }
-              return mergeMessageWithFinalPayload(msg, finalStatus, finalPayload);
-            }),
-          );
+          if (completion.finalPayload) {
+            finalStatus = readString(completion.finalPayload, "status", finalStatus);
+            finalPayload = completion.finalPayload;
+          } else {
+            finalPayload = null;
+          }
 
-          const switchedMode = readString(finalPayload, "agent");
+          if (completion.receivedTerminalDone && completion.finalPayload) {
+            const terminalPayload = completion.finalPayload;
+            setMessages((prev) =>
+              prev.map((msg) => {
+                if (msg.id !== assistantId) {
+                  return msg;
+                }
+                return mergeMessageWithFinalPayload(msg, finalStatus, terminalPayload);
+              }),
+            );
+          } else if (activeTurnRef.current) {
+            const recovered = await recoverStreamResultFromHistory(activeTurnRef.current, sessionId);
+            if (!recovered) {
+              setError("模式切换已执行，但终态消息同步失败，请重新加载会话确认结果。");
+            }
+          }
+
+          const switchedMode = finalPayload ? readString(finalPayload, "agent") : "";
           if (switchedMode === "build" || switchedMode === "plan") {
             setMode(switchedMode);
           }
@@ -2779,23 +2912,28 @@ export function App() {
     activeTurnRef.current = {
       kind: action === "answer" ? "question_answer" : "question_reject",
       assistantMessageId: assistantId,
-      turnStartedAt: now,
+      localTurnStartedAt: now,
+      serverTurnStartedAt: "",
+      serverMessageId: "",
     };
 
     let finalStatus = "completed";
-    let finalPayload: Record<string, unknown> = {};
+    let finalPayload: Record<string, unknown> | null = null;
     const controller = new AbortController();
     activeStreamControllerRef.current = controller;
     let wasAborted = false;
 
     try {
       if (action === "answer") {
-        await streamQuestionAnswer({
+        const completion = await streamQuestionAnswer({
           sessionId,
           requestId: activeQuestion.requestId,
           answers: buildQuestionAnswerPayload(),
           onDelta: () => {},
           onEvent: (eventName, payload) => {
+            if (activeTurnRef.current?.assistantMessageId === assistantId) {
+              activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+            }
             if (eventName === "text_delta") {
               const delta = readString(payload, "delta");
               setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? appendDisplayTextDelta(msg, delta, payload) : msg)));
@@ -2842,12 +2980,21 @@ export function App() {
           },
           signal: controller.signal,
         });
+        if (completion.finalPayload) {
+          finalStatus = readString(completion.finalPayload, "status", finalStatus);
+          finalPayload = completion.finalPayload;
+        } else {
+          finalPayload = null;
+        }
       } else {
-        await streamQuestionReject({
+        const completion = await streamQuestionReject({
           sessionId,
           requestId: activeQuestion.requestId,
           onDelta: () => {},
           onEvent: (eventName, payload) => {
+            if (activeTurnRef.current?.assistantMessageId === assistantId) {
+              activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+            }
             if (eventName === "text_delta") {
               const delta = readString(payload, "delta");
               setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? appendDisplayTextDelta(msg, delta, payload) : msg)));
@@ -2894,9 +3041,25 @@ export function App() {
           },
           signal: controller.signal,
         });
+        if (completion.finalPayload) {
+          finalStatus = readString(completion.finalPayload, "status", finalStatus);
+          finalPayload = completion.finalPayload;
+        } else {
+          finalPayload = null;
+        }
       }
 
-      setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? mergeMessageWithFinalPayload(msg, finalStatus, finalPayload) : msg)));
+      if (finalPayload) {
+        const terminalPayload = finalPayload;
+        setMessages((prev) =>
+          prev.map((msg) => (msg.id === assistantId ? mergeMessageWithFinalPayload(msg, finalStatus, terminalPayload) : msg)),
+        );
+      } else if (activeTurnRef.current) {
+        const recovered = await recoverStreamResultFromHistory(activeTurnRef.current, sessionId);
+        if (!recovered) {
+          setError("问题处理已结束，但终态消息同步失败，请重新加载会话确认结果。");
+        }
+      }
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         wasAborted = true;

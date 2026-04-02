@@ -530,6 +530,100 @@ def test_subagent_question_answer_should_resume_with_subagent_runtime(monkeypatc
     assert get_pending_question("s_subagent_resume") is None
 
 
+def test_subagent_question_answer_stream_should_emit_subagent_done(monkeypatch):
+    pending = session_module.PendingQuestion(
+        request_id="question_subagent_stream",
+        tool_name="question",
+        title="等待用户回答 1 个问题",
+        questions=[
+            session_module.PendingQuestionItem(
+                question="需要哪种输出？",
+                header="输出",
+                options=[session_module.PendingQuestionOption(label="A", description="简洁")],
+                multiple=False,
+                custom=True,
+            )
+        ],
+        agent_name="explore",
+        agent_kind="subagent",
+        resume_mode="",
+        resume_runtime_agent="explore",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3-max",
+        delegation_id="delegation_stream_123",
+        parent_tool_call_id="call_task_stream_1",
+        requested_at="t1",
+    )
+    session_module.PENDING_QUESTIONS["s_subagent_resume_stream"] = pending
+
+    def fake_run_session_stream_events(user_input: str, session_id: str, **kwargs):
+        captured_agent = kwargs.get("runtime_agent")
+        assert user_input.startswith("question 工具已收到用户回答")
+        assert session_id == "s_subagent_resume_stream"
+        assert captured_agent == "explore"
+
+        yield {
+            "type": "start",
+            "event_id": "evt_subagent_start",
+            "session_id": session_id,
+            "agent": "explore",
+            "agent_kind": "subagent",
+            "depth": 0,
+            "provider": "qwen",
+            "model": "qwen3-max",
+            "started_at": "t1",
+        }
+        yield {
+            "type": "text_delta",
+            "event_id": "evt_subagent_delta",
+            "session_id": session_id,
+            "agent": "explore",
+            "agent_kind": "subagent",
+            "depth": 0,
+            "delta": "subagent resumed",
+        }
+        yield {
+            "type": "done",
+            "event_id": "evt_subagent_done",
+            "session_id": session_id,
+            "agent": "explore",
+            "agent_kind": "subagent",
+            "depth": 0,
+            "message_id": "msg_subagent_done",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {
+                "round_count": 1,
+                "tool_call_count": 0,
+                "tool_names": [],
+                "delegation_count": 1,
+                "delegated_agents": ["explore"],
+                "duration_ms": 100,
+            },
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr(session_module, "run_session_stream_events", fake_run_session_stream_events)
+
+    events = list(
+        run_question_answer_stream_events(
+            "s_subagent_resume_stream",
+            "question_subagent_stream",
+            [{"answers": ["A"], "notes": ""}],
+        )
+    )
+
+    done_event = next(event for event in events if event["type"] == "done")
+    assert done_event["agent"] == "explore"
+    assert done_event["agent_kind"] == "subagent"
+    assert done_event["depth"] == 0
+    assert get_pending_question("s_subagent_resume_stream") is None
+
+
 def test_plan_enter_confirmed_should_switch_by_program_control(monkeypatch):
     call_state = {"count": 0}
 
