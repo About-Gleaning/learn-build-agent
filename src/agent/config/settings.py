@@ -545,10 +545,10 @@ def _load_lsp_language_settings(raw_value: Any, *, language: str) -> LspLanguage
             maven_local_repository="",
         ),
         "typescript": LspLanguageSettings(
-            enabled=False,
-            command=(),
+            enabled=True,
+            command=("typescript-language-server", "--stdio"),
             file_extensions=(".ts", ".tsx", ".js", ".jsx"),
-            workspace_markers=("package.json", "tsconfig.json"),
+            workspace_markers=("tsconfig.json", "package.json"),
             init_options={},
             maven_local_repository="",
         ),

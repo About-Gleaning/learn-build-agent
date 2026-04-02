@@ -101,10 +101,10 @@
         "init_options": {}
       },
       "typescript": {
-        "enabled": false,
-        "command": [],
+        "enabled": true,
+        "command": ["typescript-language-server", "--stdio"],
         "file_extensions": [".ts", ".tsx", ".js", ".jsx"],
-        "workspace_markers": ["package.json", "tsconfig.json"],
+        "workspace_markers": ["tsconfig.json", "package.json"],
         "init_options": {}
       }
     },

@@ -864,3 +864,176 @@ button:disabled {
     margin-left: 0;
   }
 }
+
+/* Todo 列表样式 */
+.todo-list-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border-radius: 6px;
+  border-left: 3px solid transparent;
+  transition: background 0.2s ease;
+}
+
+.todo-item:hover {
+  background: rgba(124, 194, 255, 0.08);
+}
+
+.todo-status-icon {
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.todo-text {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.todo-priority {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+/* 状态样式 */
+.todo-status-completed {
+  border-left-color: var(--success);
+  opacity: 0.85;
+}
+
+.todo-status-completed .todo-status-icon {
+  color: var(--success);
+}
+
+.todo-status-completed .todo-text {
+  text-decoration: line-through;
+  color: var(--ink-subtle);
+}
+
+.todo-status-in-progress {
+  border-left-color: var(--brand);
+  background: rgba(124, 194, 255, 0.08);
+}
+
+.todo-status-in-progress .todo-status-icon {
+  color: var(--brand);
+}
+
+.todo-status-cancelled {
+  border-left-color: var(--danger);
+  opacity: 0.7;
+}
+
+.todo-status-cancelled .todo-status-icon {
+  color: var(--danger);
+}
+
+.todo-status-cancelled .todo-text {
+  text-decoration: line-through;
+  color: var(--ink-faint);
+}
+
+.todo-status-pending {
+  border-left-color: var(--ink-faint);
+}
+
+.todo-status-pending .todo-status-icon {
+  color: var(--ink-faint);
+}
+
+/* 优先级样式 */
+.todo-priority-high {
+  background: rgba(255, 143, 133, 0.2);
+  color: var(--danger);
+}
+
+.todo-priority-medium {
+  background: rgba(240, 198, 116, 0.2);
+  color: var(--warning);
+}
+
+.todo-priority-low {
+  background: rgba(126, 215, 166, 0.2);
+  color: var(--success);
+}
+
+/* Question 工具样式 */
+.question-list-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.question-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--panel);
+  border-radius: 6px;
+  border-left: 3px solid var(--brand);
+}
+
+.question-header {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 16px;
+}
+
+.question-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+}
+
+.question-option-label {
+  font-size: 13px;
+  color: var(--ink);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.question-option-desc {
+  font-size: 12px;
+  color: var(--ink-subtle);
+  line-height: 1.5;
+  margin-left: 18px;
+}
+
+.question-meta {
+  font-size: 11px;
+  color: var(--ink-subtle);
+  margin-top: 4px;
+  padding-left: 16px;
+}

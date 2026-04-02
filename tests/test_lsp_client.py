@@ -8,7 +8,13 @@ from agent.lsp.filters import filter_diagnostics
 from agent.lsp.types import LspDiagnostic, LspDiagnosticsResult, LspPosition, LspQueryResult, LspRange
 
 
-def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True, python_enabled: bool = True) -> LspSettings:
+def _build_lsp_settings(
+    *,
+    enabled: bool = True,
+    java_enabled: bool = True,
+    python_enabled: bool = True,
+    typescript_enabled: bool = False,
+) -> LspSettings:
     return LspSettings(
         enabled=enabled,
         ide_enabled=False,
@@ -41,10 +47,10 @@ def _build_lsp_settings(*, enabled: bool = True, java_enabled: bool = True, pyth
                 maven_local_repository="",
             ),
             "typescript": LspLanguageSettings(
-                enabled=False,
-                command=(),
-                file_extensions=(".ts",),
-                workspace_markers=("package.json",),
+                enabled=typescript_enabled,
+                command=("typescript-language-server", "--stdio"),
+                file_extensions=(".ts", ".tsx", ".js", ".jsx"),
+                workspace_markers=("tsconfig.json", "package.json"),
                 init_options={},
                 maven_local_repository="",
             ),
@@ -101,6 +107,47 @@ def test_lsp_client_should_route_java_file_to_manager(monkeypatch, tmp_path):
 
     assert result.status == "completed"
     assert captured["language"] == "java"
+    assert captured["file_path"] == target
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_language"),
+    [
+        ("main.ts", "typescript"),
+        ("main.tsx", "typescript"),
+        ("main.js", "typescript"),
+        ("main.jsx", "typescript"),
+    ],
+)
+def test_lsp_client_should_route_typescript_family_files_to_manager(
+    monkeypatch, tmp_path, filename, expected_language
+):
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def collect_diagnostics(self, adapter, *, file_path, content):
+            captured["language"] = adapter.language
+            captured["file_path"] = file_path
+            captured["content"] = content
+            return LspDiagnosticsResult(
+                status="completed",
+                diagnostics=(),
+                diagnostics_total=0,
+                lsp_language="typescript",
+                lsp_server="typescript-language-server",
+            )
+
+    monkeypatch.setattr(
+        "agent.lsp.client.get_lsp_settings",
+        lambda: _build_lsp_settings(typescript_enabled=True),
+    )
+    monkeypatch.setattr("agent.lsp.client.get_lsp_manager", lambda: FakeManager())
+
+    target = tmp_path / filename
+    result = LspClient().collect_diagnostics(file_path=target, content="export const demo = 1;")
+
+    assert result.status == "completed"
+    assert captured["language"] == expected_language
     assert captured["file_path"] == target
 
 

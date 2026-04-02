@@ -9,6 +9,7 @@ from agent.lsp.documents import clear_document_store
 import agent.lsp.manager as manager_module
 from agent.lsp.manager import LspManager
 from agent.lsp.servers.jdtls import JdtlsServerAdapter
+from agent.lsp.servers.typescript import TypeScriptLspServerAdapter
 from agent.runtime.workspace import configure_workspace
 
 
@@ -264,6 +265,45 @@ def test_lsp_manager_should_reuse_server_in_same_workspace(_patched_manager_env,
 
     assert first is second
     assert len(_patched_manager_env) == 1
+
+
+def test_lsp_manager_should_use_typescriptreact_language_id_for_tsx(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    clear_document_store()
+    settings = replace(
+        _build_lsp_settings(),
+        languages={
+            **_build_lsp_settings().languages,
+            "typescript": LspLanguageSettings(
+                enabled=True,
+                command=("typescript-language-server", "--stdio"),
+                file_extensions=(".ts", ".tsx", ".js", ".jsx"),
+                workspace_markers=("tsconfig.json", "package.json"),
+                init_options={},
+                maven_local_repository="",
+            ),
+        },
+    )
+    monkeypatch.setattr("agent.lsp.manager.get_lsp_settings", lambda: settings)
+    monkeypatch.setattr("agent.lsp.servers.base.get_lsp_settings", lambda: settings)
+    monkeypatch.setattr("agent.lsp.manager.subprocess.Popen", lambda *args, **kwargs: _FakeProcess())
+    monkeypatch.setattr("agent.lsp.manager.JsonRpcEndpoint", _FakeEndpoint)
+
+    adapter = TypeScriptLspServerAdapter()
+    manager = LspManager()
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "tsconfig.json").write_text("{}", encoding="utf-8")
+    file_path = project_root / "src" / "App.tsx"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text("export const App = () => null;", encoding="utf-8")
+
+    server = manager.get_or_start(adapter, file_path=file_path)
+    manager.sync_document(server, file_path=file_path, content="export const App = () => null;")
+
+    did_open = server.endpoint.notifications[1]
+    assert did_open[0] == "textDocument/didOpen"
+    assert did_open[1]["textDocument"]["languageId"] == "typescriptreact"
 
 
 def test_lsp_manager_should_send_did_open_then_did_change(_patched_manager_env, tmp_path):

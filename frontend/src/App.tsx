@@ -1,3 +1,11 @@
+/**
+ * @file App.tsx
+ * @author codex
+ * @date 2026-04-02
+ * @description my-agent Web 前端主组件，提供 Agent 对话交互工作台。支持流式对话、会话管理、Agent 模式切换（build/plan）、
+ * 工具调用过程展示、时间线渲染、question 工具交互、停止会话等功能。作为前端核心入口组件，管理消息状态、运行时配置及 UI 交互。
+ */
+
 import { FormEvent, KeyboardEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -87,6 +95,7 @@ type QuestionItem = {
   header: string;
   options: QuestionOption[];
   multiple: boolean;
+  custom?: boolean;
 };
 
 type QuestionInfo = {
@@ -112,6 +121,7 @@ type ProgressEntry = {
   resultFull?: string;
   resultLineCount?: number;
   toolCallId?: string;
+  toolName?: string;
   meta: string[];
   isFinal?: boolean;
   isReasoning?: boolean;
@@ -447,6 +457,196 @@ function shouldEnableContentToggle(preview?: string, full?: string): boolean {
 
 function getToolContentToggleKey(messageId: string, entryId: string, blockType: "request" | "result"): string {
   return `${messageId}:${entryId}:${blockType}`;
+}
+
+// Todo 列表类型定义
+interface TodoItem {
+  id?: string;
+  text: string;
+  status?: "pending" | "in_progress" | "completed" | "cancelled";
+  priority?: "high" | "medium" | "low";
+}
+
+// Todo 列表渲染组件
+function TodoListRenderer({ content }: { content: string }) {
+  const [parsedTodos, setParsedTodos] = useState<TodoItem[]>([]);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    try {
+      const normalized = content.trim();
+      if (!normalized) {
+        setParsedTodos([]);
+        return;
+      }
+
+      const data = JSON.parse(normalized);
+      const todos = data.todo_list || data.todos || data;
+
+      if (Array.isArray(todos)) {
+        setParsedTodos(todos);
+      } else {
+        setError("无法解析 todo 列表数据");
+      }
+    } catch (e) {
+      setError("解析失败");
+    }
+  }, [content]);
+
+  if (error) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  if (parsedTodos.length === 0) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  const getStatusIcon = (status?: string) => {
+    switch (status) {
+      case "completed":
+        return "✓";
+      case "in_progress":
+        return "▶";
+      case "cancelled":
+        return "✗";
+      default:
+        return "○";
+    }
+  };
+
+  const getStatusClass = (status?: string) => {
+    switch (status) {
+      case "completed":
+        return "todo-status-completed";
+      case "in_progress":
+        return "todo-status-in-progress";
+      case "cancelled":
+        return "todo-status-cancelled";
+      default:
+        return "todo-status-pending";
+    }
+  };
+
+  const getPriorityClass = (priority?: string) => {
+    switch (priority) {
+      case "high":
+        return "todo-priority-high";
+      case "medium":
+        return "todo-priority-medium";
+      case "low":
+        return "todo-priority-low";
+      default:
+        return "todo-priority-medium";
+    }
+  };
+
+  const getPriorityLabel = (priority?: string) => {
+    switch (priority) {
+      case "high":
+        return "高";
+      case "medium":
+        return "中";
+      case "low":
+        return "低";
+      default:
+        return "中";
+    }
+  };
+
+  return (
+    <div className="todo-list-container">
+      {parsedTodos.map((todo, index) => (
+        <div key={todo.id || `todo-${index}`} className={`todo-item ${getStatusClass(todo.status)}`}>
+          <span className="todo-status-icon">{getStatusIcon(todo.status)}</span>
+          <span className="todo-text">{todo.text}</span>
+          {todo.priority && (
+            <span className={`todo-priority ${getPriorityClass(todo.priority)}`}>
+              {getPriorityLabel(todo.priority)}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Question 工具渲染组件
+function QuestionRenderer({ content }: { content: string }) {
+  const [parsedQuestions, setParsedQuestions] = useState<{ questions: QuestionItem[] } | null>(null);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    try {
+      const normalized = content.trim();
+      if (!normalized) {
+        setParsedQuestions(null);
+        return;
+      }
+
+      const data = JSON.parse(normalized);
+      const questions = data.questions || [];
+
+      if (Array.isArray(questions)) {
+        setParsedQuestions({ questions });
+      } else {
+        setError("无法解析 question 数据");
+      }
+    } catch (e) {
+      setError("解析失败");
+    }
+  }, [content]);
+
+  if (error) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  if (!parsedQuestions || parsedQuestions.questions.length === 0) {
+    return (
+      <pre className="assistant-timeline-entry-code">{content}</pre>
+    );
+  }
+
+  return (
+    <div className="question-list-container">
+      {parsedQuestions.questions.map((question, index) => (
+        <div key={`question-${index}`} className="question-item">
+          <div className="question-header">
+            {question.header ? question.header : question.question}
+          </div>
+          {question.options && question.options.length > 0 ? (
+            <div className="question-options">
+              {question.options.map((option, optIndex) => (
+                <div key={`option-${optIndex}`} className="question-option">
+                  <span className="question-option-label">
+                    {question.multiple ? "□" : "○"} {option.label}
+                  </span>
+                  {option.description && (
+                    <div className="question-option-desc">
+                      {option.description}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="question-options">
+              <em>无选项</em>
+            </div>
+          )}
+          <div className="question-meta">
+            {question.multiple ? "[多选]" : "[单选]"}
+            {question.custom !== false && " · 支持自定义输入"}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function formatToolRequestContent(text?: string): string {
@@ -1423,6 +1623,7 @@ function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: str
     resultFull: part.kind === "tool_result" ? part.detail : undefined,
     resultLineCount: part.kind === "tool_result" ? countLogicalLines(part.detail) : 0,
     toolCallId: part.toolCallId,
+    toolName: part.toolName,
     meta: buildProgressMeta(item),
   };
 }
@@ -1501,6 +1702,7 @@ function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
       resultFull: item.kind === "tool_result" ? item.detail : undefined,
       resultLineCount: item.kind === "tool_result" ? countLogicalLines(item.detail) : 0,
       toolCallId: item.toolCallId,
+      toolName: item.toolName,
       meta: buildProgressMeta(item),
     });
   }
@@ -1603,7 +1805,13 @@ function renderAssistantTimeline(params: {
               >
                 <div className="assistant-timeline-entry-content">
                   <div className="assistant-timeline-entry-label">参数</div>
-                  <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{requestText}</pre>
+                  {entry.toolName === "todo_write" ? (
+                    <TodoListRenderer content={entry.requestFull || ""} />
+                  ) : entry.toolName === "question" ? (
+                    <QuestionRenderer content={entry.requestFull || ""} />
+                  ) : (
+                    <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{requestText}</pre>
+                  )}
                 </div>
               </div>
             ) : null}

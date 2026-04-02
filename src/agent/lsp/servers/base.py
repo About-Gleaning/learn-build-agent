@@ -36,6 +36,10 @@ class LspServerAdapter(ABC):
         suffix = file_path.suffix.lower()
         return suffix in self.get_language_settings().file_extensions
 
+    def get_language_id(self, file_path: Path) -> str:
+        del file_path
+        return self.language_id
+
     def build_server_key(self, workspace_root: Path, *, file_path: Path | None = None) -> str:
         del file_path
         return f"{self.language}:{workspace_root.resolve()}:{self.adapter_mode}"
