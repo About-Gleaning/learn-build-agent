@@ -55,7 +55,7 @@
   },
   "mcp": {
     // 是否启用 MCP server 工具集成。关闭时会完全忽略 servers 配置。
-    "enabled": false,
+    "enabled": true,
     // 发现 MCP tool 列表时的默认超时时间。
     "discovery_timeout_ms": 10000,
     // 调用 MCP tool 时的默认超时时间。

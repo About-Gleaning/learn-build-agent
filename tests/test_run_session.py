@@ -3346,7 +3346,7 @@ def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
         assert config.vendor == "qwen"
         assert config.model == "qwen3-coder-next"
         assert config.api_mode == "chat_completions"
-        assert config.base_url == "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
+        assert config.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         assert config.timeout_seconds == 60
     finally:
         clear_runtime_settings_cache()
@@ -3363,6 +3363,22 @@ def test_resolve_llm_config_should_support_kimi_provider(monkeypatch):
         assert config.model == "kimi-k2.5"
         assert config.api_mode == "chat_completions"
         assert config.base_url == "https://api.moonshot.cn/v1"
+        assert config.timeout_seconds == 60
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_resolve_llm_config_should_support_kimi_model_under_qwen_provider(monkeypatch):
+    monkeypatch.setenv("QWEN_API_KEY", "test-qwen-key")
+    clear_runtime_settings_cache()
+
+    try:
+        config = resolve_llm_config("build", "qwen", "kimi/kimi-k2.5")
+        assert config.provider == "qwen"
+        assert config.vendor == "qwen"
+        assert config.model == "kimi/kimi-k2.5"
+        assert config.api_mode == "chat_completions"
+        assert config.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         assert config.timeout_seconds == 60
     finally:
         clear_runtime_settings_cache()

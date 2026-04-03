@@ -237,6 +237,7 @@ def test_runtime_options_should_return_backend_config():
     assert any(item["vendor"] == "kimi" for item in payload["providers"])
     assert any(item["vendor"] == "qwen" for item in payload["providers"])
     assert any("qwen3-max" in item["models"] for item in payload["providers"] if item["name"] == "qwen")
+    assert any("kimi/kimi-k2.5" in item["models"] for item in payload["providers"] if item["name"] == "qwen")
     assert any(item["api_mode"] == "responses" for item in payload["providers"] if item["name"] == "gpt")
     assert any(item["api_mode"] in {"responses", "chat_completions"} for item in payload["agents"] if item["name"] == "build")
     assert payload["workspace_root"]
