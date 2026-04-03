@@ -960,7 +960,7 @@ def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None, m
     if provider is None:
         raise ValueError(f"未找到名为 '{provider_key}' 的大模型厂商配置。")
 
-    api_key = os.getenv(provider.api_key_env, "").strip() or os.getenv("API_KEY", "").strip()
+    api_key = os.getenv(provider.api_key_env, "").strip()
     if not api_key:
         raise ValueError(f"缺少 API Key，请配置环境变量 {provider.api_key_env}。")
 
