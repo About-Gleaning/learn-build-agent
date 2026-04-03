@@ -74,12 +74,14 @@ my-agent
 如果你记不清命令，可以先看：
 
 ```bash
-my-agent help
+my-agent --help
 ```
 
 说明：
 
 - 不带子命令时，`my-agent` 会直接进入持续对话模式
+- `my-agent --help` 会输出带中文说明的完整命令总览
+- `my-agent -h` 与 `my-agent --help` 等价
 
 常见参数：
 
@@ -87,6 +89,7 @@ my-agent help
 my-agent --workdir /path/to/project
 my-agent --session demo_001
 my-agent --mode plan
+my-agent --help
 ```
 
 兼容入口仍可使用：
@@ -108,7 +111,7 @@ pnpm install
 然后在工作区目录启动：
 
 ```bash
-my-agent web --host 127.0.0.1 --port 8000
+my-agent web start --host 127.0.0.1 --port 8000
 ```
 
 默认会同时启动当前工作区专属的一组前后端实例：
@@ -121,6 +124,16 @@ my-agent web --host 127.0.0.1 --port 8000
 
 ```bash
 my-agent web --verbose
+```
+
+其他常用 Web 命令：
+
+```bash
+my-agent web --help
+my-agent web status
+my-agent web stop
+my-agent web prune
+my-agent web --share-frontend
 ```
 
 ### 5. 运行测试
@@ -307,8 +320,9 @@ docs/
 ```bash
 pip install -e .
 my-agent
-my-agent help
-my-agent web --host 127.0.0.1 --port 8000
+my-agent --help
+my-agent web start --host 127.0.0.1 --port 8000
+my-agent web status
 pytest -q
 ```
 

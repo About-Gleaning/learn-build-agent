@@ -1,3 +1,5 @@
+import pytest
+
 from agent import cli as cli_module
 
 
@@ -10,13 +12,68 @@ def test_main_should_print_help_and_skip_workspace_configuration(monkeypatch, ca
         lambda *args, **kwargs: called.update({"configured": True}),
     )
 
-    cli_module.main(["help"])
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.main(["--help"])
 
     output = capsys.readouterr().out
+    assert exc_info.value.code == 0
     assert called == {"configured": False}
     assert "my-agent 命令总览" in output
+    assert "-h, --help" in output
     assert "my-agent web prune" in output
-    assert "--workdir PATH" in output
+    assert "--workdir WORKDIR" in output
+    assert "--session SESSION" in output
+    assert "--mode {build,plan}" in output
+    assert "--host HOST" in output
+    assert "--port PORT" in output
+    assert "--share-frontend" in output
+    assert "--verbose" in output
+    assert "顶层参数用于 my-agent ...；Web 参数用于 my-agent web ..." in output
+
+
+def test_main_should_print_web_help(monkeypatch, capsys):
+    monkeypatch.setattr(cli_module, "configure_workspace", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.main(["web", "--help"])
+
+    output = capsys.readouterr().out
+    assert exc_info.value.code == 0
+    assert "usage: my-agent web" in output
+    assert "--host HOST" in output
+    assert "--port PORT" in output
+    assert "--share-frontend" in output
+    assert "--verbose" in output
+
+
+def test_main_should_reject_removed_help_subcommand(monkeypatch, capsys):
+    monkeypatch.setattr(cli_module, "configure_workspace", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.main(["help"])
+
+    error_output = capsys.readouterr().err
+    assert exc_info.value.code == 2
+    assert "invalid choice" in error_output
+    assert "'help'" in error_output
+
+
+def test_help_text_should_cover_parser_arguments():
+    output = cli_module._format_help_text()
+
+    assert "-h, --help" in output
+    assert "my-agent --help" in output
+    assert "--workdir WORKDIR" in output
+    assert "--session SESSION" in output
+    assert "--mode {build,plan}" in output
+    assert "my-agent web status" in output
+    assert "my-agent web stop" in output
+    assert "my-agent web prune" in output
+    assert "--host HOST" in output
+    assert "--port PORT" in output
+    assert "--share-frontend" in output
+    assert "--verbose" in output
+    assert "  web" in output
 
 
 def test_main_should_generate_random_session_id_when_session_not_provided(monkeypatch, tmp_path):

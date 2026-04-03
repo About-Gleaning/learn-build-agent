@@ -68,7 +68,7 @@
 - `pip install -e .`：安装 `my-agent` 命令。
 - `npm install -g typescript typescript-language-server`：安装 TypeScript / JavaScript LSP 依赖。
 - `my-agent`：在当前目录启动 CLI；不带子命令时会直接进入持续对话模式。
-- `my-agent help`：输出常用命令、核心参数与典型示例，优先用它快速确认 CLI 用法。
+- `my-agent --help`：输出常用命令、核心参数与典型示例，优先用它快速确认 CLI 用法；`my-agent -h` 为等价短参数。
 - `my-agent web --host 127.0.0.1 --port 8000`：在当前目录启动 Web 前后端；后端从 `--port` 开始自动选择空闲端口，前端默认从 `5173` 开始自动选择空闲端口。
 - `python3 src/main.py`：兼容 CLI 入口。
 - `pytest -q`：执行测试。
