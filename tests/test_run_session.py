@@ -3425,6 +3425,18 @@ def test_resolve_llm_config_should_require_kimi_api_key(monkeypatch):
         clear_runtime_settings_cache()
 
 
+def test_resolve_llm_config_should_not_fallback_to_generic_api_key(monkeypatch):
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    monkeypatch.setenv("API_KEY", "generic-key")
+    clear_runtime_settings_cache()
+
+    try:
+        with pytest.raises(ValueError, match="QWEN_API_KEY"):
+            resolve_llm_config("build", "qwen")
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_get_runtime_settings_should_require_vendor(tmp_path, monkeypatch):
     config_path = tmp_path / "llm_runtime.json"
     config_path.write_text(
