@@ -12,6 +12,7 @@ from typing import Any, Callable, Literal, TypedDict
 
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..config.logging_setup import build_log_extra, sanitize_log_text
+from ..mcp.runtime import describe_mcp_runtime_alerts_for_mode, execute_mcp_tool, list_mcp_tools
 from ..config.settings import (
     ResolvedLLMConfig,
     resolve_agent_loop_settings,
@@ -354,8 +355,6 @@ def _build_environment_appendix(*, agent: str, model: str, provider: str, vendor
         f"- current_datetime: {now_text}",
     ]
     return "\n".join(lines)
-
-
 def _apply_prompt_context(base_prompt: str, *, agent: str, session_id: str) -> str:
     if agent.strip().lower() != "plan":
         return base_prompt
@@ -401,6 +400,44 @@ def build_system_prompt(
     return "\n\n".join(part for part in parts if part)
 
 
+def _iter_mcp_runtime_alert_events(
+    *,
+    session_id: str,
+    active_agent: str,
+    depth: int,
+    mode: MainAgentMode | None,
+) -> Generator[dict[str, Any], None, None]:
+    if depth != 0:
+        return
+
+    normalized_mode = "plan" if (mode or "").strip().lower() == "plan" else "build"
+    alerts = describe_mcp_runtime_alerts_for_mode(normalized_mode)
+    if not alerts:
+        return
+
+    for alert in alerts:
+        logger.warning(
+            "mcp.runtime_alert_emitted mode=%s server=%s code=%s message=%s",
+            normalized_mode,
+            alert.server_alias,
+            alert.code,
+            alert.message,
+        )
+        yield _build_stream_event(
+            "runtime_alert",
+            session_id=session_id,
+            agent=active_agent,
+            agent_kind=_resolve_agent_kind(active_agent),
+            depth=depth,
+            scope="mcp",
+            severity="error",
+            code=alert.code,
+            message=f"MCP server `{alert.server_alias}` 当前不可用：{alert.message}",
+            server_alias=alert.server_alias,
+            mode=normalized_mode,
+        )
+
+
 def _get_system_prompt_for_mode(
     mode: MainAgentMode,
     *,
@@ -419,7 +456,15 @@ def _get_system_prompt_for_mode(
 
 
 def _get_tools_for_mode(mode: MainAgentMode) -> list[dict]:
-    return build_agent_tools(mode, _get_skill_registry().list_briefs())
+    base_tools = build_agent_tools(mode, _get_skill_registry().list_briefs())
+    mcp_tools, _ = list_mcp_tools(mode)
+    return [*base_tools, *mcp_tools]
+
+
+def _get_base_tools_for_agent(mode: str = "build") -> list[dict[str, Any]]:
+    base_tools = build_base_tools(_get_skill_registry().list_briefs())
+    mcp_tools, _ = list_mcp_tools(mode)
+    return [*base_tools, *mcp_tools]
 
 
 def _ensure_system_prompt(messages: list[Message], prompt: str, session_id: str) -> list[Message]:
@@ -955,7 +1000,7 @@ def _bootstrap_session(
     initial_tools = (
         _get_tools_for_mode(initial_mode)
         if mode_enabled
-        else (tools if tools is not None else build_agent_tools("build", registry.list_briefs()))
+        else (tools if tools is not None else _get_tools_for_mode("build"))
     )
     initial_system_prompt = (
         _get_system_prompt_for_mode(
@@ -1301,7 +1346,7 @@ def _resume_question_session(
         kwargs: dict[str, Any] = {
             "user_input": user_input,
             "session_id": session_id,
-            "tools": build_base_tools(registry.list_briefs()),
+            "tools": _get_base_tools_for_agent("build"),
             "system_prompt": _call_build_system_prompt(
                 agent=runtime_agent,
                 model=llm_config.model,
@@ -1966,7 +2011,7 @@ def subagent_loop(
     result = run_session(
         user_input=prompt,
         session_id=session_id,
-        tools=build_base_tools(_get_skill_registry().list_briefs()),
+        tools=_get_base_tools_for_agent("build"),
         system_prompt=_call_build_system_prompt(
             agent=agent_name,
             model=(llm_config.model if llm_config else ""),
@@ -2145,6 +2190,12 @@ def _run_session_stream(
             provider=current_runtime.provider,
             model=current_runtime.model,
             started_at=turn_started_at,
+        )
+        yield from _iter_mcp_runtime_alert_events(
+            session_id=active_session_id,
+            active_agent=initial_agent,
+            depth=depth,
+            mode=bootstrap.initial_mode,
         )
 
         effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
@@ -2452,7 +2503,7 @@ def _run_session_stream(
                         delegated_message = yield from _run_session_stream(
                             task_request.prompt,
                             session_id=active_session_id,
-                            tools=build_base_tools(registry.list_briefs()),
+                            tools=_get_base_tools_for_agent("build"),
                             system_prompt=_call_build_system_prompt(
                                 agent=task_request.agent,
                                 model=current_runtime.model,
@@ -2765,6 +2816,8 @@ def _build_tool_handlers(
     get_latest_model: Callable[[], str],
     get_current_runtime: Callable[[], ResolvedLLMConfig],
 ) -> dict[str, Callable[..., object]]:
+    mcp_tools, _ = list_mcp_tools()
+
     def _run_mode_aware_bash(
         command: str,
         timeout: int | float | None = None,
@@ -2824,7 +2877,7 @@ def _build_tool_handlers(
             latest_model=get_latest_model(),
         )
 
-    return {
+    handlers: dict[str, Callable[..., object]] = {
         "bash": lambda **kw: _run_mode_aware_bash(**kw),
         "glob": lambda **kw: run_glob(kw["pattern"], kw.get("path")),
         "grep": lambda **kw: run_grep(kw["pattern"], kw.get("path"), kw.get("include")),
@@ -2861,6 +2914,17 @@ def _build_tool_handlers(
         "plan_exit": lambda **kw: _run_plan_exit_tool(**kw),
         "load_skill": lambda **kw: run_load_skill(name=kw["name"], registry=_get_skill_registry()),
     }
+    for tool in mcp_tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        tool_name = str(function.get("name", "")).strip() if isinstance(function, dict) else ""
+        if not tool_name:
+            continue
+        handlers[tool_name] = lambda _tool_name=tool_name, **kw: execute_mcp_tool(
+            _tool_name,
+            kw,
+            mode=get_mode(),
+        )
+    return handlers
 
 
 def run_session(
