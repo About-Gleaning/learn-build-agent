@@ -18,6 +18,7 @@
 - Python 3.11 或更高版本
 - 使用 Web 模式时需要额外安装 `pnpm`
 - 如需联网搜索，需要配置 `EXA_API_KEY`
+- 如需使用 GitHub MCP 工具，需要配置 `GITHUB_TOKEN`
 - 如需文件写入后的 LSP 诊断：
   - Python 诊断依赖 `python-lsp-server`
   - Java 诊断依赖 `jdtls` 和 JDK 21 兼容环境
@@ -53,12 +54,14 @@ OPENAI_API_KEY=
 GEMINI_API_KEY=
 KIMI_API_KEY=
 EXA_API_KEY=
+GITHUB_TOKEN=
 ```
 
 说明：
 
 - 至少为你实际要使用的 provider 配置对应 API Key
 - `EXA_API_KEY` 仅在使用 `websearch` 工具时需要
+- `GITHUB_TOKEN` 仅在使用 GitHub MCP 工具时需要，禁止写入 `project_runtime.json` 等仓库内配置文件
 
 ### 3. 启动 CLI
 
@@ -202,7 +205,18 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 - Agent 最大轮次
 - 日志截断
 - 会话历史裁剪
+- MCP server 工具集成
 - LSP 行为与语言服务配置
+
+MCP 说明：
+
+- 在 `project_runtime.json` 的 `mcp.servers` 中注册 MCP server
+- 当前支持 `stdio` 与 `streamable_http`
+- 运行时会先拉取 MCP server 的 tool 列表，再统一转成普通 function tool 提交给 LLM
+- 暴露给模型的工具名统一规范为 `serverAlias__toolName`
+- `plan` 模式是否可见由各个 server 的 `expose_to_plan` 控制
+- 某个 MCP server 不可用时会自动跳过，并在日志与 system prompt 中补充提示，不阻断其他工具
+- MCP 鉴权信息必须通过环境变量注入，不允许在仓库配置中硬编码令牌或密钥
 
 Java LSP 说明：
 
@@ -231,6 +245,7 @@ TypeScript / JavaScript LSP 说明：
 - 搜索类：`glob`、`grep`
 - 执行类：`bash`
 - 网络类：`webfetch`、`websearch`
+- 扩展类：来自 MCP server 的动态工具，命名为 `serverAlias__toolName`
 - 协作类：`question`、`todo_write`、`todo_read`、`task`
 - 技能类：`load_skill`
 

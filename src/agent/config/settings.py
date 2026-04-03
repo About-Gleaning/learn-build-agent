@@ -115,6 +115,7 @@ class ProjectRuntimeSettings:
     logging: "LoggingSettings"
     session_memory: "SessionMemorySettings"
     lsp: "LspSettings"
+    mcp: "McpSettings"
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,29 @@ class LspSettings:
     java_debug_observation_enabled: bool = DEFAULT_LSP_JAVA_DEBUG_OBSERVATION_ENABLED
     languages: dict[str, LspLanguageSettings] | None = None
     ide: LspIdeSettings = LspIdeSettings()
+
+
+@dataclass(frozen=True)
+class McpServerSettings:
+    enabled: bool = True
+    transport: str = "stdio"
+    command: str = ""
+    args: tuple[str, ...] = ()
+    env: dict[str, str] | None = None
+    cwd: str = ""
+    url: str = ""
+    headers: dict[str, str] | None = None
+    expose_to_plan: bool = True
+    discovery_timeout_ms: int = 10000
+    call_timeout_ms: int = 120000
+
+
+@dataclass(frozen=True)
+class McpSettings:
+    enabled: bool = False
+    discovery_timeout_ms: int = 10000
+    call_timeout_ms: int = 120000
+    servers: dict[str, McpServerSettings] | None = None
 
 
 @dataclass(frozen=True)
@@ -526,6 +550,22 @@ def _parse_string_list(raw_value: Any, *, field_name: str, allow_empty: bool = F
     return items
 
 
+def _parse_string_mapping(raw_value: Any, *, field_name: str) -> dict[str, str]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{field_name} 必须是对象。")
+    result: dict[str, str] = {}
+    for raw_key, raw_item in raw_value.items():
+        key = str(raw_key).strip()
+        if not key:
+            raise ValueError(f"{field_name} 的键不能为空。")
+        if isinstance(raw_item, (dict, list, tuple, set)):
+            raise ValueError(f"{field_name}.{key} 必须是字符串。")
+        result[key] = str(raw_item)
+    return result
+
+
 def _load_lsp_language_settings(raw_value: Any, *, language: str) -> LspLanguageSettings:
     defaults = {
         "java": LspLanguageSettings(
@@ -688,6 +728,74 @@ def _load_project_lsp_settings(raw_lsp: Any) -> LspSettings:
     )
 
 
+def _load_project_mcp_settings(raw_mcp: Any) -> McpSettings:
+    if raw_mcp is None:
+        raw_mcp = {}
+    if not isinstance(raw_mcp, dict):
+        raise ValueError("project_runtime.mcp 必须是对象。")
+
+    enabled = _parse_bool(raw_mcp.get("enabled", False), field_name="mcp.enabled")
+    discovery_timeout_ms = _parse_positive_int(
+        raw_mcp.get("discovery_timeout_ms", 10000),
+        field_name="mcp.discovery_timeout_ms",
+    )
+    call_timeout_ms = _parse_positive_int(
+        raw_mcp.get("call_timeout_ms", 120000),
+        field_name="mcp.call_timeout_ms",
+    )
+    raw_servers = raw_mcp.get("servers", {})
+    if raw_servers is None:
+        raw_servers = {}
+    if not isinstance(raw_servers, dict):
+        raise ValueError("mcp.servers 必须是对象。")
+
+    servers: dict[str, McpServerSettings] = {}
+    for raw_alias, raw_server in raw_servers.items():
+        alias = str(raw_alias).strip()
+        if not alias:
+            raise ValueError("mcp.servers 的别名不能为空。")
+        if not isinstance(raw_server, dict):
+            raise ValueError(f"mcp.servers.{alias} 必须是对象。")
+        server_enabled = _parse_bool(raw_server.get("enabled", True), field_name=f"mcp.servers.{alias}.enabled")
+        transport = str(raw_server.get("transport", "stdio")).strip().lower()
+        if transport not in {"stdio", "streamable_http"}:
+            raise ValueError(f"mcp.servers.{alias}.transport 仅支持 stdio 或 streamable_http。")
+        command = str(raw_server.get("command", "")).strip()
+        url = str(raw_server.get("url", "")).strip()
+        if server_enabled and transport == "stdio" and not command:
+            raise ValueError(f"mcp.servers.{alias}.command 不能为空。")
+        if server_enabled and transport == "streamable_http" and not url:
+            raise ValueError(f"mcp.servers.{alias}.url 不能为空。")
+        servers[alias] = McpServerSettings(
+            enabled=server_enabled,
+            transport=transport,
+            command=command,
+            args=_parse_string_list(raw_server.get("args", []), field_name=f"mcp.servers.{alias}.args", allow_empty=True),
+            env=_parse_string_mapping(raw_server.get("env", {}), field_name=f"mcp.servers.{alias}.env"),
+            cwd=str(raw_server.get("cwd", "")).strip(),
+            url=url,
+            headers=_parse_string_mapping(raw_server.get("headers", {}), field_name=f"mcp.servers.{alias}.headers"),
+            expose_to_plan=_parse_bool(
+                raw_server.get("expose_to_plan", True),
+                field_name=f"mcp.servers.{alias}.expose_to_plan",
+            ),
+            discovery_timeout_ms=_parse_positive_int(
+                raw_server.get("discovery_timeout_ms", discovery_timeout_ms),
+                field_name=f"mcp.servers.{alias}.discovery_timeout_ms",
+            ),
+            call_timeout_ms=_parse_positive_int(
+                raw_server.get("call_timeout_ms", call_timeout_ms),
+                field_name=f"mcp.servers.{alias}.call_timeout_ms",
+            ),
+        )
+    return McpSettings(
+        enabled=enabled,
+        discovery_timeout_ms=discovery_timeout_ms,
+        call_timeout_ms=call_timeout_ms,
+        servers=servers,
+    )
+
+
 def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
     if not isinstance(raw_providers, dict) or not raw_providers:
         raise ValueError("LLM 配置缺少 providers，且至少要配置一个厂商。")
@@ -784,6 +892,7 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
     logging_settings = _load_project_logging_settings(payload.get("logging"))
     session_memory = _load_project_session_memory_settings(payload.get("session_memory"))
     lsp_settings = _load_project_lsp_settings(payload.get("lsp"))
+    mcp_settings = _load_project_mcp_settings(payload.get("mcp"))
     return ProjectRuntimeSettings(
         compaction_default=compaction_default,
         compaction_vendors=compaction_vendors,
@@ -794,6 +903,7 @@ def get_project_runtime_settings() -> ProjectRuntimeSettings:
         logging=logging_settings,
         session_memory=session_memory,
         lsp=lsp_settings,
+        mcp=mcp_settings,
     )
 
 
@@ -831,6 +941,10 @@ def resolve_session_memory_settings() -> SessionMemorySettings:
 
 def get_lsp_settings() -> LspSettings:
     return get_project_runtime_settings().lsp
+
+
+def get_mcp_settings() -> McpSettings:
+    return get_project_runtime_settings().mcp
 
 
 def clear_runtime_settings_cache() -> None:

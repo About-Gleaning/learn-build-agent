@@ -130,6 +130,15 @@ type ProgressEntry = {
 
 type AgentName = "build" | "plan";
 
+type RuntimeAlert = {
+  id: string;
+  scope: string;
+  severity: string;
+  code: string;
+  message: string;
+  serverAlias: string;
+};
+
 type RuntimeOptionsResp = {
   default_agent: AgentName;
   agents: Array<{
@@ -2005,6 +2014,7 @@ export function App() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [error, setError] = useState("");
+  const [runtimeAlerts, setRuntimeAlerts] = useState<RuntimeAlert[]>([]);
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeOptionsResp | null>(null);
   const [isLoadingOptions, setIsLoadingOptions] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -2211,6 +2221,7 @@ export function App() {
 
   const resetTransientUiState = () => {
     setError("");
+    setRuntimeAlerts([]);
     setInput("");
     setQuestionDrafts([]);
     setQuestionCursor(0);
@@ -2399,6 +2410,33 @@ export function App() {
     void refreshRuntimeOptions();
   }, []);
 
+  const appendRuntimeAlert = (payload: Record<string, unknown>) => {
+    const message = readString(payload, "message");
+    if (!message) {
+      return;
+    }
+    const scope = readString(payload, "scope", "runtime");
+    const code = readString(payload, "code");
+    const serverAlias = readString(payload, "server_alias");
+    const dedupeKey = `${scope}:${code}:${serverAlias}:${message}`;
+    setRuntimeAlerts((prev) => {
+      if (prev.some((item) => item.id === dedupeKey)) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          id: dedupeKey,
+          scope,
+          severity: readString(payload, "severity", "error"),
+          code,
+          message,
+          serverAlias,
+        },
+      ];
+    });
+  };
+
   const updateQuestionDraft = (index: number, updater: (draft: QuestionDraft) => QuestionDraft) => {
     setQuestionDrafts((prev) =>
       prev.map((draft, draftIndex) => (draftIndex === index ? updater(draft) : draft)),
@@ -2481,6 +2519,7 @@ export function App() {
     }
 
     setError("");
+    setRuntimeAlerts([]);
     setInput("");
     setShouldFollow(true);
 
@@ -2564,6 +2603,10 @@ export function App() {
         onEvent: (eventName, payload) => {
           if (activeTurnRef.current?.assistantMessageId === assistantId) {
             activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+          }
+          if (eventName === "runtime_alert") {
+            appendRuntimeAlert(payload);
+            return;
           }
           if (eventName === "text_delta") {
             const delta = readString(payload, "delta");
@@ -2692,6 +2735,7 @@ export function App() {
       return;
     }
     setError("");
+    setRuntimeAlerts([]);
     setShouldFollow(true);
     setIsApplyingModeSwitch(true);
     setIsStopping(false);
@@ -2745,6 +2789,10 @@ export function App() {
             onEvent: (eventName, payload) => {
               if (activeTurnRef.current?.assistantMessageId === assistantId) {
                 activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+              }
+              if (eventName === "runtime_alert") {
+                appendRuntimeAlert(payload);
+                return;
               }
               if (eventName === "text_delta") {
                 const delta = readString(payload, "delta");
@@ -2880,6 +2928,7 @@ export function App() {
     }
 
     setError("");
+    setRuntimeAlerts([]);
     setShouldFollow(true);
     setIsStreaming(true);
     setIsStopping(false);
@@ -2933,6 +2982,10 @@ export function App() {
           onEvent: (eventName, payload) => {
             if (activeTurnRef.current?.assistantMessageId === assistantId) {
               activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+            }
+            if (eventName === "runtime_alert") {
+              appendRuntimeAlert(payload);
+              return;
             }
             if (eventName === "text_delta") {
               const delta = readString(payload, "delta");
@@ -2994,6 +3047,10 @@ export function App() {
           onEvent: (eventName, payload) => {
             if (activeTurnRef.current?.assistantMessageId === assistantId) {
               activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+            }
+            if (eventName === "runtime_alert") {
+              appendRuntimeAlert(payload);
+              return;
             }
             if (eventName === "text_delta") {
               const delta = readString(payload, "delta");
@@ -3388,6 +3445,13 @@ export function App() {
               <span>{error}</span>
             </div>
           ) : null}
+
+          {runtimeAlerts.map((alert) => (
+            <div key={alert.id} className="terminal-alert" role="alert">
+              <strong>[{alert.scope || alert.severity || "runtime"}]</strong>
+              <span>{alert.message}</span>
+            </div>
+          ))}
 
           <section className="terminal-body" aria-label="消息工作台">
             <div className="message-list terminal-log" ref={messageListRef} onScroll={handleMessageScroll}>

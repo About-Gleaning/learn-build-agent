@@ -16,6 +16,7 @@ from agent.config.settings import (
 from agent.runtime.workspace import build_plan_storage_path, configure_workspace, get_workspace
 from agent.tools.file_edit_state import clear_file_edit_states
 from agent.tools.handlers import build_plan_placeholder_path
+from agent.mcp.runtime import _shutdown_asyncio_thread_runner
 from agent.tools.read_file_tool import run_read
 from agent.tools.specs import build_base_tools, build_task_tool
 from agent.runtime.session import (
@@ -87,8 +88,16 @@ def _tool_names(tools):
 @pytest.fixture(autouse=True)
 def _clear_edit_state():
     clear_file_edit_states()
+    _shutdown_asyncio_thread_runner()
     yield
     clear_file_edit_states()
+    _shutdown_asyncio_thread_runner()
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_mcp_runtime(monkeypatch):
+    monkeypatch.setattr(session_module, "list_mcp_tools", lambda mode=None: ([], []))
+    monkeypatch.setattr(session_module, "describe_mcp_runtime_alerts_for_mode", lambda mode=None: [])
 
 
 def test_run_session_with_tool_call(monkeypatch):
@@ -119,6 +128,123 @@ def test_run_session_with_tool_call(monkeypatch):
     assert result["info"]["agent"] == "build"
     assert "turn_started_at" in result["info"]
     assert "turn_completed_at" in result["info"]
+
+
+def test_run_session_should_execute_mcp_tool_via_normal_tool_chain(monkeypatch):
+    call_state = {"count": 0}
+    captured_tool_names: list[str] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del max_tokens, hooks, llm_config, agent
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        captured_tool_names.append(",".join(_tool_names(tools)))
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_mcp_1",
+                name="github__search_issues",
+                arguments='{"query":"bug"}',
+            )
+        else:
+            append_text_part(assistant, "MCP 已执行")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+    monkeypatch.setattr(
+        session_module,
+        "list_mcp_tools",
+        lambda mode=None: (
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "github__search_issues",
+                        "description": "GitHub 搜索",
+                        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+                    },
+                }
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "execute_mcp_tool",
+        lambda prefixed_tool_name, arguments: {
+            "output": f"{prefixed_tool_name}:{arguments['query']}",
+            "metadata": {
+                "status": "completed",
+                "mcp_server_alias": "github",
+                "mcp_tool_name": "search_issues",
+            },
+        },
+    )
+
+    result = run_session("执行 MCP", session_id="s_mcp")
+
+    assert get_message_text(result) == "MCP 已执行"
+    assert "github__search_issues" in captured_tool_names[0]
+
+
+def test_run_session_should_block_hidden_mcp_tool_in_plan_mode(monkeypatch):
+    call_state = {"count": 0}
+    execute_calls: list[tuple[str, dict[str, object], str | None]] = []
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del max_tokens, hooks, llm_config, agent
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_mcp_plan_1",
+                name="private_docs__search",
+                arguments='{"query":"secret"}',
+            )
+        else:
+            append_text_part(assistant, "已收到拒绝结果")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+    monkeypatch.setattr(
+        session_module,
+        "list_mcp_tools",
+        lambda mode=None: (
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "private_docs__search",
+                        "description": "私有文档搜索",
+                        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+                    },
+                }
+            ],
+            [],
+        ),
+    )
+
+    def fake_execute(prefixed_tool_name, arguments, mode=None):
+        execute_calls.append((prefixed_tool_name, arguments, mode))
+        return {
+            "output": "Error: plan 模式下不允许执行 MCP tool: private_docs__search",
+            "metadata": {
+                "status": "failed",
+                "error": {"code": "mcp_tool_not_allowed_in_plan"},
+                "mcp_server_alias": "private_docs",
+                "mcp_tool_name": "search",
+            },
+        }
+
+    monkeypatch.setattr(session_module, "execute_mcp_tool", fake_execute)
+
+    result = run_session("执行私有 MCP", session_id="s_plan_mcp_block", mode="plan")
+
+    assert get_message_text(result) == "已收到拒绝结果"
+    assert execute_calls == [("private_docs__search", {"query": "secret"}, "plan")]
 
 
 def test_run_session_should_replay_reasoning_content_for_tool_followup(monkeypatch):
@@ -2242,6 +2368,43 @@ def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
     assert done_event["display_parts"][0]["text"] == "流式回答"
 
 
+def test_run_session_stream_events_should_emit_runtime_alert_without_entering_done_payload(monkeypatch):
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "流式回答")
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+    monkeypatch.setattr(
+        session_module,
+        "describe_mcp_runtime_alerts_for_mode",
+        lambda mode=None: [
+            type(
+                "Alert",
+                (),
+                {
+                    "server_alias": "github",
+                    "code": "mcp_server_unavailable",
+                    "message": "mcp.servers.env.GITHUB_TOKEN 引用了未设置的环境变量 GITHUB_TOKEN",
+                },
+            )()
+        ],
+    )
+
+    events = list(run_session_stream_events("你好", session_id="s_stream_alert"))
+
+    runtime_alert = next(event for event in events if event["type"] == "runtime_alert")
+    done_event = next(event for event in events if event["type"] == "done" and event["agent_kind"] == "primary")
+
+    assert runtime_alert["scope"] == "mcp"
+    assert runtime_alert["server_alias"] == "github"
+    assert "GITHUB_TOKEN" in runtime_alert["message"]
+    assert all(item["kind"] != "runtime_alert" for item in done_event["display_parts"])
+    assert all(item["kind"] != "runtime_alert" for item in done_event["process_items"])
+
+
 def test_run_session_stream_events_should_emit_reasoning_delta_and_keep_separate_display_part(monkeypatch):
     def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
@@ -2755,6 +2918,37 @@ def test_build_system_prompt_should_fallback_to_default_prompt(monkeypatch):
     assert "你是 **爪爪**" in prompt
     assert "- vendor: openai" in prompt
     assert "- model: gpt-4.1" in prompt
+
+
+def test_build_system_prompt_should_not_append_mcp_warning_text(monkeypatch):
+    monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
+    monkeypatch.setattr(
+        session_module,
+        "describe_mcp_runtime_alerts_for_mode",
+        lambda mode=None: [
+            type(
+                "Alert",
+                (),
+                {
+                    "server_alias": "github",
+                    "code": "mcp_server_unavailable",
+                    "message": "未设置 GITHUB_TOKEN",
+                },
+            )()
+        ],
+    )
+
+    prompt = build_system_prompt(
+        agent="build",
+        model="gpt-4.1",
+        provider="gpt",
+        vendor="openai",
+        session_id=generate_session_id("test_prompt"),
+    )
+
+    assert "GITHUB_TOKEN" not in prompt
+    assert "以下 MCP server 当前不可用" not in prompt
+    assert "未设置 GITHUB_TOKEN" not in prompt
 
 
 def test_build_system_prompt_should_share_vendor_prompt_for_qwen_coder(monkeypatch):

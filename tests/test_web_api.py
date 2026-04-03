@@ -160,6 +160,68 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     assert done_payload["display_parts"][0]["kind"] == "assistant_text"
 
 
+def test_chat_stream_should_passthrough_runtime_alert_event(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+    session_id = generate_session_id("test_web_alert")
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        del user_input, mode, kwargs
+        yield {
+            "type": "runtime_alert",
+            "event_id": "evt_alert_1",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "scope": "mcp",
+            "severity": "error",
+            "code": "mcp_server_unavailable",
+            "message": "MCP server `github` 当前不可用：未设置 GITHUB_TOKEN",
+            "server_alias": "github",
+        }
+        yield {
+            "type": "done",
+            "event_id": "evt_done_1",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "m_1",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {
+                "round_count": 1,
+                "tool_call_count": 0,
+                "tool_names": [],
+                "delegation_count": 0,
+                "delegated_agents": [],
+                "duration_ms": 10,
+            },
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+
+    with client.stream(
+        "POST",
+        "/api/chat/stream",
+        json={"session_id": session_id, "user_input": "你好", "mode": "build"},
+    ) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+
+    events = _stream_events(body)
+    runtime_alert_payload = next(payload for evt, payload in events if evt == "runtime_alert")
+
+    assert runtime_alert_payload["scope"] == "mcp"
+    assert runtime_alert_payload["server_alias"] == "github"
+    assert "GITHUB_TOKEN" in runtime_alert_payload["message"]
+
+
 def test_runtime_options_should_return_backend_config():
     app = create_app()
     client = TestClient(app)

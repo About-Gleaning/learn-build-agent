@@ -16,6 +16,7 @@
 - `src/agent/runtime/agents.py`：Agent 元信息唯一来源。
 - `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度。
 - `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与 `MY_AGENT_HOME` 相关解析。
+- `src/agent/mcp/runtime.py`：MCP server 发现、工具 schema 规范化与调用路由。
 - `src/agent/adapters/llm/client.py`：LLM 统一调用入口。
 - `src/agent/adapters/llm/protocols.py`：协议层适配。
 - `src/agent/adapters/llm/vendors.py`：厂商差异适配。
@@ -35,6 +36,7 @@
 - 协议级转换统一收敛到 `adapters/llm/protocols.py`，厂商差异统一收敛到 `adapters/llm/vendors.py`。
 - `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model` 与 `description`。
 - 工具实现统一放在 `tools/` 目录内分模块维护；公共路径校验统一收敛到 `tools/path_utils.py`。
+- MCP server 的发现、缓存、普通 tool 转换与调用统一收敛在 `mcp/runtime.py`，不要在 `session.py` 或其他工具模块散落直连协议细节。
 - 查询型 `lsp` 工具统一通过 `tools/lsp_tool.py` -> `lsp/client.py` -> `lsp/manager.py` 链路收敛，避免在会话层或其他工具中散落直接调用 JSON-RPC。
 - 查询型 `lsp` 工具只暴露只读导航能力；写入后的 diagnostics 仍由 `edit_file` / `write_file` 链路负责，二者不要混在同一层拼装。
 - Web 层消息序列化统一收敛在 `web/serializers.py`，不要在 `web/app.py` 手工散落映射逻辑。
@@ -54,6 +56,8 @@
 - Java LSP 的 Maven profile 仅支持按当前文件路径和 Maven `pom.xml` 自动探测；探测不唯一时直接报错，不再支持手工配置覆盖。
 - TypeScript LSP 默认覆盖 `.ts`、`.tsx`、`.js`、`.jsx`，统一通过 `typescript-language-server --stdio` 启动；若缺少可执行文件，必须返回明确缺失提示而不是静默降级。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
+- MCP tool 暴露名统一使用 `serverAlias__toolName`；是否向 `plan` 模式暴露仅通过 `project_runtime.json -> mcp.servers.*.expose_to_plan` 控制，禁止在会话层硬编码。
+- MCP server 的鉴权信息只能通过环境变量占位注入；`project_runtime.json` 等仓库文件中禁止硬编码 Token、PAT 或其他密钥。
 - Web 时间线必须按 `session` 维度累计展示，禁止在新一轮提交时覆盖上一轮执行轨迹。
 - Web 助手消息展示必须优先基于后端返回的 `display_parts` 顺序片段流，仅在旧消息缺少该字段时才回退到兼容渲染。
 - 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
@@ -89,6 +93,7 @@
 ## 安全与日志
 
 - 禁止硬编码任何密钥或令牌，统一使用环境变量。
+- MCP 工具调用失败时必须优先保留主异常作为最终错误语义，关闭阶段异常只能作为 `close_warning` 附加记录，不能覆盖真实根因。
 - 所有路径输入必须通过工作区边界校验。
 - Shell 执行默认高风险，优先白名单、超时与最小权限策略。
 - LLM 调用必须配置显式超时；主代理在 `task` 委派后二轮推理超时时，必须记录错误日志并返回可解释失败结果。
