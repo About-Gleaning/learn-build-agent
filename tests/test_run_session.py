@@ -3384,6 +3384,22 @@ def test_resolve_llm_config_should_support_kimi_model_under_qwen_provider(monkey
         clear_runtime_settings_cache()
 
 
+def test_resolve_llm_config_should_support_zhipu_glm5_model_under_qwen_provider(monkeypatch):
+    monkeypatch.setenv("QWEN_API_KEY", "test-qwen-key")
+    clear_runtime_settings_cache()
+
+    try:
+        config = resolve_llm_config("build", "qwen", "ZHIPU/GLM-5")
+        assert config.provider == "qwen"
+        assert config.vendor == "qwen"
+        assert config.model == "ZHIPU/GLM-5"
+        assert config.api_mode == "chat_completions"
+        assert config.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert config.timeout_seconds == 60
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_resolve_llm_config_should_use_provider_default_model_when_provider_overridden(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     clear_runtime_settings_cache()

@@ -204,7 +204,7 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 
 当前 provider 能力概览：
 
-- `qwen`：`chat_completions`
+- `qwen`：`chat_completions`，可承载 `qwen`、`kimi`、`ZHIPU/GLM-5` 等兼容模型名
 - `gpt`：`responses`
 - `gemini`：`chat_completions`
 - `kimi`：`chat_completions`
