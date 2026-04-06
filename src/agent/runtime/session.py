@@ -13,6 +13,7 @@ from typing import Any, Callable, Literal, TypedDict
 from ..adapters.llm.client import create_chat_completion, create_chat_completion_stream
 from ..config.logging_setup import build_log_extra, sanitize_log_text
 from ..mcp.runtime import describe_mcp_runtime_alerts_for_mode, execute_mcp_tool, list_mcp_tools
+from ..slash_commands import ResolvedSlashCommand, resolve_slash_command
 from ..config.settings import (
     ResolvedLLMConfig,
     resolve_agent_loop_settings,
@@ -173,6 +174,14 @@ class TaskToolRequest:
         return str(self.result.get("metadata", {}).get("status", "completed")).strip().lower() == "completed"
 
 
+@dataclass(frozen=True)
+class PreparedSessionInput:
+    user_input: str
+    mode: MainAgentMode | None
+    display_input: str
+    slash_command: ResolvedSlashCommand | None = None
+
+
 PENDING_MODE_SWITCHES: dict[str, PendingModeSwitch] = {}
 PENDING_QUESTIONS: dict[str, PendingQuestion] = {}
 STOP_REQUESTED_SESSION_IDS: set[str] = set()
@@ -201,6 +210,32 @@ def _assistant_finish_reason(message: Message) -> str:
     if get_message_text(message):
         return "stop"
     return "unknown"
+
+
+def _prepare_session_input(
+    *,
+    user_input: str,
+    mode: MainAgentMode | None,
+    tools: list[dict[str, Any]] | None,
+    system_prompt: str | None,
+) -> PreparedSessionInput:
+    if tools is not None or system_prompt is not None:
+        return PreparedSessionInput(user_input=user_input, mode=mode, display_input=user_input)
+
+    resolved_command = resolve_slash_command(user_input)
+    if resolved_command is None:
+        return PreparedSessionInput(user_input=user_input, mode=mode, display_input=user_input)
+
+    override_mode = resolved_command.override_mode
+    normalized_mode = mode
+    if override_mode in {"build", "plan"}:
+        normalized_mode = override_mode
+    return PreparedSessionInput(
+        user_input=resolved_command.user_input,
+        mode=normalized_mode,
+        display_input=resolved_command.display_text or user_input,
+        slash_command=resolved_command,
+    )
 
 
 def _should_continue_after_assistant(message: Message) -> bool:
@@ -933,11 +968,15 @@ def _build_session_messages(
     history_messages: list[Message],
     initial_system_prompt: str,
     user_input: str,
+    display_input: str | None,
     initial_runtime: ResolvedLLMConfig,
     llm_config: ResolvedLLMConfig | None,
     mode_enabled: bool,
     user_meta: dict[str, Any] | None,
 ) -> list[Message]:
+    effective_user_meta = dict(user_meta or {})
+    if display_input and display_input != user_input:
+        effective_user_meta["display_text"] = display_input
     return [
         _build_text_message("system", initial_system_prompt, session_id),
         *history_messages,
@@ -947,7 +986,7 @@ def _build_session_messages(
             session_id,
             model=initial_runtime.model if mode_enabled else (llm_config.model if llm_config else ""),
             provider=initial_runtime.provider if mode_enabled else (llm_config.provider if llm_config else ""),
-            text_meta=user_meta,
+            text_meta=effective_user_meta or None,
         ),
     ]
 
@@ -956,6 +995,7 @@ def _bootstrap_session(
     user_input: str,
     session_id: str,
     *,
+    display_input: str | None = None,
     mode: MainAgentMode | None = None,
     provider: str | None = None,
     provider_specified: bool = False,
@@ -1039,6 +1079,7 @@ def _bootstrap_session(
         history_messages=history_messages,
         initial_system_prompt=initial_system_prompt,
         user_input=user_input,
+        display_input=display_input,
         initial_runtime=initial_runtime,
         llm_config=llm_config,
         mode_enabled=mode_enabled,
@@ -1418,6 +1459,59 @@ def _build_text_message(
     message = create_message(role=role, session_id=session_id, model=model, provider=provider)
     append_text_part(message, content, meta=text_meta)
     return message
+
+
+def _build_slash_command_error_message(
+    *,
+    session_id: str,
+    user_input: str,
+    error_text: str,
+    mode: MainAgentMode | None,
+    turn_started_at: str,
+) -> tuple[Message, Message]:
+    active_mode: MainAgentMode = mode if mode in {"build", "plan"} else "build"
+    runtime = resolve_llm_config(active_mode)
+    user_message = _build_text_message(
+        "user",
+        user_input,
+        session_id,
+        model=runtime.model,
+        provider=runtime.provider,
+        text_meta={
+            "agent": active_mode,
+            "slash_command": True,
+        },
+    )
+    assistant_message = create_message(
+        role="assistant",
+        session_id=session_id,
+        status="completed",
+        finish_reason="error",
+    )
+    append_text_part(
+        assistant_message,
+        error_text,
+        meta={
+            "slash_command_error": True,
+        },
+    )
+    completed_at = utc_now_iso()
+    _set_message_runtime_info(
+        assistant_message,
+        agent=active_mode,
+        model=runtime.model,
+        provider=runtime.provider,
+        turn_started_at=turn_started_at,
+        turn_completed_at=completed_at,
+    )
+    _attach_response_summary(
+        assistant_message,
+        process_items=[],
+        display_parts=[],
+        turn_started_at=turn_started_at,
+        turn_completed_at=completed_at,
+    )
+    return user_message, assistant_message
 
 
 def _supports_keyword_arg(func: Callable[..., Any], arg_name: str) -> bool:
@@ -2054,10 +2148,69 @@ def _run_session_stream(
     Args:
         max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
     """
+    turn_started_at = utc_now_iso()
+    try:
+        prepared_input = _prepare_session_input(
+            user_input=user_input,
+            mode=mode,
+            tools=tools,
+            system_prompt=system_prompt,
+        )
+    except ValueError as exc:
+        active_session_id = set_session_id(normalize_required_session_id(session_id))
+        mode_enabled = tools is None and system_prompt is None
+        user_message, assistant_message = _build_slash_command_error_message(
+            session_id=active_session_id,
+            user_input=user_input,
+            error_text=str(exc),
+            mode=mode,
+            turn_started_at=turn_started_at,
+        )
+        if mode_enabled:
+            history_messages = SESSION_MEMORY_STORE.load(active_session_id)
+            SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
+        active_agent = str(assistant_message["info"].get("agent", "build")).strip() or "build"
+        runtime_provider = str(assistant_message["info"].get("provider", "")).strip()
+        runtime_model = str(assistant_message["info"].get("model", "")).strip()
+        yield _build_stream_event(
+            "start",
+            session_id=active_session_id,
+            agent=active_agent,
+            agent_kind=_resolve_agent_kind(active_agent),
+            depth=depth,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            mode=active_agent,
+            provider=runtime_provider,
+            model=runtime_model,
+            started_at=turn_started_at,
+        )
+        yield _build_stream_event(
+            "done",
+            session_id=active_session_id,
+            agent=active_agent,
+            agent_kind=_resolve_agent_kind(active_agent),
+            depth=depth,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            message_id=str(assistant_message["info"].get("message_id", "")),
+            status=str(assistant_message["info"].get("status", "completed")),
+            finish_reason=str(assistant_message["info"].get("finish_reason", "error")),
+            provider=runtime_provider,
+            model=runtime_model,
+            turn_started_at=turn_started_at,
+            turn_completed_at=str(assistant_message["info"].get("turn_completed_at", "")),
+            response_meta=dict(assistant_message["info"].get("response_meta", {})),
+            process_items=list(assistant_message["info"].get("process_items", [])),
+            display_parts=list(assistant_message["info"].get("display_parts", [])),
+        )
+        return assistant_message
+
     bootstrap = _bootstrap_session(
-        user_input,
+        prepared_input.user_input,
         session_id=session_id,
-        mode=mode,
+        display_input=prepared_input.display_input,
+        mode=prepared_input.mode,
         provider=provider,
         provider_specified=provider_specified,
         model=model,
@@ -2949,10 +3102,34 @@ def run_session(
     Args:
         max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
     """
+    turn_started_at = utc_now_iso()
+    try:
+        prepared_input = _prepare_session_input(
+            user_input=user_input,
+            mode=mode,
+            tools=tools,
+            system_prompt=system_prompt,
+        )
+    except ValueError as exc:
+        active_session_id = set_session_id(normalize_required_session_id(session_id))
+        mode_enabled = tools is None and system_prompt is None
+        user_message, assistant_message = _build_slash_command_error_message(
+            session_id=active_session_id,
+            user_input=user_input,
+            error_text=str(exc),
+            mode=mode,
+            turn_started_at=turn_started_at,
+        )
+        if mode_enabled:
+            history_messages = SESSION_MEMORY_STORE.load(active_session_id)
+            SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
+        return assistant_message
+
     bootstrap = _bootstrap_session(
-        user_input,
+        prepared_input.user_input,
         session_id=session_id,
-        mode=mode,
+        display_input=prepared_input.display_input,
+        mode=prepared_input.mode,
         provider=provider,
         provider_specified=provider_specified,
         model=model,

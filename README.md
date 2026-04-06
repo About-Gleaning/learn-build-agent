@@ -8,6 +8,7 @@
 
 - CLI 模式：在当前目录启动持续对话式编码代理。
 - Web 模式：启动 FastAPI 后端和前端开发服务器，提供 SSE 流式会话体验。
+- Slash Commands：Web 输入框支持 `/` 命令发现与统一命令编排，当前内置 `/analyze`。
 - 多模型支持：当前内置 `qwen`、`gpt`、`gemini`、`kimi` provider。
 - 工具能力：支持文件读写、代码编辑、LSP 查询、搜索、Shell、网页抓取、联网搜索、提问澄清、待办管理与子 Agent 委派。
 - 代码导航：支持通过 `lsp` 工具执行定义、引用、hover、符号搜索与调用层级查询。
@@ -258,6 +259,14 @@ TypeScript / JavaScript LSP 说明：
 - 搜索类：`glob`、`grep`
 - 执行类：`bash`
 - 网络类：`webfetch`、`websearch`
+
+### Slash Commands
+
+- Slash command 由后端注册表统一管理，Web 端只负责展示与交互，不持有命令业务逻辑。
+- 触发规则必须是“输入内容严格等于 `/命令`”；如果在命令后追加任何用户文本，则按普通对话输入处理，不触发 slash command。
+- 当前内置：
+  - `/analyze`：研读当前工作区并生成 `analyze_docs/project-context.md`，供后续业务开发复用。
+- 命令解析与执行编排统一收敛在 `src/agent/slash_commands/`，避免把命令逻辑散落到 `web/app.py` 或 `runtime/session.py`。
 - 扩展类：来自 MCP server 的动态工具，命名为 `serverAlias__toolName`
 - 协作类：`question`、`todo_write`、`todo_read`、`task`
 - 技能类：`load_skill`

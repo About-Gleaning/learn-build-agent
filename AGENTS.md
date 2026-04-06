@@ -14,6 +14,8 @@
 - `src/agent/runtime/session.py`：会话主循环、模式切换、工具路由。
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要组装。
 - `src/agent/runtime/agents.py`：Agent 元信息唯一来源。
+- `src/agent/slash_commands/registry.py`：slash command 元信息唯一来源。
+- `src/agent/slash_commands/resolver.py`：slash command 解析后执行编排归口。
 - `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度。
 - `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与 `MY_AGENT_HOME` 相关解析。
 - `src/agent/mcp/runtime.py`：MCP server 发现、工具 schema 规范化与调用路由。
@@ -31,6 +33,7 @@
 ## 分层职责红线
 
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑。
+- slash command 的注册、解析和 prompt 模板统一收敛在 `slash_commands/`，不要在 Web 或 `runtime/session.py` 中散落 `/xxx` 特判。
 - 流式展示、`process_items`、`display_parts`、响应摘要拼装统一收敛到 `runtime/stream_display.py`。
 - `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口。
 - 协议级转换统一收敛到 `adapters/llm/protocols.py`，厂商差异统一收敛到 `adapters/llm/vendors.py`。
