@@ -14,9 +14,10 @@ class ResolvedSlashCommand:
     user_input: str
     override_mode: str | None = None
     display_text: str = ""
+    immediate_output: str | None = None
 
 
-def _render_init_prompt(command: SlashCommandDefinition) -> str:
+def _render_analyze_prompt(command: SlashCommandDefinition) -> str:
     template_path = command.prompt_template_path
     if template_path is None or not template_path.exists():
         raise ValueError(f"未找到 slash command prompt 模板: {template_path}")
@@ -31,6 +32,22 @@ def _render_init_prompt(command: SlashCommandDefinition) -> str:
         readme_path=(workspace.root / "README.md").resolve(),
         agents_path=(workspace.root / "AGENTS.md").resolve(),
         docs_dir=(workspace.root / "analyze_docs").resolve(),
+    )
+
+
+def _render_init_agents_prompt(command: SlashCommandDefinition) -> str:
+    template_path = command.prompt_template_path
+    if template_path is None or not template_path.exists():
+        raise ValueError(f"未找到 slash command prompt 模板: {template_path}")
+
+    workspace = get_workspace()
+    target_path = workspace.agents_md_path.resolve()
+    template = template_path.read_text(encoding="utf-8").strip()
+    return template.format(
+        workspace_root=workspace.root,
+        workspace_name=workspace.workspace_name,
+        agents_path=target_path,
+        readme_path=(workspace.root / "README.md").resolve(),
     )
 
 
@@ -50,10 +67,34 @@ def resolve_slash_command(user_input: str) -> ResolvedSlashCommand | None:
     if command is None:
         raise ValueError(_build_unknown_command_error(parsed.name))
 
-    if command.name == "analyze":
+    if command.name == "init":
+        workspace = get_workspace()
+        if workspace.has_agents_md:
+            return ResolvedSlashCommand(
+                command=command,
+                user_input=user_input,
+                display_text="/init",
+                immediate_output="当前工作区已存在 `AGENTS.md`，已停止初始化，未执行生成。",
+            )
         return ResolvedSlashCommand(
             command=command,
-            user_input=_render_init_prompt(command),
+            user_input=_render_init_agents_prompt(command),
+            override_mode="build",
+            display_text="/init",
+        )
+
+    if command.name == "analyze":
+        workspace = get_workspace()
+        if not workspace.has_agents_md:
+            return ResolvedSlashCommand(
+                command=command,
+                user_input=user_input,
+                display_text="/analyze",
+                immediate_output="当前工作区不存在 `AGENTS.md`，请先执行 `/init` 完成初始化后再使用 `/analyze`。",
+            )
+        return ResolvedSlashCommand(
+            command=command,
+            user_input=_render_analyze_prompt(command),
             override_mode="build",
             display_text="/analyze",
         )

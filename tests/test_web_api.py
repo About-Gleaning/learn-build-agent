@@ -241,6 +241,8 @@ def test_runtime_options_should_return_backend_config():
     assert any(item["models"] for item in payload["providers"] if item["name"] == "qwen")
     assert any(item["api_mode"] == "responses" for item in payload["providers"] if item["name"] == "gpt")
     assert any(item["api_mode"] in {"responses", "chat_completions"} for item in payload["agents"] if item["name"] == "build")
+    assert any(item["name"] == "init" for item in payload["slash_commands"])
+    assert any(item["usage"] == "/init" for item in payload["slash_commands"])
     assert any(item["name"] == "analyze" for item in payload["slash_commands"])
     assert any(item["usage"] == "/analyze" for item in payload["slash_commands"])
     assert payload["workspace_root"]

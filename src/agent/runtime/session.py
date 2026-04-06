@@ -180,6 +180,7 @@ class PreparedSessionInput:
     mode: MainAgentMode | None
     display_input: str
     slash_command: ResolvedSlashCommand | None = None
+    immediate_output: str | None = None
 
 
 PENDING_MODE_SWITCHES: dict[str, PendingModeSwitch] = {}
@@ -235,6 +236,7 @@ def _prepare_session_input(
         mode=normalized_mode,
         display_input=resolved_command.display_text or user_input,
         slash_command=resolved_command,
+        immediate_output=resolved_command.immediate_output,
     )
 
 
@@ -1514,6 +1516,61 @@ def _build_slash_command_error_message(
     return user_message, assistant_message
 
 
+def _build_slash_command_completed_message(
+    *,
+    session_id: str,
+    user_input: str,
+    display_input: str,
+    output_text: str,
+    mode: MainAgentMode | None,
+    turn_started_at: str,
+) -> tuple[Message, Message]:
+    active_mode: MainAgentMode = mode if mode in {"build", "plan"} else "build"
+    runtime = resolve_llm_config(active_mode)
+    user_message = _build_text_message(
+        "user",
+        user_input,
+        session_id,
+        model=runtime.model,
+        provider=runtime.provider,
+        text_meta={
+            "agent": active_mode,
+            "slash_command": True,
+            "display_text": display_input,
+        },
+    )
+    assistant_message = create_message(
+        role="assistant",
+        session_id=session_id,
+        status="completed",
+        finish_reason="stop",
+    )
+    append_text_part(
+        assistant_message,
+        output_text,
+        meta={
+            "slash_command_completed": True,
+        },
+    )
+    completed_at = utc_now_iso()
+    _set_message_runtime_info(
+        assistant_message,
+        agent=active_mode,
+        model=runtime.model,
+        provider=runtime.provider,
+        turn_started_at=turn_started_at,
+        turn_completed_at=completed_at,
+    )
+    _attach_response_summary(
+        assistant_message,
+        process_items=[],
+        display_parts=[],
+        turn_started_at=turn_started_at,
+        turn_completed_at=completed_at,
+    )
+    return user_message, assistant_message
+
+
 def _supports_keyword_arg(func: Callable[..., Any], arg_name: str) -> bool:
     try:
         signature = inspect.signature(func)
@@ -2196,6 +2253,57 @@ def _run_session_stream(
             message_id=str(assistant_message["info"].get("message_id", "")),
             status=str(assistant_message["info"].get("status", "completed")),
             finish_reason=str(assistant_message["info"].get("finish_reason", "error")),
+            provider=runtime_provider,
+            model=runtime_model,
+            turn_started_at=turn_started_at,
+            turn_completed_at=str(assistant_message["info"].get("turn_completed_at", "")),
+            response_meta=dict(assistant_message["info"].get("response_meta", {})),
+            process_items=list(assistant_message["info"].get("process_items", [])),
+            display_parts=list(assistant_message["info"].get("display_parts", [])),
+        )
+        return assistant_message
+
+    if prepared_input.immediate_output is not None:
+        active_session_id = set_session_id(normalize_required_session_id(session_id))
+        mode_enabled = tools is None and system_prompt is None
+        user_message, assistant_message = _build_slash_command_completed_message(
+            session_id=active_session_id,
+            user_input=user_input,
+            display_input=prepared_input.display_input,
+            output_text=prepared_input.immediate_output,
+            mode=prepared_input.mode,
+            turn_started_at=turn_started_at,
+        )
+        if mode_enabled:
+            history_messages = SESSION_MEMORY_STORE.load(active_session_id)
+            SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
+        active_agent = str(assistant_message["info"].get("agent", "build")).strip() or "build"
+        runtime_provider = str(assistant_message["info"].get("provider", "")).strip()
+        runtime_model = str(assistant_message["info"].get("model", "")).strip()
+        yield _build_stream_event(
+            "start",
+            session_id=active_session_id,
+            agent=active_agent,
+            agent_kind=_resolve_agent_kind(active_agent),
+            depth=depth,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            mode=active_agent,
+            provider=runtime_provider,
+            model=runtime_model,
+            started_at=turn_started_at,
+        )
+        yield _build_stream_event(
+            "done",
+            session_id=active_session_id,
+            agent=active_agent,
+            agent_kind=_resolve_agent_kind(active_agent),
+            depth=depth,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            message_id=str(assistant_message["info"].get("message_id", "")),
+            status=str(assistant_message["info"].get("status", "completed")),
+            finish_reason=str(assistant_message["info"].get("finish_reason", "stop")),
             provider=runtime_provider,
             model=runtime_model,
             turn_started_at=turn_started_at,
@@ -3118,6 +3226,22 @@ def run_session(
             user_input=user_input,
             error_text=str(exc),
             mode=mode,
+            turn_started_at=turn_started_at,
+        )
+        if mode_enabled:
+            history_messages = SESSION_MEMORY_STORE.load(active_session_id)
+            SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
+        return assistant_message
+
+    if prepared_input.immediate_output is not None:
+        active_session_id = set_session_id(normalize_required_session_id(session_id))
+        mode_enabled = tools is None and system_prompt is None
+        user_message, assistant_message = _build_slash_command_completed_message(
+            session_id=active_session_id,
+            user_input=user_input,
+            display_input=prepared_input.display_input,
+            output_text=prepared_input.immediate_output,
+            mode=prepared_input.mode,
             turn_started_at=turn_started_at,
         )
         if mode_enabled:

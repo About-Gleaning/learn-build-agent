@@ -34,6 +34,7 @@
 
 - `runtime/session.py` 只做会话编排，不放具体工具业务逻辑。
 - slash command 的注册、解析和 prompt 模板统一收敛在 `slash_commands/`，不要在 Web 或 `runtime/session.py` 中散落 `/xxx` 特判。
+- 当前内置 slash command 包含 `/init` 与 `/analyze`：`/init` 负责在缺失时初始化工作区根目录 `AGENTS.md`，`/analyze` 负责生成 `analyze_docs/project-context.md`。
 - 流式展示、`process_items`、`display_parts`、响应摘要拼装统一收敛到 `runtime/stream_display.py`。
 - `adapters/llm/client.py` 只保留统一调用入口、Hook 与错误收口。
 - 协议级转换统一收敛到 `adapters/llm/protocols.py`，厂商差异统一收敛到 `adapters/llm/vendors.py`。

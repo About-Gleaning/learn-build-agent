@@ -19,11 +19,18 @@ class SlashCommandDefinition:
 
 _SLASH_COMMANDS: tuple[SlashCommandDefinition, ...] = (
     SlashCommandDefinition(
+        name="init",
+        description="初始化当前工作区的 AGENTS.md；若已存在则停止，若不存在则生成简明内容。",
+        usage="/init",
+        placeholder="为当前项目初始化 AGENTS.md",
+        prompt_template_path=PROMPTS_DIR / "init.txt",
+    ),
+    SlashCommandDefinition(
         name="analyze",
         description="研读当前工作区并生成项目说明书，供后续开发复用。",
         usage="/analyze",
         placeholder="生成当前项目的上下文说明书",
-        prompt_template_path=PROMPTS_DIR / "init.txt",
+        prompt_template_path=PROMPTS_DIR / "analyze.txt",
     ),
 )
 
