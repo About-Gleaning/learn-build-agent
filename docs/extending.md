@@ -2,6 +2,14 @@
 
 本文档面向仓库开发者，说明如何在当前架构下扩展工具、Subagent、Hook 和 Web 输出。
 
+## 新增 Slash Command
+
+1. 在 `src/agent/slash_commands/registry.py` 注册命令元信息。
+2. 在 `src/agent/slash_commands/resolver.py` 增加命令解析后的执行编排。
+3. 如需稳定 prompt，优先在 `src/agent/slash_commands/prompts/` 下新增模板文件。
+4. Web 层命令展示统一消费 `build_runtime_options()` 返回的 `slash_commands`，不要在前端写死命令列表。
+5. `runtime/session.py` 只保留命令预处理接入点，不承载命令明细规则。
+
 ## 新增工具
 
 1. 在 `src/agent/tools/` 下新增或扩展对应模块。

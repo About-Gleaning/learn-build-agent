@@ -163,10 +163,18 @@ class RuntimeAgentVO(BaseModel):
     api_mode: Literal["responses", "chat_completions"]
 
 
+class SlashCommandVO(BaseModel):
+    name: str
+    description: str
+    usage: str
+    placeholder: str
+
+
 class RuntimeOptionsVO(BaseModel):
     default_agent: Literal["build", "plan"]
     agents: list[RuntimeAgentVO]
     providers: list[RuntimeProviderVO]
+    slash_commands: list[SlashCommandVO] = Field(default_factory=list)
     workspace_root: str
     workspace_name: str
     has_agents_md: bool

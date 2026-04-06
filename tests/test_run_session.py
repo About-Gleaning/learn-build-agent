@@ -69,6 +69,28 @@ def _last_user_agent(messages):
     return ""
 
 
+def _last_user_text(messages):
+    for msg in reversed(messages):
+        if msg["info"].get("role") != "user":
+            continue
+        return get_message_text(msg)
+    return ""
+
+
+def _last_user_display_text(messages):
+    for msg in reversed(messages):
+        if msg["info"].get("role") != "user":
+            continue
+        for part in msg["parts"]:
+            if part.get("type") != "text":
+                continue
+            meta = part.get("meta") or {}
+            if isinstance(meta, dict) and meta.get("display_text"):
+                return str(meta["display_text"])
+        return get_message_text(msg)
+    return ""
+
+
 def _last_tool_result_metadata(messages):
     for part in messages[-1]["parts"]:
         if part.get("type") != "tool":
@@ -186,6 +208,176 @@ def test_run_session_should_execute_mcp_tool_via_normal_tool_chain(monkeypatch):
 
     assert get_message_text(result) == "MCP 已执行"
     assert "github__search_issues" in captured_tool_names[0]
+
+
+def test_run_session_should_resolve_analyze_slash_command_before_llm(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("# 已存在\n", encoding="utf-8")
+    captured = {"user_text": "", "agent": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config
+        captured["user_text"] = _last_user_text(messages)
+        captured["agent"] = _last_user_agent(messages)
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "已生成说明书")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/analyze", session_id="s_analyze", mode="plan")
+
+    assert get_message_text(result) == "已生成说明书"
+    assert captured["agent"] == "build"
+    assert "project-context.md" in captured["user_text"]
+    assert "analyze_docs" in captured["user_text"]
+    assert "README.md" in captured["user_text"]
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze")
+    assert _last_user_display_text(history_messages) == "/analyze"
+
+
+def test_run_session_should_stop_analyze_when_agents_missing(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    called = {"chat": False}
+
+    def fake_chat(*args, **kwargs):
+        called["chat"] = True
+        raise AssertionError("缺少 AGENTS.md 时不应继续调用 LLM")
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/analyze", session_id="s_analyze_missing", mode="plan")
+
+    assert "请先执行 `/init`" in get_message_text(result)
+    assert called["chat"] is False
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze_missing")
+    assert _last_user_display_text(history_messages) == "/analyze"
+
+
+def test_run_session_should_resolve_init_slash_command_before_llm_when_agents_missing(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    captured = {"user_text": "", "agent": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config
+        captured["user_text"] = _last_user_text(messages)
+        captured["agent"] = _last_user_agent(messages)
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "已生成 AGENTS.md")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/init", session_id="s_init", mode="plan")
+
+    assert get_message_text(result) == "已生成 AGENTS.md"
+    assert captured["agent"] == "build"
+    assert "AGENTS.md" in captured["user_text"]
+    assert "面向内容贡献者" in captured["user_text"]
+    assert "无需再次检查文件是否存在" in captured["user_text"]
+    assert "先确认目标文件当前不存在" not in captured["user_text"]
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_init")
+    assert _last_user_display_text(history_messages) == "/init"
+
+
+def test_run_session_should_stop_init_when_agents_already_exists(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("# 已存在\n", encoding="utf-8")
+    called = {"chat": False}
+
+    def fake_chat(*args, **kwargs):
+        called["chat"] = True
+        raise AssertionError("已有 AGENTS.md 时不应继续调用 LLM")
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/init", session_id="s_init_exists", mode="plan")
+
+    assert "已存在 `AGENTS.md`" in get_message_text(result)
+    assert called["chat"] is False
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_init_exists")
+    assert _last_user_display_text(history_messages) == "/init"
+
+
+def test_run_session_should_forward_unknown_slash_like_input_to_llm(monkeypatch):
+    captured = {"user_text": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        captured["user_text"] = _last_user_text(messages)
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "已进入 LLM")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/missing", session_id="s_missing")
+
+    assert get_message_text(result) == "已进入 LLM"
+    assert captured["user_text"] == "/missing"
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_missing")
+    assert _last_user_text(history_messages) == "/missing"
+
+
+def test_run_session_should_forward_slash_command_with_extra_text_to_llm(monkeypatch):
+    captured = {"user_text": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        captured["user_text"] = _last_user_text(messages)
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "按普通输入处理")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    user_input = "/analyze 请顺便补充数据库设计"
+    result = run_session(user_input, session_id="s_analyze_with_text")
+
+    assert get_message_text(result) == "按普通输入处理"
+    assert captured["user_text"] == user_input
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze_with_text")
+    assert _last_user_text(history_messages) == user_input
+
+
+def test_run_session_should_forward_init_with_extra_text_to_llm(monkeypatch):
+    captured = {"user_text": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        captured["user_text"] = _last_user_text(messages)
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "按普通输入处理")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    user_input = "/init 请顺便补充 README"
+    result = run_session(user_input, session_id="s_init_with_text")
+
+    assert get_message_text(result) == "按普通输入处理"
+    assert captured["user_text"] == user_input
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_init_with_text")
+    assert _last_user_text(history_messages) == user_input
+
+
+@pytest.mark.parametrize("user_input", ["/", "/tmp/foo", "/bin/bash -lc echo hi"])
+def test_run_session_should_forward_absolute_path_like_input_to_llm(monkeypatch, user_input):
+    captured = {"user_text": ""}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        captured["user_text"] = _last_user_text(messages)
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "正常进入 LLM")
+        return assistant
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session(user_input, session_id=f"s_path_{abs(hash(user_input))}")
+
+    assert get_message_text(result) == "正常进入 LLM"
+    assert captured["user_text"] == user_input
 
 
 def test_run_session_should_block_hidden_mcp_tool_in_plan_mode(monkeypatch):

@@ -779,6 +779,59 @@ button:disabled {
   line-height: 1.7;
 }
 
+.terminal-input-wrap {
+  display: grid;
+  gap: 10px;
+}
+
+.slash-command-menu {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: rgba(9, 18, 28, 0.92);
+}
+
+.slash-command-item {
+  width: 100%;
+  min-height: 0;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid rgba(48, 80, 111, 0.9);
+  background: rgba(11, 22, 35, 0.86);
+}
+
+.slash-command-item.is-active {
+  border-color: rgba(124, 194, 255, 0.88);
+  background: rgba(16, 33, 51, 0.92);
+}
+
+.slash-command-item-head,
+.slash-command-item-tail {
+  display: block;
+}
+
+.slash-command-item-head {
+  display: grid;
+  gap: 4px;
+}
+
+.slash-command-item-head strong {
+  color: var(--brand);
+  font-size: 13px;
+}
+
+.slash-command-item-head span,
+.slash-command-item-tail {
+  color: var(--ink-subtle);
+  line-height: 1.6;
+}
+
+.slash-command-item-tail {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
 .composer-footer {
   justify-content: space-between;
 }

@@ -151,8 +151,14 @@ type RuntimeOptionsResp = {
     name: string;
     vendor: string;
     default_model: string;
-    models: string[];
-    api_mode: "responses" | "chat_completions";
+      models: string[];
+      api_mode: "responses" | "chat_completions";
+  }>;
+  slash_commands: Array<{
+    name: string;
+    description: string;
+    usage: string;
+    placeholder: string;
   }>;
   workspace_root: string;
   workspace_name: string;
@@ -337,6 +343,14 @@ function parseProviderModelKey(selectionKey: string): { provider: string; model:
     provider: (provider || "").trim(),
     model: rest.join("::").trim(),
   };
+}
+
+function getSlashCommandToken(input: string): string {
+  const normalized = input.trimStart();
+  if (!normalized.startsWith("/")) {
+    return "";
+  }
+  return normalized.slice(1).split(/\s+/, 1)[0]?.trim().toLowerCase() || "";
 }
 
 function emptyResponseMeta(): ResponseMeta {
@@ -2034,6 +2048,8 @@ export function App() {
   const [questionFocus, setQuestionFocus] = useState<QuestionFocusTarget>("options");
   const [questionRequestId, setQuestionRequestId] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState("");
+  const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
+  const [slashMenuDismissedInput, setSlashMenuDismissedInput] = useState("");
 
   const messageListRef = useRef<HTMLDivElement>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
@@ -2041,6 +2057,7 @@ export function App() {
   const questionNotesRef = useRef<HTMLTextAreaElement>(null);
   const questionOptionsRef = useRef<HTMLDivElement>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
@@ -2063,6 +2080,29 @@ export function App() {
     return `当前前端预期连接工作区 ${EXPECTED_WORKSPACE_ROOT}，但后端返回的工作区是 ${actualWorkspaceRoot}。请先停止异常残留实例，再重新执行 my-agent web。`;
   }, [runtimeOptions]);
   const hasWorkspaceMismatch = Boolean(workspaceMismatchMessage);
+  const slashCommands = runtimeOptions?.slash_commands || [];
+  const slashCommandToken = useMemo(() => getSlashCommandToken(input), [input]);
+  const isSlashQueryMode = useMemo(() => {
+    const normalized = input.trimStart();
+    return normalized.startsWith("/") && !/\s/.test(normalized.slice(1));
+  }, [input]);
+  const filteredSlashCommands = useMemo(() => {
+    if (!isSlashQueryMode) {
+      return [];
+    }
+    return slashCommands.filter((command) => command.name.startsWith(slashCommandToken));
+  }, [isSlashQueryMode, slashCommands, slashCommandToken]);
+  const isSlashMenuOpen =
+    isSlashQueryMode &&
+    filteredSlashCommands.length > 0 &&
+    !activeQuestion &&
+    !isLoadingSession &&
+    !hasWorkspaceMismatch &&
+    slashMenuDismissedInput !== input;
+  const activeSlashCommand =
+    isSlashMenuOpen && filteredSlashCommands.length > 0
+      ? filteredSlashCommands[Math.min(slashMenuActiveIndex, filteredSlashCommands.length - 1)]
+      : null;
   const canSubmit = useMemo(
     () =>
       input.trim().length > 0 &&
@@ -2074,6 +2114,12 @@ export function App() {
       !hasWorkspaceMismatch,
     [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping, isLoadingSession, hasWorkspaceMismatch],
   );
+  useEffect(() => {
+    if (!isSlashMenuOpen) {
+      return;
+    }
+    setSlashMenuActiveIndex((prev) => (prev < filteredSlashCommands.length ? prev : 0));
+  }, [filteredSlashCommands.length, isSlashMenuOpen]);
 
   const modeDefaults = useMemo(() => {
     const map = new Map<AgentName, { defaultProvider: string; defaultModel: string }>();
@@ -3201,7 +3247,44 @@ export function App() {
     setMode((prev) => getNextAgent(prev, agentOptions));
   };
 
+  const closeSlashMenu = () => {
+    setSlashMenuDismissedInput(input);
+  };
+
+  const applySlashCommand = (command: RuntimeOptionsResp["slash_commands"][number]) => {
+    setInput(`/${command.name}`);
+    setSlashMenuDismissedInput("");
+    setSlashMenuActiveIndex(0);
+    window.requestAnimationFrame(() => {
+      composerTextareaRef.current?.focus();
+    });
+  };
+
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isSlashMenuOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSlashMenuActiveIndex((prev) => (prev + 1) % filteredSlashCommands.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSlashMenuActiveIndex((prev) => (prev - 1 + filteredSlashCommands.length) % filteredSlashCommands.length);
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
+        event.preventDefault();
+        if (activeSlashCommand) {
+          applySlashCommand(activeSlashCommand);
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSlashMenu();
+        return;
+      }
+    }
     if (event.key === "Tab" && event.shiftKey) {
       event.preventDefault();
       handleCycleAgent();
@@ -3665,10 +3748,41 @@ export function App() {
                 </div>
               ) : (
                 <div className="terminal-input-wrap">
+                  {isSlashMenuOpen ? (
+                    <div className="slash-command-menu" role="listbox" aria-label="内置命令列表">
+                      {filteredSlashCommands.map((command, index) => {
+                        const isActive = index === slashMenuActiveIndex;
+                        return (
+                          <button
+                            key={command.name}
+                            type="button"
+                            className={`slash-command-item ${isActive ? "is-active" : ""}`}
+                            onClick={() => applySlashCommand(command)}
+                          >
+                            <span className="slash-command-item-head">
+                              <strong>{command.usage}</strong>
+                              <span>{command.description}</span>
+                            </span>
+                            <span className="slash-command-item-tail">{command.placeholder}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                   <textarea
+                    ref={composerTextareaRef}
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    placeholder="输入目标、上下文或想修的细节；Enter 发送，Shift+Enter 换行，Shift+Tab 切换 Agent。"
+                    onChange={(e) => {
+                      setInput(e.target.value);
+                      if (slashMenuDismissedInput) {
+                        setSlashMenuDismissedInput("");
+                      }
+                    }}
+                    placeholder={
+                      activeSlashCommand
+                        ? `${activeSlashCommand.usage}：${activeSlashCommand.placeholder}`
+                        : "输入目标、上下文或想修的细节；Enter 发送，Shift+Enter 换行，Shift+Tab 切换 Agent。"
+                    }
                     rows={3}
                     onKeyDown={onComposerKeyDown}
                     aria-label="消息输入框"

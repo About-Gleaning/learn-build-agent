@@ -1,0 +1,54 @@
+生成一个名为 AGENTS.md 的文件，并直接写入 `{agents_path}`，作为该仓库的贡献者指南。
+
+你的目标是产出一份清晰、简洁、结构良好的文档，包含具有描述性的标题，并对每个部分提供可执行的说明。
+
+请遵循下面的结构，但可以根据实际情况调整 —— 如有需要可增加章节，不适用的可省略。
+
+---
+
+## 文档要求
+
+- 文档标题为 "Repository Guidelines"  
+- 使用 Markdown 标题（#, ## 等）组织结构  
+- 内容保持简洁，200–400 字为最佳  
+- 说明应简短、直接，并贴合本仓库实际情况  
+- 在合适的地方提供示例（命令、目录路径、命名规范等）  
+- 使用专业、指导性的语气  
+
+---
+
+## 推荐章节
+
+### Project Structure & Module Organization
+
+- 说明项目结构，包括源码、测试、资源文件所在位置  
+
+### Build, Test, and Development Commands
+
+- 列出构建、测试、运行项目的关键命令（例如 npm test、make build）  
+- 简要说明每个命令的作用  
+
+### Coding Style & Naming Conventions
+
+- 指定缩进规则、语言风格偏好、命名规范  
+- 包含使用的格式化或 lint 工具  
+
+### Testing Guidelines
+
+- 说明测试框架及覆盖率要求  
+- 说明测试命名规范以及如何运行测试  
+
+### Commit & Pull Request Guidelines
+
+- 总结项目 Git 历史中的 commit message 规范  
+- 说明 PR 要求（描述、关联 issue、截图等）  
+
+---
+
+## 可选章节
+
+如有需要，可以添加：
+
+- Security & Configuration Tips（安全与配置建议）  
+- Architecture Overview（架构概览）  
+- Agent-Specific Instructions（Agent 专用说明）  

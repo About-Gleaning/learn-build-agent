@@ -8,6 +8,7 @@ from typing import Any, Literal
 from dotenv import load_dotenv
 
 from ..runtime.workspace import get_workspace
+from ..slash_commands import list_visible_slash_commands
 
 load_dotenv()
 
@@ -1007,10 +1008,20 @@ def build_runtime_options() -> dict[str, Any]:
         }
         for agent in ("build", "plan")
     ]
+    slash_commands = [
+        {
+            "name": command.name,
+            "description": command.description,
+            "usage": command.usage,
+            "placeholder": command.placeholder,
+        }
+        for command in list_visible_slash_commands()
+    ]
     return {
         "default_agent": "build",
         "agents": agents,
         "providers": providers,
+        "slash_commands": slash_commands,
         "workspace_root": str(workspace.root),
         "workspace_name": workspace.workspace_name,
         "has_agents_md": workspace.has_agents_md,

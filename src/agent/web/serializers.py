@@ -7,6 +7,19 @@ from ..core.message import Message, get_message_text
 from .schemas import DisplayPartVO, MessageVO
 
 
+def _resolve_message_display_text(message: Message) -> str:
+    for part in message.get("parts", []):
+        if part.get("type") != "text":
+            continue
+        meta = part.get("meta")
+        if not isinstance(meta, dict):
+            continue
+        display_text = str(meta.get("display_text", "")).strip()
+        if display_text:
+            return display_text
+    return get_message_text(message)
+
+
 def _normalize_response_meta(raw_value: Any) -> dict[str, Any]:
     response_meta = raw_value if isinstance(raw_value, dict) else {}
     return {
@@ -125,7 +138,7 @@ def message_to_vo(message: Message) -> MessageVO:
     return MessageVO(
         message_id=str(info.get("message_id", "")),
         role=str(info.get("role", "")),
-        text=get_message_text(message),
+        text=_resolve_message_display_text(message),
         created_at=str(info.get("created_at", "")),
         status=str(info.get("status", "")),
         agent=str(info.get("agent", "")),
