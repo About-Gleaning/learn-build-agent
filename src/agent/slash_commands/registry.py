@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .types import SlashCommandHandlerKey
+
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -13,6 +15,7 @@ class SlashCommandDefinition:
     description: str
     usage: str
     placeholder: str
+    handler_key: SlashCommandHandlerKey
     visible_in_web: bool = True
     prompt_template_path: Path | None = None
 
@@ -23,6 +26,7 @@ _SLASH_COMMANDS: tuple[SlashCommandDefinition, ...] = (
         description="初始化当前工作区的 AGENTS.md；若已存在则停止，若不存在则生成简明内容。",
         usage="/init",
         placeholder="为当前项目初始化 AGENTS.md",
+        handler_key="init_agents",
         prompt_template_path=PROMPTS_DIR / "init.txt",
     ),
     SlashCommandDefinition(
@@ -30,6 +34,7 @@ _SLASH_COMMANDS: tuple[SlashCommandDefinition, ...] = (
         description="研读当前工作区并生成项目说明书，供后续开发复用。",
         usage="/analyze",
         placeholder="生成当前项目的上下文说明书",
+        handler_key="analyze_project",
         prompt_template_path=PROMPTS_DIR / "analyze.txt",
     ),
 )

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from .registry import get_slash_command
+
+_COMMAND_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 @dataclass(frozen=True)
 class ParsedSlashCommand:
     raw_input: str
     name: str
-    args_text: str
 
 
 def parse_slash_command(user_input: str) -> ParsedSlashCommand | None:
@@ -29,8 +30,8 @@ def parse_slash_command(user_input: str) -> ParsedSlashCommand | None:
         return None
 
     name = parts[0].strip().lower()
-    # 只有完整输入恰好命中已注册 slash command 时，才进入命令分支；
-    # 像 /tmp/foo、/bin/bash -lc ...、/analyze 请帮我... 这类输入都应继续交给 LLM。
-    if get_slash_command(name) is None:
+    # parser 只负责识别 slash command 语法，不负责判断命令是否已注册。
+    # 但命令名本身仍要满足安全且稳定的形态约束，避免把路径之类的输入误判成命令。
+    if _COMMAND_NAME_PATTERN.fullmatch(name) is None:
         return None
-    return ParsedSlashCommand(raw_input=normalized, name=name, args_text="")
+    return ParsedSlashCommand(raw_input=normalized, name=name)
