@@ -8,6 +8,7 @@ from agent.runtime import session as session_runtime
 from agent.runtime.session import clear_session_memory, configure_session_memory_store, generate_session_id
 from agent.runtime.session_memory import InMemorySessionMemoryStore
 from agent.web.app import create_app
+from agent.web.path_suggestions import PathSuggestion
 from agent.web.serializers import message_to_vo, split_stream_event
 
 
@@ -248,6 +249,76 @@ def test_runtime_options_should_return_backend_config():
     assert payload["workspace_root"]
     assert payload["workspace_name"]
     assert payload["launch_mode"] == "web"
+
+
+def test_workspace_path_suggestions_should_return_matches(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        "agent.web.app.suggest_workspace_paths",
+        lambda query: [
+            PathSuggestion(
+                path="/tmp/project/src/test_app.py",
+                name="test_app.py",
+                relative_path="src/test_app.py",
+                kind="file",
+            ),
+            PathSuggestion(
+                path="/tmp/project/tests",
+                name="tests",
+                relative_path="tests",
+                kind="directory",
+            ),
+        ],
+    )
+
+    resp = client.get("/api/workspace/path-suggestions?q=test")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["query"] == "test"
+    assert payload["suggestions"][0]["relative_path"] == "src/test_app.py"
+    assert payload["suggestions"][1]["kind"] == "directory"
+
+
+def test_workspace_path_suggestions_should_return_empty_list_for_empty_query():
+    app = create_app()
+    client = TestClient(app)
+
+    resp = client.get("/api/workspace/path-suggestions?q= ")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"query": "", "suggestions": []}
+
+
+def test_workspace_path_selection_should_record_relative_path(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+    recorded: list[str] = []
+
+    monkeypatch.setattr("agent.web.app.record_path_selection", lambda relative_path: recorded.append(relative_path))
+
+    resp = client.post("/api/workspace/path-selections", json={"relative_path": "src/test_app.py"})
+
+    assert resp.status_code == 200
+    assert resp.json()["recorded"] is True
+    assert recorded == ["src/test_app.py"]
+
+
+def test_workspace_path_selection_should_reject_invalid_relative_path(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def fake_record_path_selection(relative_path: str):
+        raise ValueError("relative_path 超出工作区范围")
+
+    monkeypatch.setattr("agent.web.app.record_path_selection", fake_record_path_selection)
+
+    resp = client.post("/api/workspace/path-selections", json={"relative_path": "../secret.txt"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "relative_path 超出工作区范围"
 
 
 def test_message_to_vo_should_normalize_missing_optional_fields():

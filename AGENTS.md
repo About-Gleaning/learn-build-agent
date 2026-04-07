@@ -28,6 +28,7 @@
 - `src/agent/tools/specs.py`：工具 schema 与描述模板装配。
 - `src/agent/tools/lsp_tool.py`：LSP 查询工具归口，负责路径/位置校验、查询分发与结果整形。
 - `src/agent/web/serializers.py`：Web 序列化唯一归口。
+- `src/agent/web/path_suggestions.py`：Web 输入框 `@` 文件/目录补全归口，负责工作区路径索引、搜索、匹配打分与稳定排序；最近选择（MRU）仅记录，不参与排序。
 - `tests/`：`pytest` 回归、集成与边界测试。
 
 ## 分层职责红线
@@ -54,6 +55,8 @@
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
 - Web 端允许通过 `POST /api/sessions/{session_id}/stop` 停止当前会话；运行时必须按 `session_id` 管理停止标记并统一以 `interrupted/cancelled` 收口。
+- Web 输入框 `@` 路径补全只允许搜索当前工作区；若 `@` 不在输入框首位，则前一字符必须是空格，单独输入 `@` 不触发补全。
+- Web 输入框 `@` 路径补全排序必须优先服务“快速命中文件”，默认采用文件名命中、路径段前缀、连续性、命中位置、跨度紧凑度等因素计算匹配分数；排序固定为“匹配分数降序 + 相对路径字典序升序”，最近选择（MRU）仅记录不参与排序，不能再使用“目录恒定优先”的静态规则。
 - `my-agent web` 支持按工作区并行启动多套实例；端口冲突时必须自动分配空闲端口，并把实际前后端地址写入当前工作区的 `web-dev/<workspace_id>/state.json`。
 - `my-agent web prune` 必须扫描 `~/.my-agent/workspaces/web-dev/` 下全部工作区状态文件，只清理 `degraded/stale` 异常残留，保留其他工作区健康实例，并输出逐项处理结果。
 - Web 前端必须校验后端返回的 `workspace_root` 是否与当前实例预期工作区一致；若不一致，必须阻断继续聊天，避免误连旧 backend。
