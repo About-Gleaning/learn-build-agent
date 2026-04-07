@@ -782,12 +782,11 @@ button:disabled {
 }
 
 .terminal-input-wrap {
-  position: relative;
+  display: grid;
+  gap: 8px;
 }
 
 .path-suggestion-menu {
-  top: auto;
-  bottom: calc(100% + 8px);
   max-height: min(280px, 42vh);
   overflow: auto;
   overscroll-behavior: contain;
@@ -795,9 +794,6 @@ button:disabled {
 
 .slash-command-menu,
 .path-suggestion-menu {
-  position: absolute;
-  left: 0;
-  right: 0;
   z-index: 5;
   gap: 8px;
 }
@@ -805,6 +801,9 @@ button:disabled {
 .slash-command-menu {
   display: grid;
   gap: 6px;
+  max-height: min(240px, 38vh);
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: 8px;
   border: 1px solid var(--line);
   border-radius: 12px;

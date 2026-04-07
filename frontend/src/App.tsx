@@ -2703,16 +2703,25 @@ export function App() {
       notes: draft.notes,
     }));
 
-  const handleSubmit = async (event: FormEvent) => {
-    event.preventDefault();
-    const trimmed = input.trim();
-    if (!trimmed || isStreaming || isLoadingSession) {
+  const submitComposerText = async (rawInput: string) => {
+    const trimmed = rawInput.trim();
+    if (
+      !trimmed ||
+      activeQuestion ||
+      isStreaming ||
+      isApplyingModeSwitch ||
+      isStopping ||
+      isLoadingSession ||
+      hasWorkspaceMismatch
+    ) {
       return;
     }
 
     setError("");
     setRuntimeAlerts([]);
     setInput("");
+    setSlashMenuDismissedInput("");
+    setSlashMenuActiveIndex(0);
     setShouldFollow(true);
 
     const now = new Date().toISOString();
@@ -2911,6 +2920,11 @@ export function App() {
       setIsStreaming(false);
       setIsStopping(false);
     }
+  };
+
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    await submitComposerText(input);
   };
 
   const handleMessageScroll = () => {
@@ -3486,7 +3500,11 @@ export function App() {
       if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
         event.preventDefault();
         if (activeSlashCommand) {
-          applySlashCommand(activeSlashCommand);
+          if (event.key === "Enter") {
+            void submitComposerText(activeSlashCommand.usage);
+          } else {
+            applySlashCommand(activeSlashCommand);
+          }
         }
         return;
       }
