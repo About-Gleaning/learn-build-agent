@@ -6,7 +6,7 @@
  * 工具调用过程展示、时间线渲染、question 工具交互、停止会话等功能。作为前端核心入口组件，管理消息状态、运行时配置及 UI 交互。
  */
 
-import { FormEvent, KeyboardEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, startTransition, useEffect, useMemo, useRef, useState, WheelEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -171,6 +171,20 @@ type ProviderModelOption = {
   provider: string;
   model: string;
   label: string;
+};
+
+type PathSuggestion = {
+  path: string;
+  name: string;
+  relative_path: string;
+  kind: "file" | "directory";
+};
+
+type ActivePathToken = {
+  rawToken: string;
+  query: string;
+  start: number;
+  end: number;
 };
 
 type HistoryResp = {
@@ -351,6 +365,61 @@ function getSlashCommandToken(input: string): string {
     return "";
   }
   return normalized.slice(1).split(/\s+/, 1)[0]?.trim().toLowerCase() || "";
+}
+
+function getActivePathToken(input: string, selectionStart: number, selectionEnd: number): ActivePathToken | null {
+  if (selectionStart !== selectionEnd) {
+    return null;
+  }
+  const cursor = Math.max(0, Math.min(selectionStart, input.length));
+  let tokenStart = cursor;
+  while (tokenStart > 0 && !/\s/.test(input[tokenStart - 1] || "")) {
+    tokenStart -= 1;
+  }
+  let tokenEnd = cursor;
+  while (tokenEnd < input.length && !/\s/.test(input[tokenEnd] || "")) {
+    tokenEnd += 1;
+  }
+  const rawToken = input.slice(tokenStart, tokenEnd);
+  if (!rawToken.startsWith("@") || rawToken.length <= 1) {
+    return null;
+  }
+  if (tokenStart > 0 && input[tokenStart - 1] !== " ") {
+    return null;
+  }
+  return {
+    rawToken,
+    query: rawToken.slice(1).trim(),
+    start: tokenStart,
+    end: tokenEnd,
+  };
+}
+
+function formatInsertedPath(path: string): string {
+  const normalized = /\s/.test(path) ? `"${path}"` : path;
+  return `${normalized} `;
+}
+
+async function fetchPathSuggestions(query: string): Promise<PathSuggestion[]> {
+  const resp = await fetch(`${API_BASE}/api/workspace/path-suggestions?q=${encodeURIComponent(query)}`);
+  if (!resp.ok) {
+    throw new Error(`路径补全请求失败: ${resp.status}`);
+  }
+  const payload = (await resp.json()) as { suggestions?: PathSuggestion[] };
+  return Array.isArray(payload.suggestions) ? payload.suggestions : [];
+}
+
+async function recordPathSelection(relativePath: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/api/workspace/path-selections`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ relative_path: relativePath }),
+  });
+  if (!resp.ok) {
+    throw new Error(`路径选择记录失败: ${resp.status}`);
+  }
 }
 
 function emptyResponseMeta(): ResponseMeta {
@@ -2050,6 +2119,11 @@ export function App() {
   const [copiedMessageId, setCopiedMessageId] = useState("");
   const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
   const [slashMenuDismissedInput, setSlashMenuDismissedInput] = useState("");
+  const [pathMenuActiveIndex, setPathMenuActiveIndex] = useState(0);
+  const [pathMenuDismissedToken, setPathMenuDismissedToken] = useState("");
+  const [pathSuggestions, setPathSuggestions] = useState<PathSuggestion[]>([]);
+  const [isLoadingPathSuggestions, setIsLoadingPathSuggestions] = useState(false);
+  const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
 
   const messageListRef = useRef<HTMLDivElement>(null);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
@@ -2058,6 +2132,7 @@ export function App() {
   const questionOptionsRef = useRef<HTMLDivElement>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const pathSuggestionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
@@ -2099,8 +2174,24 @@ export function App() {
     !isLoadingSession &&
     !hasWorkspaceMismatch &&
     slashMenuDismissedInput !== input;
+  const activePathToken = useMemo(
+    () => getActivePathToken(input, composerSelection.start, composerSelection.end),
+    [composerSelection.end, composerSelection.start, input],
+  );
+  const isPathMenuOpen =
+    Boolean(activePathToken?.query) &&
+    pathSuggestions.length > 0 &&
+    !activeQuestion &&
+    !isLoadingSession &&
+    !hasWorkspaceMismatch &&
+    pathMenuDismissedToken !== activePathToken?.rawToken;
+  const activePathSuggestion =
+    isPathMenuOpen && pathSuggestions.length > 0
+      ? pathSuggestions[Math.min(pathMenuActiveIndex, pathSuggestions.length - 1)]
+      : null;
+  const shouldShowSlashMenu = isSlashMenuOpen && !isPathMenuOpen;
   const activeSlashCommand =
-    isSlashMenuOpen && filteredSlashCommands.length > 0
+    shouldShowSlashMenu && filteredSlashCommands.length > 0
       ? filteredSlashCommands[Math.min(slashMenuActiveIndex, filteredSlashCommands.length - 1)]
       : null;
   const canSubmit = useMemo(
@@ -2115,11 +2206,66 @@ export function App() {
     [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping, isLoadingSession, hasWorkspaceMismatch],
   );
   useEffect(() => {
-    if (!isSlashMenuOpen) {
+    if (!shouldShowSlashMenu) {
       return;
     }
     setSlashMenuActiveIndex((prev) => (prev < filteredSlashCommands.length ? prev : 0));
-  }, [filteredSlashCommands.length, isSlashMenuOpen]);
+  }, [filteredSlashCommands.length, shouldShowSlashMenu]);
+
+  useEffect(() => {
+    if (!activePathToken?.query) {
+      setPathSuggestions([]);
+      setIsLoadingPathSuggestions(false);
+      return;
+    }
+    let cancelled = false;
+    setPathMenuActiveIndex(0);
+    setIsLoadingPathSuggestions(true);
+    void fetchPathSuggestions(activePathToken.query)
+      .then((items) => {
+        if (cancelled) {
+          return;
+        }
+        setPathSuggestions(items);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setPathSuggestions([]);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingPathSuggestions(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activePathToken?.query]);
+
+  useEffect(() => {
+    if (!isPathMenuOpen) {
+      return;
+    }
+    setPathMenuActiveIndex((prev) => (prev < pathSuggestions.length ? prev : 0));
+  }, [isPathMenuOpen, pathSuggestions.length]);
+
+  useEffect(() => {
+    pathSuggestionItemRefs.current = pathSuggestionItemRefs.current.slice(0, pathSuggestions.length);
+  }, [pathSuggestions.length]);
+
+  useEffect(() => {
+    if (!isPathMenuOpen) {
+      return;
+    }
+    const activeElement = pathSuggestionItemRefs.current[pathMenuActiveIndex];
+    if (!activeElement) {
+      return;
+    }
+    // 键盘切换高亮项时，始终把目标候选保持在可视区域内。
+    activeElement.scrollIntoView({ block: "nearest" });
+  }, [isPathMenuOpen, pathMenuActiveIndex]);
 
   const modeDefaults = useMemo(() => {
     const map = new Map<AgentName, { defaultProvider: string; defaultModel: string }>();
@@ -3260,8 +3406,73 @@ export function App() {
     });
   };
 
+  const closePathMenu = () => {
+    if (activePathToken?.rawToken) {
+      setPathMenuDismissedToken(activePathToken.rawToken);
+    }
+  };
+
+  const applyPathSuggestion = (suggestion: PathSuggestion) => {
+    if (!activePathToken) {
+      return;
+    }
+    const replacement = formatInsertedPath(suggestion.path);
+    const nextInput = `${input.slice(0, activePathToken.start)}${replacement}${input.slice(activePathToken.end)}`;
+    const nextCursor = activePathToken.start + replacement.length;
+    setInput(nextInput);
+    setPathMenuDismissedToken("");
+    setPathSuggestions([]);
+    setPathMenuActiveIndex(0);
+    setComposerSelection({ start: nextCursor, end: nextCursor });
+    window.requestAnimationFrame(() => {
+      const textarea = composerTextareaRef.current;
+      textarea?.focus();
+      textarea?.setSelectionRange(nextCursor, nextCursor);
+    });
+    void recordPathSelection(suggestion.relative_path).catch(() => {
+      // 记录失败不影响主流程，避免补全交互被非关键请求打断。
+    });
+  };
+
+  const handleComposerSelectionChange = (target: HTMLTextAreaElement) => {
+    setComposerSelection({
+      start: target.selectionStart ?? 0,
+      end: target.selectionEnd ?? 0,
+    });
+  };
+
+  const handlePathSuggestionMenuWheel = (event: WheelEvent<HTMLDivElement>) => {
+    // 产品要求禁用鼠标滚轮，避免与键盘高亮导航产生双通道状态。
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (isSlashMenuOpen) {
+    if (isPathMenuOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setPathMenuActiveIndex((prev) => (prev + 1) % pathSuggestions.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setPathMenuActiveIndex((prev) => (prev - 1 + pathSuggestions.length) % pathSuggestions.length);
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
+        event.preventDefault();
+        if (activePathSuggestion) {
+          applyPathSuggestion(activePathSuggestion);
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePathMenu();
+        return;
+      }
+    }
+    if (shouldShowSlashMenu) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
         setSlashMenuActiveIndex((prev) => (prev + 1) % filteredSlashCommands.length);
@@ -3748,7 +3959,7 @@ export function App() {
                 </div>
               ) : (
                 <div className="terminal-input-wrap">
-                  {isSlashMenuOpen ? (
+                  {shouldShowSlashMenu ? (
                     <div className="slash-command-menu" role="listbox" aria-label="内置命令列表">
                       {filteredSlashCommands.map((command, index) => {
                         const isActive = index === slashMenuActiveIndex;
@@ -3769,19 +3980,59 @@ export function App() {
                       })}
                     </div>
                   ) : null}
+                  {isPathMenuOpen ? (
+                    <div
+                      className="slash-command-menu path-suggestion-menu"
+                      role="listbox"
+                      aria-label="@ 文件补全列表"
+                      aria-activedescendant={activePathSuggestion ? `path-suggestion-${pathMenuActiveIndex}` : undefined}
+                      onWheel={handlePathSuggestionMenuWheel}
+                    >
+                      {pathSuggestions.map((item, index) => {
+                        const isActive = index === pathMenuActiveIndex;
+                        return (
+                          <button
+                            ref={(node) => {
+                              pathSuggestionItemRefs.current[index] = node;
+                            }}
+                            id={`path-suggestion-${index}`}
+                            key={`${item.kind}:${item.path}`}
+                            type="button"
+                            role="option"
+                            aria-selected={isActive}
+                            className={`slash-command-item path-suggestion-item ${isActive ? "is-active" : ""}`}
+                            onClick={() => applyPathSuggestion(item)}
+                          >
+                            <span className="slash-command-item-head">
+                              <strong>{item.name}</strong>
+                              <span>{item.relative_path}</span>
+                            </span>
+                            <span className="slash-command-item-tail">{item.kind === "directory" ? "目录" : "文件"}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                   <textarea
                     ref={composerTextareaRef}
                     value={input}
                     onChange={(e) => {
                       setInput(e.target.value);
+                      handleComposerSelectionChange(e.target);
                       if (slashMenuDismissedInput) {
                         setSlashMenuDismissedInput("");
                       }
+                      if (pathMenuDismissedToken) {
+                        setPathMenuDismissedToken("");
+                      }
                     }}
+                    onSelect={(e) => handleComposerSelectionChange(e.currentTarget)}
+                    onClick={(e) => handleComposerSelectionChange(e.currentTarget)}
+                    onKeyUp={(e) => handleComposerSelectionChange(e.currentTarget)}
                     placeholder={
                       activeSlashCommand
                         ? `${activeSlashCommand.usage}：${activeSlashCommand.placeholder}`
-                        : "输入目标、上下文或想修的细节；Enter 发送，Shift+Enter 换行，Shift+Tab 切换 Agent。"
+                        : "输入目标、上下文或想修的细节；支持 @test 搜索工作区文件，Enter 发送，Shift+Enter 换行，Shift+Tab 切换 Agent。"
                     }
                     rows={3}
                     onKeyDown={onComposerKeyDown}
@@ -3794,6 +4045,7 @@ export function App() {
                 <div className="composer-tips">
                   <span>{followText}</span>
                   <span>最近消息: {latestMessageTime}</span>
+                  {!isQuestionMode ? <span>{isLoadingPathSuggestions ? "@ 补全加载中" : "@ 搜索：首位可直接触发，中间需前置空格"}</span> : null}
                   {isQuestionMode ? <span>左右键切题，上下键选项，Tab 切换到 notes</span> : null}
                 </div>
                 <div className="composer-actions">

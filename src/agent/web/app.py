@@ -11,10 +11,14 @@ from ..config.logging_setup import init_logging
 from ..config.settings import build_runtime_options
 from ..runtime import session as session_runtime
 from ..runtime.workspace import configure_workspace, get_workspace
+from .path_suggestions import record_path_selection, suggest_workspace_paths
 from .schemas import (
     ChatStreamReq,
     ModeSwitchActionReq,
     ModeSwitchActionVO,
+    PathSelectionReq,
+    PathSelectionVO,
+    PathSuggestionsVO,
     QuestionActionVO,
     QuestionAnswerReq,
     RuntimeOptionsVO,
@@ -177,6 +181,37 @@ def create_app() -> FastAPI:
     @app.get("/api/runtime/options", response_model=RuntimeOptionsVO)
     def runtime_options() -> RuntimeOptionsVO:
         return RuntimeOptionsVO(**build_runtime_options())
+
+    @app.get("/api/workspace/path-suggestions", response_model=PathSuggestionsVO)
+    def workspace_path_suggestions(q: str = Query(default="", max_length=256)) -> PathSuggestionsVO:
+        normalized_query = (q or "").strip()
+        try:
+            suggestions = suggest_workspace_paths(normalized_query)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return PathSuggestionsVO(
+            query=normalized_query,
+            suggestions=[
+                {
+                    "path": item.path,
+                    "name": item.name,
+                    "relative_path": item.relative_path,
+                    "kind": item.kind,
+                }
+                for item in suggestions
+            ],
+        )
+
+    @app.post("/api/workspace/path-selections", response_model=PathSelectionVO)
+    def workspace_path_selection(req: PathSelectionReq) -> PathSelectionVO:
+        normalized_relative_path = (req.relative_path or "").strip()
+        if not normalized_relative_path:
+            raise HTTPException(status_code=400, detail="relative_path 不能为空")
+        try:
+            record_path_selection(normalized_relative_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return PathSelectionVO(recorded=True, relative_path=normalized_relative_path)
 
     @app.post("/api/chat/stream")
     def chat_stream(req: ChatStreamReq) -> StreamingResponse:

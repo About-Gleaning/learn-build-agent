@@ -292,6 +292,7 @@ TypeScript / JavaScript LSP 说明：
 - `POST /api/sessions/{session_id}/questions/{request_id}/answer` 及其 `/stream`
 - `POST /api/sessions/{session_id}/questions/{request_id}/reject` 及其 `/stream`
 - `DELETE /api/sessions/{session_id}`：清空会话
+- `GET /api/workspace/path-suggestions?q=关键词`：返回当前工作区内匹配 `@关键词` 的文件/目录候选；按“匹配分数降序、相对路径升序”稳定排序，空查询返回空列表
 
 ## 项目结构
 
@@ -342,6 +343,8 @@ Web 说明：
 - 前端端口默认从 `5173` 开始自动探测空闲端口
 - 控制台输出与 `my-agent web status` 会展示当前工作区实例的实际前后端地址
 - `my-agent web prune` 会保留健康运行的其他工作区实例，只清理 `degraded/stale` 残留，并输出每个实例的处理结果
+- Web 输入框支持 `@关键词` 搜索当前工作区内的文件和目录；若 `@` 不在输入框首位，则其前一字符必须是空格
+- 选择候选后，前端会把当前 `@token` 直接替换成绝对路径；若路径含空格，会自动补双引号和末尾空格
 
 常见失败场景：
 

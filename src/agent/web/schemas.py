@@ -179,3 +179,24 @@ class RuntimeOptionsVO(BaseModel):
     workspace_name: str
     has_agents_md: bool
     launch_mode: str
+
+
+class PathSuggestionVO(BaseModel):
+    path: str
+    name: str
+    relative_path: str
+    kind: Literal["file", "directory"]
+
+
+class PathSuggestionsVO(BaseModel):
+    query: str
+    suggestions: list[PathSuggestionVO] = Field(default_factory=list)
+
+
+class PathSelectionReq(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=1024)
+
+
+class PathSelectionVO(BaseModel):
+    recorded: bool = True
+    relative_path: str
