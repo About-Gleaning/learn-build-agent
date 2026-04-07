@@ -898,73 +898,67 @@ def test_resolve_readable_file_path_should_allow_workspace_absolute_path(tmp_pat
 def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
     _set_test_session()
+    target = (tmp_path / "notes.txt").resolve()
 
-    result = run_write("notes.txt", "hello")
+    result = run_write(str(target), "hello")
 
     assert result["metadata"]["status"] == "completed"
+    assert result["success"] is True
     assert result["title"] == "notes.txt"
-    assert result["metadata"]["filepath"] == str((tmp_path / "notes.txt").resolve())
+    assert result["filePath"] == str(target)
+    assert result["bytesWritten"] == len("hello".encode("utf-8"))
+    assert result["metadata"]["filepath"] == str(target)
     assert result["metadata"]["exists"] is False
     assert result["metadata"]["diagnostics"] == []
     assert result["metadata"]["diagnostics_status"] == "unsupported_language"
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
 
 
-def test_run_write_should_allow_runtime_skills_file_after_read(tmp_path, monkeypatch):
+def test_run_write_should_allow_runtime_skills_file_creation(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
     configure_workspace(tmp_path / "workspace")
     _set_test_session("skills-write")
     target = get_workspace().skills_dir / "demo-skill" / "SKILL.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("old", encoding="utf-8")
+    assert not target.exists()
 
-    read_result = run_read(str(target))
-    assert read_result["metadata"]["status"] == "completed"
-
-    result = run_write(str(target), "new")
+    result = run_write(str(target.resolve()), "new")
 
     assert result["metadata"]["status"] == "completed"
     assert target.read_text(encoding="utf-8") == "new"
 
 
-def test_run_write_should_require_read_before_overwriting_existing_file(tmp_path):
-    file_path = tmp_path / "notes.txt"
-    file_path.write_text("old", encoding="utf-8")
+def test_run_write_should_reject_relative_path(tmp_path):
     configure_workspace(tmp_path)
     _set_test_session()
 
     result = run_write("notes.txt", "new")
 
     assert result["metadata"]["status"] == "failed"
-    assert result["metadata"]["error_code"] == "write_read_required"
+    assert result["metadata"]["error_code"] == "write_path_not_absolute"
 
 
-def test_run_write_should_overwrite_existing_file_after_read(tmp_path):
+def test_run_write_should_reject_existing_file_and_guide_to_edit(tmp_path):
     file_path = tmp_path / "notes.txt"
     file_path.write_text("old", encoding="utf-8")
     configure_workspace(tmp_path)
     _set_test_session()
-    run_read(str(file_path.resolve()))
 
-    result = run_write("notes.txt", "new")
+    result = run_write(str(file_path.resolve()), "new")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "write_file_exists"
+    assert "edit_file" in result["output"]
+
+
+def test_run_write_should_auto_create_parent_directories(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    file_path = (tmp_path / "nested" / "dir" / "notes.txt").resolve()
+
+    result = run_write(str(file_path), "new")
 
     assert result["metadata"]["status"] == "completed"
-    assert result["metadata"]["exists"] is True
     assert file_path.read_text(encoding="utf-8") == "new"
-
-
-def test_run_write_should_fail_when_existing_file_changed_after_read(tmp_path):
-    file_path = tmp_path / "notes.txt"
-    file_path.write_text("old", encoding="utf-8")
-    configure_workspace(tmp_path)
-    _set_test_session()
-    run_read(str(file_path.resolve()))
-    file_path.write_text("changed", encoding="utf-8")
-
-    result = run_write("notes.txt", "new")
-
-    assert result["metadata"]["status"] == "failed"
-    assert result["metadata"]["error_code"] == "write_stale_read"
 
 
 def test_run_write_should_reject_directory_target(tmp_path):
@@ -972,7 +966,7 @@ def test_run_write_should_reject_directory_target(tmp_path):
     _set_test_session()
     (tmp_path / "dir").mkdir()
 
-    result = run_write("dir", "new")
+    result = run_write(str((tmp_path / "dir").resolve()), "new")
 
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "write_path_is_directory"
@@ -984,7 +978,7 @@ def test_run_edit_should_require_read_before_edit(tmp_path):
     configure_workspace(tmp_path)
     _set_test_session()
 
-    result = run_edit("sample.txt", "hello", "world")
+    result = run_edit(str(file_path.resolve()), "hello", "world")
 
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "edit_read_required"
@@ -997,11 +991,12 @@ def test_run_edit_should_return_text_not_found_failure(tmp_path):
     _set_test_session()
     run_read(str(file_path.resolve()))
 
-    result = run_edit("sample.txt", "missing", "world")
+    result = run_edit(str(file_path.resolve()), "missing", "world")
 
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "edit_text_not_found"
     assert "未在" in result["output"]
+    assert "空白字符" in result["output"]
 
 
 def test_run_edit_should_succeed_after_read_and_return_diff(tmp_path):
@@ -1011,9 +1006,12 @@ def test_run_edit_should_succeed_after_read_and_return_diff(tmp_path):
     _set_test_session()
     run_read(str(file_path.resolve()))
 
-    result = run_edit("sample.txt", "world", "agent")
+    result = run_edit(str(file_path.resolve()), "world", "agent")
 
     assert result["metadata"]["status"] == "completed"
+    assert result["success"] is True
+    assert result["operation"] == "replace"
+    assert result["replacedCount"] == 1
     assert result["metadata"]["diagnostics"] == []
     assert result["metadata"]["diagnostics_status"] == "unsupported_language"
     assert result["metadata"]["filediff"]["before"] == "hello\nworld\n"
@@ -1054,7 +1052,7 @@ def test_run_write_should_append_lsp_errors_into_output(monkeypatch, tmp_path):
         ),
     )
 
-    result = run_write("Foo.java", "class Foo {}")
+    result = run_write(str((tmp_path / "Foo.java").resolve()), "class Foo {}")
 
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics_status"] == "completed"
@@ -1146,7 +1144,7 @@ def test_run_edit_should_mark_server_unavailable_but_keep_success(monkeypatch, t
         ),
     )
 
-    result = run_edit("Foo.java", "Foo", "Bar")
+    result = run_edit(str(file_path.resolve()), "Foo", "Bar")
 
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics_status"] == "server_unavailable"
@@ -1177,7 +1175,7 @@ def test_run_write_should_mark_timeout_degraded_but_keep_success(monkeypatch, tm
         ),
     )
 
-    result = run_write("Foo.java", "class Foo {}")
+    result = run_write(str((tmp_path / "Foo.java").resolve()), "class Foo {}")
 
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics_status"] == "timeout_degraded"
@@ -1208,7 +1206,7 @@ def test_run_write_should_surface_project_import_failed_reason(monkeypatch, tmp_
         ),
     )
 
-    result = run_write("Foo.java", "class Foo {}")
+    result = run_write(str((tmp_path / "Foo.java").resolve()), "class Foo {}")
 
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics_status"] == "project_import_failed"
@@ -1239,7 +1237,7 @@ def test_run_write_should_summarize_completed_without_error_diagnostics(monkeypa
         ),
     )
 
-    result = run_write("demo.py", "print('ok')")
+    result = run_write(str((tmp_path / "demo.py").resolve()), "print('ok')")
 
     assert result["metadata"]["status"] == "completed"
     assert result["metadata"]["diagnostics_status"] == "completed"
@@ -1255,7 +1253,7 @@ def test_run_edit_should_fail_when_file_changed_after_read(tmp_path):
     run_read(str(file_path.resolve()))
     file_path.write_text("hello2", encoding="utf-8")
 
-    result = run_edit("sample.txt", "hello", "world")
+    result = run_edit(str(file_path.resolve()), "hello", "world")
 
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "edit_stale_read"
@@ -1268,8 +1266,8 @@ def test_run_edit_should_fail_when_editing_twice_without_reread(tmp_path):
     _set_test_session()
     run_read(str(file_path.resolve()))
 
-    first_result = run_edit("sample.txt", "hello", "world")
-    second_result = run_edit("sample.txt", "world", "agent")
+    first_result = run_edit(str(file_path.resolve()), "hello", "world")
+    second_result = run_edit(str(file_path.resolve()), "world", "agent")
 
     assert first_result["metadata"]["status"] == "completed"
     assert second_result["metadata"]["status"] == "failed"
@@ -1283,9 +1281,10 @@ def test_run_edit_should_support_replace_all(tmp_path):
     _set_test_session()
     run_read(str(file_path.resolve()))
 
-    result = run_edit("sample.txt", "old", "new", replace_all=True)
+    result = run_edit(str(file_path.resolve()), "old", "new", replace_all=True)
 
     assert result["metadata"]["status"] == "completed"
+    assert result["replacedCount"] == 2
     assert file_path.read_text(encoding="utf-8") == "name = new\nprint('new')\n"
 
 
@@ -1296,25 +1295,65 @@ def test_run_edit_should_fail_when_match_is_not_unique(tmp_path):
     _set_test_session()
     run_read(str(file_path.resolve()))
 
-    result = run_edit("sample.txt", "old", "new")
+    result = run_edit(str(file_path.resolve()), "old", "new")
 
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "edit_match_not_unique"
+    assert "1-2 行上下文" in result["output"]
 
 
-def test_run_edit_should_allow_overwrite_or_create_when_old_string_is_empty(tmp_path):
+def test_run_edit_should_append_when_old_string_is_empty(tmp_path):
     configure_workspace(tmp_path)
     _set_test_session()
     existing = tmp_path / "existing.txt"
-    existing.write_text("old", encoding="utf-8")
+    existing.write_text("old\n", encoding="utf-8")
+    run_read(str(existing.resolve()))
 
-    overwrite_result = run_edit("existing.txt", "", "new content")
-    create_result = run_edit("created.txt", "", "created")
+    append_result = run_edit(str(existing.resolve()), "", "new content")
 
-    assert overwrite_result["metadata"]["status"] == "completed"
-    assert create_result["metadata"]["status"] == "completed"
-    assert existing.read_text(encoding="utf-8") == "new content"
-    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "created"
+    assert append_result["metadata"]["status"] == "completed"
+    assert append_result["operation"] == "append"
+    assert append_result["replacedCount"] == 1
+    assert existing.read_text(encoding="utf-8") == "old\nnew content"
+
+
+def test_run_edit_should_delete_when_new_string_is_empty(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello\nworld\n", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+    run_read(str(file_path.resolve()))
+
+    result = run_edit(str(file_path.resolve()), "world\n", "")
+
+    assert result["metadata"]["status"] == "completed"
+    assert result["operation"] == "delete"
+    assert result["replacedCount"] == 1
+    assert file_path.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_run_edit_should_fail_when_file_missing_and_guide_to_write(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    file_path = (tmp_path / "missing.txt").resolve()
+
+    result = run_edit(str(file_path), "old", "new")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "edit_file_missing"
+    assert "write_file" in result["output"]
+
+
+def test_run_edit_should_reject_relative_path(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_edit("sample.txt", "hello", "world")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "edit_path_not_absolute"
 
 
 def test_build_plan_placeholder_path_should_anchor_to_workspace_plan_path(tmp_path):

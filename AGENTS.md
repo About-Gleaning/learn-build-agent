@@ -43,7 +43,9 @@
 - 工具实现统一放在 `tools/` 目录内分模块维护；公共路径校验统一收敛到 `tools/path_utils.py`。
 - MCP server 的发现、缓存、普通 tool 转换与调用统一收敛在 `mcp/runtime.py`，不要在 `session.py` 或其他工具模块散落直连协议细节。
 - 查询型 `lsp` 工具统一通过 `tools/lsp_tool.py` -> `lsp/client.py` -> `lsp/manager.py` 链路收敛，避免在会话层或其他工具中散落直接调用 JSON-RPC。
-- 查询型 `lsp` 工具只暴露只读导航能力；写入后的 diagnostics 仍由 `edit_file` / `write_file` 链路负责，二者不要混在同一层拼装。
+- 查询型 `lsp` 工具只暴露只读导航能力；写入后的 diagnostics 仍由 `edit_file` / `write_file` / `apply_patch` 链路负责，二者不要混在同一层拼装。
+- `write_file` 仅用于创建新文件，禁止覆盖已有文件；已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。
+- `write_file` / `edit_file` 都必须传绝对路径；`edit_file` 默认要求 `oldString` 在文件中唯一命中，若不唯一应补充上下文或显式使用 `replaceAll=true`。
 - Web 层消息序列化统一收敛在 `web/serializers.py`，不要在 `web/app.py` 手工散落映射逻辑。
 - 项目级运行时策略统一从 `project_runtime.json` / `llm_runtime.json` 读取，禁止在业务模块扩散硬编码配置。
 - `task` 工具中的 subagent 名单与说明，必须从 `runtime/agents.py` 动态生成。

@@ -12,6 +12,7 @@ from ..runtime.workspace import build_plan_storage_path
 from .file_edit_state import get_file_state, record_file_edit
 from .handlers import build_tool_failure
 from .path_utils import resolve_workspace_or_skills_path
+from .write_file_tool import FileToolError
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,11 @@ class EditCandidate:
 
 def _resolve_edit_target(file_path: str) -> Path:
     raw_path = Path(file_path).expanduser()
+    if not raw_path.is_absolute():
+        raise FileToolError(
+            "edit_file 只接受绝对路径。请先将目标路径转换为绝对路径后重试。",
+            error_code="edit_path_not_absolute",
+        )
     plan_path = build_plan_storage_path(get_session_id())
     if raw_path.is_absolute() and raw_path.resolve() == plan_path:
         return plan_path
@@ -182,18 +188,24 @@ def _replace_candidates(
     old_string: str,
     new_string: str,
     replace_all: bool,
-) -> str:
+) -> tuple[str, int]:
     if not candidates:
-        raise ValueError("未找到可替换的文本")
+        raise FileToolError(
+            "未找到可替换的文本。可能是空白字符、缩进或文件内容已变化导致，请先重新执行 read_file 后补充更精确的上下文。",
+            error_code="edit_text_not_found",
+        )
     if not replace_all and len(candidates) != 1:
-        raise RuntimeError("匹配结果不唯一，请补充上下文或开启 replaceAll")
+        raise FileToolError(
+            "oldString 匹配到多处内容，当前无法唯一定位。请在 oldString 中额外携带前后 1-2 行上下文，或显式设置 replaceAll=true。",
+            error_code="edit_match_not_unique",
+        )
 
     selected = candidates if replace_all else [candidates[0]]
     updated = content
     for candidate in sorted(selected, key=lambda item: item.start, reverse=True):
         replacement = _render_replacement(candidate, old_string=old_string, new_string=new_string)
         updated = updated[: candidate.start] + replacement + updated[candidate.end :]
-    return updated
+    return updated, len(selected)
 
 
 def _build_unified_diff(file_path: Path, before: str, after: str) -> str:
@@ -219,16 +231,35 @@ def _count_line_changes(before: str, after: str) -> tuple[int, int]:
     return additions, deletions
 
 
-def _build_success_result(file_path: Path, before: str, after: str) -> dict[str, Any]:
+def _build_success_result(
+    file_path: Path,
+    before: str,
+    after: str,
+    *,
+    operation: str,
+    replaced_count: int,
+) -> dict[str, Any]:
     additions, deletions = _count_line_changes(before, after)
     diagnostics_result = collect_file_diagnostics(file_path=file_path, content=after)
-    output = f"编辑成功：{file_path}。"
+    operation_label = {"append": "追加", "replace": "替换", "delete": "删除"}.get(operation, operation)
+    message = f"{operation_label}成功：{file_path}，共处理 {replaced_count} 处。"
+    output = message
     output += diagnostics_result.build_llm_excerpt()
     return {
+        "success": True,
+        "filePath": str(file_path),
+        "operation": operation,
+        "replacedCount": replaced_count,
+        "message": message,
         "title": str(file_path),
         "output": output,
         "metadata": {
             "status": "completed",
+            "success": True,
+            "filePath": str(file_path),
+            "operation": operation,
+            "replacedCount": replaced_count,
+            "message": message,
             "diff": _build_unified_diff(file_path, before, after),
             "filediff": {
                 "file": str(file_path),
@@ -258,6 +289,14 @@ def _validate_edit_state(target: Path) -> dict[str, Any] | None:
     return None
 
 
+def _build_operation(old_string: str, new_string: str) -> str:
+    if old_string == "":
+        return "append"
+    if new_string == "":
+        return "delete"
+    return "replace"
+
+
 def run_edit(
     file_path: str,
     old_string: str,
@@ -266,50 +305,94 @@ def run_edit(
 ) -> dict[str, Any]:
     try:
         if old_string == new_string:
-            return build_tool_failure("Error: newString 必须与 oldString 不同", error_code="edit_new_string_unchanged")
+            raise FileToolError(
+                "newString 必须与 oldString 不同。若无需修改，请不要调用 edit_file。",
+                error_code="edit_new_string_unchanged",
+            )
 
         target = _resolve_edit_target(file_path)
         if target.exists() and target.is_dir():
-            return build_tool_failure(f"Error: 路径是目录，无法编辑: {target}", error_code="edit_path_is_directory")
-
-        if old_string == "":
-            before = target.read_text(encoding="utf-8") if target.exists() else ""
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(new_string, encoding="utf-8")
-            record_file_edit(target, mtime_ns=target.stat().st_mtime_ns)
-            return _build_success_result(target, before, new_string)
+            raise FileToolError(
+                f"目标路径是目录，无法编辑：{target}。请改用文件绝对路径。",
+                error_code="edit_path_is_directory",
+            )
 
         if not target.exists():
-            return build_tool_failure(f"Error: 文件不存在: {target}", error_code="edit_failed")
+            raise FileToolError(
+                f"文件不存在：{target}。若要新建文件，请先使用 write_file 创建。",
+                error_code="edit_file_missing",
+            )
         if _detect_binary_file(target):
-            return build_tool_failure(f"Error: edit_file 仅支持文本文件: {target}", error_code="edit_binary_unsupported")
+            raise FileToolError(
+                f"edit_file 仅支持文本文件：{target}。请改用适合二进制文件的处理方式。",
+                error_code="edit_binary_unsupported",
+            )
 
         read_guard_failure = _validate_edit_state(target)
         if read_guard_failure is not None:
             return read_guard_failure
 
         before = target.read_text(encoding="utf-8")
-        candidates = _find_candidates(before, old_string)
-        if not candidates:
-            return build_tool_failure(f"Error: 未在 {target} 中找到 oldString", error_code="edit_text_not_found")
-
-        try:
-            after = _replace_candidates(
+        operation = _build_operation(old_string, new_string)
+        if old_string == "":
+            after = before + new_string
+            replaced_count = 1
+        else:
+            candidates = _find_candidates(before, old_string)
+            if not candidates:
+                raise FileToolError(
+                    (
+                        f"未在 {target} 中找到 oldString。可能原因包括空白字符不一致、缩进层级变化，"
+                        "或文件内容已被修改。请先重新执行 read_file，并在 oldString 中携带前后 1-2 行上下文。"
+                    ),
+                    error_code="edit_text_not_found",
+                )
+            after, replaced_count = _replace_candidates(
                 before,
                 candidates,
                 old_string=old_string,
                 new_string=new_string,
                 replace_all=replace_all,
             )
-        except RuntimeError as exc:
-            return build_tool_failure(f"Error: {exc}", error_code="edit_match_not_unique")
 
         target.write_text(after, encoding="utf-8")
         record_file_edit(target, mtime_ns=target.stat().st_mtime_ns)
-        return _build_success_result(target, before, after)
+        return _build_success_result(
+            target,
+            before,
+            after,
+            operation=operation,
+            replaced_count=replaced_count,
+        )
+    except FileToolError as exc:
+        return build_tool_failure(
+            f"Error: {exc.message}",
+            error_code=exc.error_code,
+            error_type=type(exc).__name__,
+            success=False,
+            filePath=file_path,
+            error=exc.message,
+            message=exc.message,
+        )
     except ValueError as exc:
         message = str(exc)
         error_code = "edit_path_forbidden" if "超出允许范围" in message else "edit_failed"
-        return build_tool_failure(f"Error: {message}", error_code=error_code, error_type=type(exc).__name__)
+        return build_tool_failure(
+            f"Error: {message}",
+            error_code=error_code,
+            error_type=type(exc).__name__,
+            success=False,
+            filePath=file_path,
+            error=message,
+            message=message,
+        )
     except Exception as exc:
-        return build_tool_failure(f"Error: {exc}", error_code="edit_failed", error_type=type(exc).__name__)
+        return build_tool_failure(
+            f"Error: 系统异常：{exc}。请检查文件内容、权限或先重新读取文件后重试。",
+            error_code="edit_failed",
+            error_type=type(exc).__name__,
+            success=False,
+            filePath=file_path,
+            error=str(exc),
+            message=f"系统异常：{exc}。请检查文件内容、权限或先重新读取文件后重试。",
+        )

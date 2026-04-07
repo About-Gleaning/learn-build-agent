@@ -275,9 +275,14 @@ TypeScript / JavaScript LSP 说明：
 使用说明：
 
 - `read_file` 仅支持绝对路径
-- `write_file` 与 `edit_file` 支持工作区内路径和 `skills` 目录路径
+- `write_file` 与 `edit_file` 仅支持工作区内或 `skills` 目录内的绝对路径
+- `apply_patch` 支持工作区内相对路径的多文件补丁编辑，适合长 Markdown、长代码、长配置文件的局部修改
+- `apply_patch` 优先使用 freeform/custom tool 形式直接接收原始 patch 文本；若 provider 不支持，再退化为 JSON 的 `input` 字段
+- `write_file` 仅用于创建新文件；已有文件必须使用 `edit_file` 或 `apply_patch`
+- `edit_file` 是已有文本文件的唯一编辑入口，默认要求 `oldString` 唯一命中
+- `apply_patch` 适合长文本的局部编辑与多文件联动修改
 - `lsp` 支持工作区内绝对路径或相对路径，适合 Java / Python / TypeScript / JavaScript 文件的定义、引用、hover、symbol、调用层级等只读查询
-- 覆盖写入和编辑已有文件前，需要先通过 `read_file` 读取同一文件
+- 编辑已有文件前，需要先通过 `read_file` 读取同一文件
 - 文件工具默认受工作区边界限制
 
 ### Web API
