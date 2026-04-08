@@ -1,17 +1,41 @@
-执行文件中的精确字符串替换。
+对已有文本文件进行精准的局部编辑；这是唯一的文件编辑入口。
 
 ## 使用说明
+- 在进行编辑之前，强烈建议先使用 read_file 工具读取文件，确保 oldString 与当前文件内容完全一致；但这不是强制前置条件。
+- filePath 必须是绝对路径。
+- 根据 read_file 输出构造 oldString 时，必须严格保留缩进（空格 / tab）。
+  - read_file 输出的行号前缀格式为：空格 + 行号 + tab
+  - tab 之后的内容才是真正的文件内容，oldString 和 newString 中绝不能包含行号前缀。
+- edit_file 只能编辑已存在的文件；如果文件不存在，请改用 write_file 创建。
+- 始终传入 diff 级别的小片段，而不是整文件内容。
 
-- 在进行编辑之前，你必须至少使用一次 `read_file` 工具读取文件。否则该工具会报错。
-- 在根据 read_file 工具输出进行编辑时，必须严格保留缩进（空格 / tab），并且以“行号前缀之后”的内容为准。
-  - 行号前缀格式为：空格 + 行号 + tab
-  - tab 之后的内容才是真正的文件内容
-  - `oldString` 和 `newString` 中绝不能包含任何行号前缀内容
-- 始终优先编辑已有文件，除非明确要求，否则不要创建新文件
-- 除非用户明确要求，否则不要在文件中添加 emoji
-- 如果 `oldString` 在文件中找不到，编辑会失败，并报错："oldString not found in content"
-- 如果 `oldString` 在文件中出现多次，编辑会失败，并报错："oldString found multiple times and requires more code context to uniquely identify the intended match"
-  - 解决方法：
-    - 提供更长的上下文使其唯一
-    - 或使用 `replaceAll` 替换所有匹配项
-- 当需要在整个文件中替换或重命名字符串（例如变量重命名）时，应使用 `replaceAll`
+## replaceAll 行为
+- 默认 replaceAll=false：oldString 必须在文件中唯一匹配，若匹配到多处，工具会拒绝执行并要求补充上下文。
+- replaceAll=true：替换 oldString 的所有出现位置。仅在明确需要批量重命名同一字符串时使用，使用前务必确认 oldString 不会误匹配无关内容。
+
+## 特殊操作
+- oldString == ""：将 newString 追加到文件末尾。
+- newString == ""：删除 oldString 对应内容。
+
+## 错误排查
+- 若 oldString 在文件中找不到，通常是空白字符、缩进差异或文件内容已变化导致。
+- 处理方式：按错误提示重新调用 read_file，基于最新内容重新构造带上下文的 oldString 后再重试。
+
+## 最佳实践示例
+
+1. 修改函数实现（oldString 携带前后各 1 行上下文确保唯一命中）：
+   oldString: "    def stop(self):\n        pass"
+   newString: "    def stop(self):\n        self.running = False\n        self.socket.close()"
+
+2. 在已有 import 前插入新 import：
+   oldString: "import os"
+   newString: "import os\nimport json"
+
+3. 删除废弃函数：
+   oldString: "    def deprecated_func(self):\n        pass\n"
+   newString: ""
+
+4. 批量重命名变量（replaceAll=true）：
+   oldString: "user_name"
+   newString: "username"
+   replaceAll: true

@@ -162,6 +162,7 @@ def _build_chat_config() -> ResolvedLLMConfig:
         provider="qwen",
         vendor="qwen",
         model="qwen3-max",
+        max_tokens=32000,
         api_mode="chat_completions",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -175,6 +176,7 @@ def _build_qwen_responses_config() -> ResolvedLLMConfig:
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -188,6 +190,7 @@ def _build_kimi_config() -> ResolvedLLMConfig:
         provider="kimi",
         vendor="kimi",
         model="kimi-k2.5",
+        max_tokens=32000,
         api_mode="chat_completions",
         base_url="https://api.moonshot.cn/v1",
         api_key="test-key",
@@ -417,6 +420,7 @@ def test_build_openai_client_should_pass_timeout_seconds(monkeypatch):
         provider="qwen",
         vendor="qwen",
         model="qwen3-max",
+        max_tokens=32000,
         api_mode="chat_completions",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -467,6 +471,7 @@ def test_create_chat_completion_should_call_responses_api_when_api_mode_is_respo
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=12345,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",
@@ -478,9 +483,34 @@ def test_create_chat_completion_should_call_responses_api_when_api_mode_is_respo
     assert result["info"]["status"] == "completed"
     assert call_recorder == ["responses"]
     assert captured_payload["model"] == "gpt-4.1"
-    assert captured_payload["max_output_tokens"] == 4096
+    assert captured_payload["max_output_tokens"] == 12345
     assert captured_payload["store"] is False
     assert captured_payload["input"] == [{"role": "user", "content": "hello"}]
+
+
+def test_create_chat_completion_should_use_configured_max_tokens_for_chat_completions(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    def _capture_chat_create(**kwargs):
+        captured_payload.update(kwargs)
+        return _build_success_response("done")
+
+    _patch_openai_client(monkeypatch, _capture_chat_create)
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3-max",
+        max_tokens=23456,
+        api_mode="chat_completions",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+    create_chat_completion(_build_user_message(), tools=[], llm_config=config)
+
+    assert captured_payload["max_tokens"] == 23456
 
 
 def test_build_provider_adapter_should_choose_qwen_responses_adapter():
@@ -489,6 +519,7 @@ def test_build_provider_adapter_should_choose_qwen_responses_adapter():
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -506,6 +537,7 @@ def test_build_provider_adapter_should_choose_kimi_chat_adapter():
         provider="kimi",
         vendor="kimi",
         model="kimi-k2.5",
+        max_tokens=32000,
         api_mode="chat_completions",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -523,6 +555,7 @@ def test_build_provider_adapter_should_fallback_to_openai_responses_adapter():
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",
@@ -547,6 +580,7 @@ def test_create_chat_completion_should_convert_tool_history_for_responses_input(
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",
@@ -575,6 +609,7 @@ def test_create_chat_completion_should_convert_pdf_attachment_for_responses_inpu
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",
@@ -619,7 +654,7 @@ def test_create_chat_completion_should_reject_file_attachment_for_qwen_responses
 def test_create_chat_completion_should_inject_kimi_pdf_context_before_chat_request(monkeypatch):
     captured_payload: dict[str, object] = {}
     cleanup_calls: list[dict[str, str]] = []
-    messages = _build_pdf_tool_followup_messages()
+    messages = _build_valid_pdf_tool_followup_messages()
 
     def _capture_chat_create(**kwargs):
         captured_payload.update(kwargs)
@@ -651,6 +686,20 @@ def test_create_chat_completion_should_inject_kimi_pdf_context_before_chat_reque
     assert captured_payload["messages"] == [
         {"role": "user", "content": "读取这个 PDF"},
         {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_pdf",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"docs/demo.pdf"}',
+                    },
+                }
+            ],
+        },
+        {
             "role": "tool",
             "content": "PDF read successfully",
             "tool_call_id": "call_pdf",
@@ -658,7 +707,7 @@ def test_create_chat_completion_should_inject_kimi_pdf_context_before_chat_reque
                 {
                     "id": "att_1",
                     "sessionID": "s_hook",
-                    "messageID": messages[1]["info"]["message_id"],
+                    "messageID": messages[2]["info"]["message_id"],
                     "type": "file",
                     "mime": "application/pdf",
                     "filename": "demo.pdf",
@@ -671,7 +720,7 @@ def test_create_chat_completion_should_inject_kimi_pdf_context_before_chat_reque
             "content": KIMI_EXTRACTED_FILE_CONTEXT_PREFIX + "这是从 PDF 抽取出来的内容",
         },
     ]
-    metadata = messages[1]["parts"][0]["state"]["output"]["metadata"]
+    metadata = messages[2]["parts"][0]["state"]["output"]["metadata"]
     assert metadata["extracted_file_contexts"] == [
         {
             "attachment_key": "att_1",
@@ -692,7 +741,11 @@ def test_create_chat_completion_should_inject_kimi_pdf_context_before_chat_reque
 
 def test_create_chat_completion_should_preserve_system_message_order_when_injecting_kimi_pdf_context(monkeypatch):
     captured_payload: dict[str, object] = {}
-    messages = _build_system_and_pdf_tool_followup_messages()
+    messages = [
+        create_message("system", "s_hook"),
+        *_build_valid_pdf_tool_followup_messages(),
+    ]
+    append_text_part(messages[0], "你是一个严格遵守指令的助手")
 
     def _capture_chat_create(**kwargs):
         captured_payload.update(kwargs)
@@ -719,6 +772,20 @@ def test_create_chat_completion_should_preserve_system_message_order_when_inject
         {"role": "system", "content": "你是一个严格遵守指令的助手"},
         {"role": "user", "content": "读取这个 PDF"},
         {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_pdf",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"docs/demo.pdf"}',
+                    },
+                }
+            ],
+        },
+        {
             "role": "tool",
             "content": "PDF read successfully",
             "tool_call_id": "call_pdf",
@@ -726,7 +793,7 @@ def test_create_chat_completion_should_preserve_system_message_order_when_inject
                 {
                     "id": "att_1",
                     "sessionID": "s_hook",
-                    "messageID": messages[2]["info"]["message_id"],
+                    "messageID": messages[3]["info"]["message_id"],
                     "type": "file",
                     "mime": "application/pdf",
                     "filename": "demo.pdf",
@@ -746,7 +813,7 @@ def test_create_chat_completion_should_reuse_cached_kimi_pdf_context_without_reu
     upload_calls: list[str] = []
     content_calls: list[str] = []
     cleanup_calls: list[dict[str, str]] = []
-    messages = _build_pdf_tool_followup_messages()
+    messages = _build_valid_pdf_tool_followup_messages()
 
     def _capture_chat_create(**kwargs):
         captured_payloads.append(kwargs["messages"])
@@ -792,6 +859,20 @@ def test_create_chat_completion_should_reuse_cached_kimi_pdf_context_without_reu
     assert captured_payloads[0] == [
         {"role": "user", "content": "读取这个 PDF"},
         {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_pdf",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"docs/demo.pdf"}',
+                    },
+                }
+            ],
+        },
+        {
             "role": "tool",
             "content": "PDF read successfully",
             "tool_call_id": "call_pdf",
@@ -799,7 +880,7 @@ def test_create_chat_completion_should_reuse_cached_kimi_pdf_context_without_reu
                 {
                     "id": "att_1",
                     "sessionID": "s_hook",
-                    "messageID": messages[1]["info"]["message_id"],
+                    "messageID": messages[2]["info"]["message_id"],
                     "type": "file",
                     "mime": "application/pdf",
                     "filename": "demo.pdf",
@@ -815,6 +896,20 @@ def test_create_chat_completion_should_reuse_cached_kimi_pdf_context_without_reu
     assert captured_payloads[1] == [
         {"role": "user", "content": "读取这个 PDF"},
         {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_pdf",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"docs/demo.pdf"}',
+                    },
+                }
+            ],
+        },
+        {
             "role": "tool",
             "content": "PDF read successfully",
             "tool_call_id": "call_pdf",
@@ -822,7 +917,7 @@ def test_create_chat_completion_should_reuse_cached_kimi_pdf_context_without_reu
                 {
                     "id": "att_1",
                     "sessionID": "s_hook",
-                    "messageID": messages[1]["info"]["message_id"],
+                    "messageID": messages[2]["info"]["message_id"],
                     "type": "file",
                     "mime": "application/pdf",
                     "filename": "demo.pdf",
@@ -873,6 +968,7 @@ def test_create_chat_completion_should_flatten_function_tools_for_responses(monk
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",
@@ -1102,6 +1198,7 @@ def test_qwen_responses_adapter_should_use_vendor_specific_tool_normalization():
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -1144,6 +1241,7 @@ def test_qwen_responses_adapter_should_omit_parameters_for_empty_object_tools_in
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -1196,6 +1294,7 @@ def test_qwen_responses_adapter_should_omit_parameters_for_no_arg_agent_tools():
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -1414,6 +1513,7 @@ def test_responses_stream_should_yield_delta_and_return_message(monkeypatch):
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",
@@ -1480,6 +1580,7 @@ def test_responses_stream_should_aggregate_function_call_arguments(monkeypatch):
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",
@@ -1520,6 +1621,7 @@ def test_responses_stream_should_surface_nested_failed_error_message(monkeypatch
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -1559,6 +1661,7 @@ def test_responses_stream_should_surface_incomplete_reason(monkeypatch, caplog):
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -1592,6 +1695,7 @@ def test_responses_stream_should_fallback_to_event_type_when_no_detail_exists(mo
         provider="qwen",
         vendor="qwen",
         model="qwen3.5-flash",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
@@ -1933,6 +2037,7 @@ def test_logging_hook_should_log_responses_input_structure_on_tool_followup(monk
         provider="gpt",
         vendor="openai",
         model="gpt-4.1",
+        max_tokens=32000,
         api_mode="responses",
         base_url="https://api.openai.com/v1",
         api_key="test-key",

@@ -71,15 +71,29 @@ DEFAULT_PYTHON_WORKSPACE_MARKERS = ("pyproject.toml", "setup.py", "requirements.
 
 
 @dataclass(frozen=True)
+class LLMDefaultsSettings:
+    max_tokens: int
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    max_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class ProviderSettings:
     name: str
     vendor: str
     base_url: str
     default_model: str
-    models: tuple[str, ...]
+    models: dict[str, ModelSettings]
     api_key_env: str
     timeout_seconds: float
     api_mode: LLMApiMode
+
+    @property
+    def model_names(self) -> tuple[str, ...]:
+        return tuple(self.models.keys())
 
 
 @dataclass(frozen=True)
@@ -90,6 +104,7 @@ class AgentDefaultSettings:
 
 @dataclass(frozen=True)
 class RuntimeSettings:
+    defaults: LLMDefaultsSettings
     providers: dict[str, ProviderSettings]
     agent_defaults: dict[MainAgentMode, AgentDefaultSettings]
 
@@ -210,6 +225,7 @@ class ResolvedLLMConfig:
     provider: str
     vendor: str
     model: str
+    max_tokens: int
     api_mode: LLMApiMode
     base_url: str
     api_key: str
@@ -822,14 +838,22 @@ def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
             raise ValueError(f"provider '{name}'.api_mode 仅支持 responses 或 chat_completions。")
         if not isinstance(raw_models, dict) or not raw_models:
             raise ValueError(f"provider '{name}'.models 必须是非空对象。")
-        models: list[str] = []
+        models: dict[str, ModelSettings] = {}
         for raw_model_name, raw_model_value in raw_models.items():
             model_name = str(raw_model_name).strip()
             if not model_name:
                 raise ValueError(f"provider '{name}'.models 中的模型名称不能为空。")
             if raw_model_value is not None and not isinstance(raw_model_value, dict):
                 raise ValueError(f"provider '{name}'.models.{model_name} 必须是对象或 null。")
-            models.append(model_name)
+            raw_model_settings = raw_model_value or {}
+            raw_model_max_tokens = raw_model_settings.get("max_tokens")
+            model_max_tokens = None
+            if raw_model_max_tokens is not None:
+                model_max_tokens = _parse_positive_int(
+                    raw_model_max_tokens,
+                    field_name=f"provider '{name}'.models.{model_name}.max_tokens",
+                )
+            models[model_name] = ModelSettings(max_tokens=model_max_tokens)
         if not default_model:
             raise ValueError(f"provider '{name}'.default_model 不能为空。")
         if default_model not in models:
@@ -846,12 +870,22 @@ def _load_provider_settings(raw_providers: Any) -> dict[str, ProviderSettings]:
             vendor=vendor,
             base_url=base_url,
             default_model=default_model,
-            models=tuple(models),
+            models=models,
             api_key_env=api_key_env,
             timeout_seconds=timeout_seconds,
             api_mode=raw_api_mode,  # type: ignore[arg-type]
         )
     return providers
+
+
+def _load_llm_defaults(raw_defaults: Any) -> LLMDefaultsSettings:
+    if raw_defaults is None:
+        raw_defaults = {}
+    if not isinstance(raw_defaults, dict):
+        raise ValueError("LLM 配置中的 defaults 必须是对象。")
+    return LLMDefaultsSettings(
+        max_tokens=_parse_positive_int(raw_defaults.get("max_tokens"), field_name="defaults.max_tokens"),
+    )
 
 
 def _load_agent_defaults(raw_agent_defaults: Any, providers: dict[str, ProviderSettings]) -> dict[MainAgentMode, AgentDefaultSettings]:
@@ -878,9 +912,10 @@ def _load_agent_defaults(raw_agent_defaults: Any, providers: dict[str, ProviderS
 @lru_cache(maxsize=1)
 def get_runtime_settings() -> RuntimeSettings:
     payload = _load_runtime_payload()
+    defaults = _load_llm_defaults(payload.get("defaults"))
     providers = _load_provider_settings(payload.get("providers"))
     agent_defaults = _load_agent_defaults(payload.get("agent_defaults"), providers)
-    return RuntimeSettings(providers=providers, agent_defaults=agent_defaults)
+    return RuntimeSettings(defaults=defaults, providers=providers, agent_defaults=agent_defaults)
 
 
 @lru_cache(maxsize=1)
@@ -974,11 +1009,16 @@ def resolve_llm_config(agent: MainAgentMode, provider_name: str | None = None, m
         model = agent_default.model
     if model not in provider.models:
         raise ValueError(f"provider '{provider.name}' 未定义模型 '{model}'。")
+    model_settings = provider.models[model]
+    effective_max_tokens = model_settings.max_tokens
+    if effective_max_tokens is None:
+        effective_max_tokens = settings.defaults.max_tokens
     return ResolvedLLMConfig(
         agent=agent,
         provider=provider.name,
         vendor=provider.vendor,
         model=model,
+        max_tokens=effective_max_tokens,
         api_mode=provider.api_mode,
         base_url=provider.base_url,
         api_key=api_key,
@@ -994,7 +1034,7 @@ def build_runtime_options() -> dict[str, Any]:
             "name": provider.name,
             "vendor": provider.vendor,
             "default_model": provider.default_model,
-            "models": list(provider.models),
+            "models": list(provider.model_names),
             "api_mode": provider.api_mode,
         }
         for provider in settings.providers.values()

@@ -222,6 +222,14 @@ def _resolve_effective_config(llm_config: ResolvedLLMConfig | None) -> ResolvedL
     return llm_config or resolve_llm_config("build")
 
 
+def _resolve_request_max_tokens(max_tokens: int | None, llm_config: ResolvedLLMConfig) -> int:
+    if max_tokens is None:
+        return llm_config.max_tokens
+    if isinstance(max_tokens, bool) or max_tokens <= 0:
+        raise ValueError("max_tokens 必须是大于 0 的整数。")
+    return max_tokens
+
+
 def _build_openai_client(llm_config: ResolvedLLMConfig) -> OpenAI:
     return OpenAI(
         api_key=llm_config.api_key,
@@ -249,7 +257,7 @@ def _create_provider_completion_stream(
 def create_chat_completion(
     messages: list[Message],
     tools: list[dict[str, Any]],
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     hooks: list[LLMHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     agent: str = "",
@@ -262,6 +270,7 @@ def create_chat_completion(
         raise ValueError("messages[-1] 缺少 session_id")
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
     effective_config = _resolve_effective_config(llm_config)
+    effective_max_tokens = _resolve_request_max_tokens(max_tokens, effective_config)
     adapter = build_provider_adapter(effective_config)
     client = _build_openai_client(effective_config)
 
@@ -272,7 +281,7 @@ def create_chat_completion(
         "model": adapter.model,
         "api_mode": effective_config.api_mode,
         "parent_id": parent_id,
-        "max_tokens": max_tokens,
+        "max_tokens": effective_max_tokens,
         "message_count": len(messages),
         "tools_count": len(tools),
         "request_size": sum(estimate_message_size(msg) for msg in messages),
@@ -285,7 +294,7 @@ def create_chat_completion(
 
     try:
         request_payload = adapter.build_request(messages, tools, client=client)
-        request_payload[adapter.request_token_key] = max_tokens
+        request_payload[adapter.request_token_key] = effective_max_tokens
         ctx["request_payload"] = request_payload
     except Exception as exc:
         ctx["latency_ms"] = int((time.perf_counter() - start) * 1000)
@@ -331,7 +340,7 @@ def create_chat_completion(
 def create_chat_completion_stream(
     messages: list[Message],
     tools: list[dict[str, Any]],
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     hooks: list[LLMHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     agent: str = "",
@@ -344,6 +353,7 @@ def create_chat_completion_stream(
         raise ValueError("messages[-1] 缺少 session_id")
     parent_id = messages[-1]["info"].get("message_id", "") if messages else ""
     effective_config = _resolve_effective_config(llm_config)
+    effective_max_tokens = _resolve_request_max_tokens(max_tokens, effective_config)
     adapter = build_provider_adapter(effective_config)
     client = _build_openai_client(effective_config)
 
@@ -354,7 +364,7 @@ def create_chat_completion_stream(
         "model": adapter.model,
         "api_mode": effective_config.api_mode,
         "parent_id": parent_id,
-        "max_tokens": max_tokens,
+        "max_tokens": effective_max_tokens,
         "message_count": len(messages),
         "tools_count": len(tools),
         "request_size": sum(estimate_message_size(msg) for msg in messages),
@@ -369,7 +379,7 @@ def create_chat_completion_stream(
 
     try:
         request_payload = adapter.build_request(messages, tools, client=client)
-        request_payload[adapter.request_token_key] = max_tokens
+        request_payload[adapter.request_token_key] = effective_max_tokens
         request_payload["stream"] = True
         ctx["request_payload"] = request_payload
     except Exception as exc:
