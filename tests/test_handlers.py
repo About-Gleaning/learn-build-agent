@@ -972,7 +972,7 @@ def test_run_write_should_reject_directory_target(tmp_path):
     assert result["metadata"]["error_code"] == "write_path_is_directory"
 
 
-def test_run_edit_should_require_read_before_edit(tmp_path):
+def test_run_edit_should_allow_edit_without_read(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello", encoding="utf-8")
     configure_workspace(tmp_path)
@@ -980,8 +980,8 @@ def test_run_edit_should_require_read_before_edit(tmp_path):
 
     result = run_edit(str(file_path.resolve()), "hello", "world")
 
-    assert result["metadata"]["status"] == "failed"
-    assert result["metadata"]["error_code"] == "edit_read_required"
+    assert result["metadata"]["status"] == "completed"
+    assert file_path.read_text(encoding="utf-8") == "world"
 
 
 def test_run_edit_should_return_text_not_found_failure(tmp_path):
@@ -995,8 +995,9 @@ def test_run_edit_should_return_text_not_found_failure(tmp_path):
 
     assert result["metadata"]["status"] == "failed"
     assert result["metadata"]["error_code"] == "edit_text_not_found"
-    assert "未在" in result["output"]
-    assert "空白字符" in result["output"]
+    assert "未找到 oldString" in result["output"]
+    assert "空白字符差异" in result["output"]
+    assert "调用 read_file 重新读取" in result["output"]
 
 
 def test_run_edit_should_succeed_after_read_and_return_diff(tmp_path):
@@ -1245,21 +1246,23 @@ def test_run_write_should_summarize_completed_without_error_diagnostics(monkeypa
     assert "摘要：当前文件未发现 error 级别 diagnostics。" in result["output"]
 
 
-def test_run_edit_should_fail_when_file_changed_after_read(tmp_path):
+def test_run_edit_should_suggest_reread_when_file_changed_after_read(tmp_path):
     file_path = tmp_path / "sample.txt"
-    file_path.write_text("hello", encoding="utf-8")
+    file_path.write_text("value = 1\n", encoding="utf-8")
     configure_workspace(tmp_path)
     _set_test_session()
     run_read(str(file_path.resolve()))
-    file_path.write_text("hello2", encoding="utf-8")
+    file_path.write_text("value = 2\n", encoding="utf-8")
 
-    result = run_edit(str(file_path.resolve()), "hello", "world")
+    result = run_edit(str(file_path.resolve()), "value = 1\n", "value = 3\n")
 
     assert result["metadata"]["status"] == "failed"
-    assert result["metadata"]["error_code"] == "edit_stale_read"
+    assert result["metadata"]["error_code"] == "edit_text_not_found"
+    assert "内容已变化" in result["output"]
+    assert f"调用 read_file 重新读取 {file_path.resolve()}" in result["output"]
 
 
-def test_run_edit_should_fail_when_editing_twice_without_reread(tmp_path):
+def test_run_edit_should_allow_editing_twice_without_reread(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello", encoding="utf-8")
     configure_workspace(tmp_path)
@@ -1270,8 +1273,8 @@ def test_run_edit_should_fail_when_editing_twice_without_reread(tmp_path):
     second_result = run_edit(str(file_path.resolve()), "world", "agent")
 
     assert first_result["metadata"]["status"] == "completed"
-    assert second_result["metadata"]["status"] == "failed"
-    assert second_result["metadata"]["error_code"] == "edit_stale_read"
+    assert second_result["metadata"]["status"] == "completed"
+    assert file_path.read_text(encoding="utf-8") == "agent"
 
 
 def test_run_edit_should_support_replace_all(tmp_path):

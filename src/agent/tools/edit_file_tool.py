@@ -9,7 +9,7 @@ from typing import Any
 from ..lsp import collect_file_diagnostics
 from ..core.context import get_session_id
 from ..runtime.workspace import build_plan_storage_path
-from .file_edit_state import get_file_state, record_file_edit
+from .file_edit_state import record_file_edit
 from .handlers import build_tool_failure
 from .path_utils import resolve_workspace_or_skills_path
 from .write_file_tool import FileToolError
@@ -191,7 +191,8 @@ def _replace_candidates(
 ) -> tuple[str, int]:
     if not candidates:
         raise FileToolError(
-            "未找到可替换的文本。可能是空白字符、缩进或文件内容已变化导致，请先重新执行 read_file 后补充更精确的上下文。",
+            "未找到 oldString，可能原因：内容已变化、缩进不一致或空白字符差异。"
+            "建议：调用 read_file 重新读取目标文件后重试，并在 oldString 中补充前后 1-2 行上下文。",
             error_code="edit_text_not_found",
         )
     if not replace_all and len(candidates) != 1:
@@ -273,22 +274,6 @@ def _build_success_result(
     }
 
 
-def _validate_edit_state(target: Path) -> dict[str, Any] | None:
-    state = get_file_state(target)
-    if state is None:
-        return build_tool_failure(
-            f"Error: 编辑前必须先使用 read_file 读取 {target}",
-            error_code="edit_read_required",
-        )
-    current_mtime_ns = target.stat().st_mtime_ns
-    if current_mtime_ns != state.read_mtime_ns or state.last_read_at_ns <= state.last_edit_at_ns:
-        return build_tool_failure(
-            f"Error: 文件 {target} 自最近一次读取后已发生变化，请重新执行 read_file。",
-            error_code="edit_stale_read",
-        )
-    return None
-
-
 def _build_operation(old_string: str, new_string: str) -> str:
     if old_string == "":
         return "append"
@@ -328,10 +313,6 @@ def run_edit(
                 error_code="edit_binary_unsupported",
             )
 
-        read_guard_failure = _validate_edit_state(target)
-        if read_guard_failure is not None:
-            return read_guard_failure
-
         before = target.read_text(encoding="utf-8")
         operation = _build_operation(old_string, new_string)
         if old_string == "":
@@ -341,10 +322,8 @@ def run_edit(
             candidates = _find_candidates(before, old_string)
             if not candidates:
                 raise FileToolError(
-                    (
-                        f"未在 {target} 中找到 oldString。可能原因包括空白字符不一致、缩进层级变化，"
-                        "或文件内容已被修改。请先重新执行 read_file，并在 oldString 中携带前后 1-2 行上下文。"
-                    ),
+                    f"未找到 oldString，可能原因：{target} 内容已变化、缩进不一致或空白字符差异。"
+                    f"建议：调用 read_file 重新读取 {target} 后重试，并在 oldString 中补充前后 1-2 行上下文。",
                     error_code="edit_text_not_found",
                 )
             after, replaced_count = _replace_candidates(

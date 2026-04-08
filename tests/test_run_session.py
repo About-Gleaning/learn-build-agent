@@ -1270,6 +1270,7 @@ def test_run_session_should_fail_when_bash_timeout_is_non_positive():
             provider="qwen",
             vendor="qwen",
             model="qwen3-coder-next",
+            max_tokens=32000,
             api_mode="responses",
             base_url="https://example.com",
             api_key="test",
@@ -1338,6 +1339,7 @@ def test_run_session_should_route_write_file_arguments(monkeypatch):
             provider="qwen",
             vendor="qwen",
             model="qwen3-coder-next",
+            max_tokens=32000,
             api_mode="responses",
             base_url="https://example.com",
             api_key="test",
@@ -1374,6 +1376,7 @@ def test_run_session_should_route_camel_case_edit_file_arguments(monkeypatch):
             provider="qwen",
             vendor="qwen",
             model="qwen3-coder-next",
+            max_tokens=32000,
             api_mode="responses",
             base_url="https://example.com",
             api_key="test",
@@ -1419,6 +1422,7 @@ def test_run_session_should_route_lsp_arguments(monkeypatch):
             provider="qwen",
             vendor="qwen",
             model="qwen3-coder-next",
+            max_tokens=32000,
             api_mode="responses",
             base_url="https://example.com",
             api_key="test",
@@ -3537,6 +3541,7 @@ def test_resolve_llm_config_should_expose_provider_vendor(monkeypatch):
         assert config.provider == "qwen"
         assert config.vendor == "qwen"
         assert config.model == "qwen3-coder-next"
+        assert config.max_tokens == 32000
         assert config.api_mode == "chat_completions"
         assert config.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         assert config.timeout_seconds == 60
@@ -3553,6 +3558,7 @@ def test_resolve_llm_config_should_support_kimi_provider(monkeypatch):
         assert config.provider == "kimi"
         assert config.vendor == "kimi"
         assert config.model == "kimi-k2.5"
+        assert config.max_tokens == 32000
         assert config.api_mode == "chat_completions"
         assert config.base_url == "https://api.moonshot.cn/v1"
         assert config.timeout_seconds == 60
@@ -3569,6 +3575,7 @@ def test_resolve_llm_config_should_support_kimi_model_under_qwen_provider(monkey
         assert config.provider == "qwen"
         assert config.vendor == "qwen"
         assert config.model == "kimi/kimi-k2.5"
+        assert config.max_tokens == 32000
         assert config.api_mode == "chat_completions"
         assert config.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         assert config.timeout_seconds == 60
@@ -3585,6 +3592,7 @@ def test_resolve_llm_config_should_support_zhipu_glm5_model_under_qwen_provider(
         assert config.provider == "qwen"
         assert config.vendor == "qwen"
         assert config.model == "ZHIPU/GLM-5"
+        assert config.max_tokens == 32000
         assert config.api_mode == "chat_completions"
         assert config.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         assert config.timeout_seconds == 60
@@ -3600,6 +3608,7 @@ def test_resolve_llm_config_should_use_provider_default_model_when_provider_over
         config = resolve_llm_config("build", "gpt")
         assert config.provider == "gpt"
         assert config.model == "gpt-4.1"
+        assert config.max_tokens == 32000
         assert config.api_mode == "responses"
     finally:
         clear_runtime_settings_cache()
@@ -3634,6 +3643,9 @@ def test_get_runtime_settings_should_require_vendor(tmp_path, monkeypatch):
     config_path.write_text(
         """
         {
+          "defaults": {
+            "max_tokens": 32000
+          },
           "providers": {
             "qwen": {
               "base_url": "https://example.com/v1",
@@ -3675,6 +3687,9 @@ def test_get_runtime_settings_should_require_agent_default_model_in_provider_mod
     config_path.write_text(
         """
         {
+          "defaults": {
+            "max_tokens": 32000
+          },
           "providers": {
             "qwen": {
               "vendor": "qwen",
@@ -3716,6 +3731,9 @@ def test_get_runtime_settings_should_default_api_mode_to_responses(tmp_path, mon
     config_path.write_text(
         """
         {
+          "defaults": {
+            "max_tokens": 32000
+          },
           "providers": {
             "gpt": {
               "vendor": "openai",
@@ -3747,7 +3765,141 @@ def test_get_runtime_settings_should_default_api_mode_to_responses(tmp_path, mon
 
     try:
         config = resolve_llm_config("build")
+        assert config.max_tokens == 32000
         assert config.api_mode == "responses"
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_resolve_llm_config_should_use_global_default_max_tokens_from_runtime_file(tmp_path, monkeypatch):
+    config_path = tmp_path / "llm_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "defaults": {
+            "max_tokens": 45678
+          },
+          "providers": {
+            "qwen": {
+              "vendor": "qwen",
+              "base_url": "https://example.com/v1",
+              "default_model": "qwen3-max",
+              "models": {
+                "qwen3-max": {}
+              },
+              "api_key_env": "QWEN_API_KEY",
+              "api_mode": "chat_completions"
+            }
+          },
+          "agent_defaults": {
+            "build": {
+              "provider": "qwen",
+              "model": "qwen3-max"
+            },
+            "plan": {
+              "provider": "qwen",
+              "model": "qwen3-max"
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.LLM_CONFIG_PATH", config_path)
+    monkeypatch.setenv("QWEN_API_KEY", "test-qwen-key")
+
+    try:
+        config = resolve_llm_config("build")
+        assert config.max_tokens == 45678
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_resolve_llm_config_should_allow_model_level_max_tokens_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "llm_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "defaults": {
+            "max_tokens": 32000
+          },
+          "providers": {
+            "qwen": {
+              "vendor": "qwen",
+              "base_url": "https://example.com/v1",
+              "default_model": "qwen3-max",
+              "models": {
+                "qwen3-max": {
+                  "max_tokens": 65432
+                }
+              },
+              "api_key_env": "QWEN_API_KEY",
+              "api_mode": "chat_completions"
+            }
+          },
+          "agent_defaults": {
+            "build": {
+              "provider": "qwen",
+              "model": "qwen3-max"
+            },
+            "plan": {
+              "provider": "qwen",
+              "model": "qwen3-max"
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.LLM_CONFIG_PATH", config_path)
+    monkeypatch.setenv("QWEN_API_KEY", "test-qwen-key")
+
+    try:
+        config = resolve_llm_config("build")
+        assert config.max_tokens == 65432
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_runtime_settings_should_require_defaults_max_tokens(tmp_path, monkeypatch):
+    config_path = tmp_path / "llm_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "providers": {
+            "qwen": {
+              "vendor": "qwen",
+              "base_url": "https://example.com/v1",
+              "default_model": "qwen3-max",
+              "models": {
+                "qwen3-max": {}
+              },
+              "api_key_env": "QWEN_API_KEY",
+              "api_mode": "chat_completions"
+            }
+          },
+          "agent_defaults": {
+            "build": {
+              "provider": "qwen",
+              "model": "qwen3-max"
+            },
+            "plan": {
+              "provider": "qwen",
+              "model": "qwen3-max"
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.LLM_CONFIG_PATH", config_path)
+
+    try:
+        with pytest.raises(ValueError, match="defaults.max_tokens"):
+            resolve_llm_config("build")
     finally:
         clear_runtime_settings_cache()
 

@@ -191,10 +191,12 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 
 负责模型接入配置，包括：
 
+- `defaults.max_tokens`
 - provider 列表
 - `base_url`
 - `api_mode`
 - `default_model`
+- `models.<model>.max_tokens`
 - `timeout_seconds`
 - 主模式默认使用的 provider 和 model
 
@@ -282,7 +284,7 @@ TypeScript / JavaScript LSP 说明：
 - `edit_file` 是已有文本文件的唯一编辑入口，默认要求 `oldString` 唯一命中
 - `apply_patch` 适合长文本的局部编辑与多文件联动修改
 - `lsp` 支持工作区内绝对路径或相对路径，适合 Java / Python / TypeScript / JavaScript 文件的定义、引用、hover、symbol、调用层级等只读查询
-- 编辑已有文件前，需要先通过 `read_file` 读取同一文件
+- 编辑已有文件前，强烈建议先通过 `read_file` 读取同一文件；若 `oldString` 未命中，错误提示会明确建议先重新读取后重试
 - 文件工具默认受工作区边界限制
 
 ### Web API

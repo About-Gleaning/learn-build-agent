@@ -1,4 +1,7 @@
 {
+  "defaults": {
+    "max_tokens": 32000
+  },
   "providers": {
     "qwen": {
       "vendor": "qwen",
@@ -7,7 +10,7 @@
       "api_mode": "chat_completions",
       "default_model": "qwen3.5-flash",
       "models": {
-        "glm-5": {},
+        "ZHIPU/GLM-5": {},
         "kimi/kimi-k2.5": {},
         "qwen3-max": {},
         "qwen3-coder-next": {},
