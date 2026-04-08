@@ -1,393 +1,331 @@
-# my-main-agent 项目说明书
+# my-main-agent 开发主手册
 
-> **文档用途**：本文档是后续业务开发、问题排查和新成员理解项目的第一入口。
-> **生成时间**：2026-04-07
-> **对应版本**：基于当前工作区主分支最新状态
+本文档是当前仓库的唯一开发主手册。日常开发、问题排查、架构调整、能力扩展与测试补充，统一以本文件为准。
 
----
+文档分工如下：
 
-## 1. 项目概览
+- `README.md`：仓库入口、安装启动、文档导航
+- `AGENTS.md`：会进入 LLM 上下文的最小高优先级规则
+- `docs/architecture.md`：架构讲解材料
+- `docs/extending.md`：扩展学习材料
 
-### 1.1 项目定位
+`/analyze` 只负责初始化本文件的第一版；若文件已存在则直接停止，后续内容由人工持续维护。
 
-**my-main-agent** 是一个 AI 编程助手框架，定位为轻量级、可扩展的 Agent 系统。核心能力包括：
+## 1. 项目定位
 
-- **智能会话**：支持多轮对话，能够调用多种工具（文件操作、代码搜索、命令执行等）
-- **工具扩展**：提供丰富的工具集（文件读写、代码搜索、Bash 执行、Web 搜索等）
-- **子 Agent 委派**：通过 `task` 工具将复杂任务委派给专门的子 Agent 处理
-- **Web 界面**：提供基于 FastAPI 和 React 的 Web 交互界面
-- **MCP 集成**：支持 Model Context Protocol (MCP) 服务器扩展
-- **LSP 支持**：集成语言服务器协议，支持代码智能导航
+`my-main-agent` 是一个面向本地工作区运行的 AI 编程助手框架，核心目标是：
 
-### 1.2 核心特性
+- 在当前工作区内安全执行代码相关任务
+- 支持 CLI 与 Web 两种交互方式
+- 通过工具、MCP、LSP、Subagent 扩展能力
+- 在复杂任务中区分“规划”和“实施”两类工作
 
-- **双模式架构**：支持 CLI 命令模式和 Web 服务模式
-- **Plan 模式**：内置规划模式，支持复杂任务的多步骤规划与执行
-- **流式响应**：支持 SSE 流式输出，实时展示执行过程
-- **会话管理**：完整的会话生命周期管理，支持持久化记忆
-- **Hook 机制**：工具执行前后可插入自定义 Hook
-- **路径安全**：所有文件操作强制校验工作区边界
+这个项目不是单纯的聊天壳，也不是无边界的执行器。它的设计重点始终是“可扩展的 Agent 运行时”与“围绕工作区的安全边界”。
 
-### 1.3 运行环境要求
+## 2. 关键入口与代码地图
 
-| 组件 | 版本要求 |
-|------|----------|
-| Python | ≥ 3.10 |
-| TypeScript LSP | typescript + typescript-language-server（全局安装） |
-| Java LSP | jdtls（语言服务器） |
+### 2.1 启动入口
 
----
+- `src/main.py`：CLI 兼容入口，内部转调 `agent.cli`
+- `src/web_main.py`：FastAPI 启动入口
+- `src/agent/cli.py`：正式 CLI 入口，支持 `my-agent` 与 `my-agent web`
 
-## 2. 技术栈与运行方式
+### 2.2 运行时核心
 
-### 2.1 技术栈
+- `src/agent/runtime/session.py`：会话主循环、模式切换、工具路由
+- `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要拼装
+- `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度
+- `src/agent/runtime/agents.py`：Agent 元信息唯一来源
+- `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与 `MY_AGENT_HOME` 解析
+- `src/agent/runtime/web_dev_server.py`：Web 开发栈的启动、停止、状态与清理
 
-| 层级 | 技术选型 |
-|------|----------|
-| 后端框架 | FastAPI + Uvicorn |
-| LLM 调用 | OpenAI SDK（支持多厂商适配） |
-| 前端 | React + TypeScript |
-| 前端构建 | Vite |
-| 进程管理 | asyncio, subprocess |
-| 配置管理 | Pydantic Settings |
-| 测试框架 | pytest |
-| 代码风格 | ruff, black |
+### 2.3 协议与配置
 
-### 2.2 安装与运行
+- `src/agent/adapters/llm/client.py`：LLM 统一调用入口
+- `src/agent/adapters/llm/protocols.py`：协议层适配
+- `src/agent/adapters/llm/vendors.py`：厂商差异适配
+- `src/agent/config/llm_runtime.json`：模型、provider 与超时配置
+- `src/agent/config/project_runtime.json`：项目级运行时开关唯一配置来源
 
-**方式一：CLI 模式**
+### 2.4 能力层
 
-```bash
-# 安装
-pip install -e .
+- `src/agent/tools/`：本地工具实现目录
+- `src/agent/tools/specs.py`：工具 schema 与描述模板装配
+- `src/agent/tools/path_utils.py`：路径解析与工作区边界校验
+- `src/agent/tools/lsp_tool.py`：LSP 查询工具归口
+- `src/agent/mcp/runtime.py`：MCP server 发现、schema 规范化与调用路由
+- `src/agent/skills/runtime.py`：技能运行时
 
-# 启动交互式会话
-my-agent
+### 2.5 Web 与交互层
 
-# 查看帮助
-my-agent --help
+- `src/agent/web/app.py`：FastAPI 路由与流式响应封装
+- `src/agent/web/serializers.py`：Web 序列化唯一归口
+- `src/agent/web/path_suggestions.py`：`@` 路径补全归口
+- `src/agent/slash_commands/registry.py`：slash command 元信息唯一来源
+- `src/agent/slash_commands/resolver.py`：slash command 解析后执行编排归口
+
+### 2.6 测试目录
+
+- `tests/`：`pytest` 回归、集成与边界测试
+
+## 3. 核心链路
+
+### 3.1 CLI / Web 统一复用会话运行时
+
+核心链路如下：
+
+```text
+用户输入
+  -> CLI 或 Web 入口
+  -> runtime/session.py
+  -> LLM 调用 / tool call 解析
+  -> 工具执行 / 子 Agent 委派 / 问题恢复
+  -> runtime/stream_display.py 与 Web serializer
+  -> 用户看到最终结果
 ```
 
-**方式二：Web 模式**
+设计重点：
 
-```bash
-# 启动 Web 服务（自动选择空闲端口）
-my-agent web
+- CLI 与 Web 共享同一套主循环语义
+- 模式切换、问题恢复、工具执行状态都由运行时统一管理
+- Web 层只负责协议适配，不复制业务逻辑
 
-# 指定端口
-my-agent web --host 127.0.0.1 --port 8000
+### 3.2 工具调用链路
 
-# 清理异常实例
-my-agent web prune
-```
-
-**方式三：开发调试**
-
-```bash
-# 直接运行 CLI
-python3 src/main.py
-
-# 运行测试
-pytest -q
-
-# 代码检查
-ruff check src/
-black src/
-
-# 语法检查
-PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
-```
-
-### 2.3 依赖安装
-
-```bash
-# Python 依赖
-pip install -r requirements.txt
-
-# TypeScript LSP（用于 TS/JS 代码智能）
-npm install -g typescript typescript-language-server
-
-# Java LSP（可选，用于 Java 项目）
-# 需单独安装 jdtls
-```
-
----
-
-## 3. 关键目录与核心入口
-
-### 3.1 目录结构
-
-```
-my-main-agent/
-├── src/
-│   ├── main.py                    # CLI 兼容入口（转调 agent.cli）
-│   ├── web_main.py               # FastAPI Web 服务入口
-│   ├── agent/
-│   │   ├── cli.py                # 正式 CLI 入口
-│   │   ├── runtime/              # 运行时核心
-│   │   │   ├── session.py        # 会话主循环、模式切换
-│   │   │   ├── stream_display.py # 流式事件与展示
-│   │   │   ├── agents.py         # Agent 元信息
-│   │   │   ├── tool_executor.py  # 工具执行与 Hook
-│   │   │   ├── workspace.py      # 工作区管理
-│   │   │   └── session_memory.py # 会话记忆
-│   │   ├── tools/                # 工具实现
-│   │   │   ├── handlers.py       # 工具处理器注册
-│   │   │   ├── specs.py          # 工具 Schema 定义
-│   │   │   ├── path_utils.py     # 路径校验公共逻辑
-│   │   │   └── [各工具模块]       # read_file, edit_file, bash 等
-│   │   ├── adapters/llm/         # LLM 适配层
-│   │   │   ├── client.py         # 统一调用入口
-│   │   │   ├── protocols.py      # 协议转换
-│   │   │   └── vendors.py        # 厂商差异适配
-│   │   ├── slash_commands/       # Slash 命令
-│   │   │   ├── registry.py       # 命令注册
-│   │   │   └── resolver.py       # 命令解析与执行
-│   │   ├── mcp/                  # MCP 集成
-│   │   │   └── runtime.py        # MCP Server 管理
-│   │   ├── web/                  # Web 层
-│   │   │   ├── app.py            # FastAPI 应用
-│   │   │   ├── serializers.py    # 消息序列化
-│   │   │   └── path_suggestions.py # @路径补全
-│   │   └── config/               # 配置
-│   │       ├── project_runtime.json  # 项目级配置
-│   │       └── llm_runtime.json      # LLM 运行时配置
-│   └── frontend/                 # React 前端（Vite 构建）
-├── docs/                         # 项目文档
-│   ├── architecture.md           # 架构设计文档
-│   └── extending.md              # 扩展开发指南
-├── tests/                        # 测试目录
-├── pyproject.toml               # 项目配置与依赖
-└── AGENTS.md                    # 工作区规范（Agent 读取）
-```
-
-### 3.2 核心入口对照表
-
-| 入口文件 | 用途 | 备注 |
-|---------|------|------|
-| `src/main.py` | CLI 兼容入口 | 开发调试使用 |
-| `src/web_main.py` | Web 服务入口 | `uvicorn src.web_main:app` |
-| `src/agent/cli.py` | 正式 CLI 入口 | `my-agent` 命令实现 |
-| `src/agent/runtime/session.py` | 会话主循环 | 核心编排逻辑 |
-| `src/agent/runtime/tool_executor.py` | 工具执行 | 所有工具调用经过此处 |
-
----
-
-## 4. 分层职责与开发红线
-
-### 4.1 关键原则
-
-**必须遵守**：以下红线约束违反会导致系统不稳定或安全漏洞。
-
-### 4.2 核心红线
-
-| 层级/模块 | 禁止行为 | 正确做法 |
-|-----------|---------|---------|
-| `session.py` | 不得放置具体工具业务逻辑 | 只做会话编排，转调 tools/ |
-| `slash_commands/` | 禁止在 Web 或 session.py 中散落 `/xxx` 特判 | 统一在 registry.py 注册，resolver.py 解析 |
-| `adapters/llm/client.py` | 禁止混杂协议转换逻辑 | 只保留统一调用入口，协议转换放 protocols.py |
-| `tools/` | 禁止散落路径校验逻辑 | 统一使用 `path_utils.py` |
-| `mcp/runtime.py` | 禁止在 session.py 散落直连协议 | 所有 MCP 调用必须经过 runtime.py 路由 |
-| `lsp_tool.py` | 禁止在会话层直接调用 JSON-RPC | 必须经过 lsp_tool.py -> client.py -> manager.py |
-| `web/serializers.py` | 禁止在 app.py 手工散落映射逻辑 | 统一使用 serializers.py |
-| 路径处理 | 禁止使用 `Path.cwd()` 推导工作区 | 统一使用 `workspace.py` 解析 |
-| 敏感信息 | 禁止在配置中硬编码 Token/PAT | 统一使用环境变量 |
-
-### 4.3 功能收敛点
-
-| 功能 | 唯一归口 | 说明 |
-|------|---------|------|
-| Agent 元信息 | `runtime/agents.py` | 必须声明 model 与 description |
-| Slash 命令注册 | `slash_commands/registry.py` | 内置 `/init` 与 `/analyze` |
-| 流式展示 | `runtime/stream_display.py` | process_items, display_parts |
-| 工具执行 | `runtime/tool_executor.py` | Tool Hook 调度 |
-| LLM 统一调用 | `adapters/llm/client.py` | Hook 与错误收口 |
-| 协议转换 | `adapters/llm/protocols.py` | 协议层适配 |
-| 厂商差异 | `adapters/llm/vendors.py` | 厂商特定逻辑 |
-| 路径校验 | `tools/path_utils.py` | 工作区边界校验 |
-| MCP 工具路由 | `mcp/runtime.py` | server 发现与调用 |
-| Web 序列化 | `web/serializers.py` | 消息格式转换 |
-| @路径补全 | `web/path_suggestions.py` | 工作区路径索引与匹配 |
-
----
-
-## 5. 关键运行/业务链路
-
-### 5.1 会话生命周期
-
-```
-用户输入 -> cli.py
-    -> session.py (会话主循环)
-        -> 模式判断 (normal/plan)
-        -> tool_executor.py (工具执行)
-            -> handlers.py (具体工具)
-        -> stream_display.py (结果展示)
-```
-
-### 5.2 工具调用链路
-
-```
+```text
 LLM 返回 tool_calls
-    -> session.py 提取调用
-    -> tool_executor.py 执行
-        -> 前置 Hook
-        -> handlers.py 路由到具体工具
-        -> 后置 Hook
-    -> 结果返回 LLM
+  -> runtime/session.py 选择对应 handler
+  -> runtime/tool_executor.py 执行 Hook
+  -> tools/ 或 mcp/runtime.py
+  -> 工具结果回到 session
+  -> 再交给模型或整理为最终消息
 ```
 
-### 5.3 Web 请求链路
+关键事实：
 
+- 当前工具分发总入口在 `src/agent/runtime/session.py`
+- `src/agent/tools/handlers.py` 不是工具注册表，它主要提供公共结果构造与少量辅助逻辑
+- MCP 工具会被统一转换为普通 function tool，再并入同一执行面
+
+### 3.3 Slash Command 链路
+
+```text
+用户输入 /xxx
+  -> slash_commands/parser.py
+  -> slash_commands/registry.py
+  -> slash_commands/resolver.py
+  -> 生成新的 user_input 或直接返回即时结果
+  -> runtime/session.py 继续执行
 ```
+
+当前内置命令：
+
+- `/init`：当工作区缺失 `AGENTS.md` 时初始化首版规范文件
+- `/analyze`：当工作区缺失 `analyze_docs/project-context.md` 时初始化首版开发手册；若文件已存在则直接停止
+
+### 3.4 Web 链路
+
+```text
 浏览器请求
-    -> web_main.py
-    -> web/app.py (FastAPI 路由)
-        -> session.py (复用 CLI 会话逻辑)
-        -> serializers.py (消息序列化)
-    -> SSE 流式响应
+  -> src/web_main.py
+  -> src/agent/web/app.py
+  -> runtime/session.py
+  -> web/serializers.py
+  -> SSE / JSON 响应
 ```
 
-### 5.4 LSP 查询链路
+### 3.5 LSP 链路
 
-```
-查询请求
-    -> tools/lsp_tool.py
-    -> lsp/client.py
-    -> lsp/manager.py
-    -> 语言服务器进程
-```
-
-### 5.5 Plan 模式切换
-
-```
-用户输入触发规划需求
-    -> plan_enter 工具
-    -> 状态机标记待确认
-    -> Web: 前端确认/取消
-    -> CLI: question 工具等待用户
-    -> plan_exit 或进入 Plan 模式
+```text
+LSP 查询请求
+  -> src/agent/tools/lsp_tool.py
+  -> src/agent/lsp/client.py
+  -> src/agent/lsp/manager.py
+  -> 语言服务器进程
 ```
 
----
+## 4. 分层职责红线
 
-## 6. 常用开发命令
+下面这些规则属于架构红线，改动前必须先判断是否真的需要突破。
 
-### 6.1 运行相关
+- `runtime/session.py` 只做会话编排、工具路由与协作流程控制，不放具体工具业务逻辑。
+- Slash command 的注册、解析与 prompt 模板统一收敛在 `slash_commands/`，不要在 Web 或会话层散落 `/xxx` 特判。
+- `runtime/agents.py` 是 agent 元信息唯一来源；每个 agent 必须声明 `model` 与 `description`。
+- `task` 工具中的 subagent 名单与说明必须从 `runtime/agents.py` 动态生成。
+- 工具实现统一放在 `tools/` 目录内分模块维护；公共路径校验统一收敛到 `tools/path_utils.py`。
+- MCP server 的发现、缓存、schema 规范化与调用统一收敛在 `mcp/runtime.py`。
+- 查询型 `lsp` 工具统一通过 `tools/lsp_tool.py` -> `lsp/client.py` -> `lsp/manager.py` 链路收敛。
+- Web 层消息序列化统一收敛在 `web/serializers.py`，不要在 `web/app.py` 手工散落映射逻辑。
+- 项目级运行时策略统一从 `project_runtime.json` / `llm_runtime.json` 读取，禁止在业务模块扩散硬编码配置。
+- 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
+
+## 5. 关键运行时约束
+
+### 5.1 工作区与运行态
+
+- 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定。
+- 禁止继续散落使用 `Path.cwd()` 推导边界。
+- 默认运行态目录位于 `~/.my-agent/`，可通过 `MY_AGENT_HOME` 覆盖。
+- 常见运行态目录包括：
+  - `workspaces/sessions/`
+  - `workspaces/todo/`
+  - `workspaces/plan/`
+  - `workspaces/tool-output/`
+  - `workspaces/web-dev/<workspace_id>/`
+  - `logs/`
+
+### 5.2 AGENTS 加载规则
+
+- system prompt 组装时必须先尝试加载 `~/.my-agent/AGENTS.md`
+- 再尝试加载当前工作区 `AGENTS.md`
+- 任一文件不存在、为空或读取失败时都应自动忽略
+
+### 5.3 模式切换与问题恢复
+
+- `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
+- `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
+- Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
+
+### 5.4 Web 开发栈
+
+- `my-agent web` 支持按工作区并行启动多套实例。
+- 端口冲突时必须自动分配空闲端口，并把实际前后端地址写入当前工作区对应状态文件。
+- `my-agent web prune` 必须扫描全部工作区状态，只清理 `degraded/stale` 异常残留，保留健康实例。
+- Web 前端必须校验后端返回的 `workspace_root` 是否与当前实例预期工作区一致；若不一致，必须阻断继续聊天。
+
+### 5.5 路径补全
+
+- Web 输入框 `@` 路径补全只允许搜索当前工作区。
+- 若 `@` 不在输入框首位，则前一字符必须是空格。
+- 单独输入 `@` 不触发补全。
+- 排序规则必须优先服务“快速命中文件”，采用匹配分数降序、相对路径升序的稳定排序。
+- 最近选择（MRU）只记录，不参与排序。
+
+### 5.6 LSP 约束
+
+- Java LSP 的 Maven profile 仅支持按当前文件路径和 Maven `pom.xml` 自动探测；探测不唯一时直接报错。
+- TypeScript LSP 默认覆盖 `.ts`、`.tsx`、`.js`、`.jsx`，统一通过 `typescript-language-server --stdio` 启动。
+- 若缺少对应语言服务，可返回明确缺失提示，但不能静默降级成模糊成功。
+
+## 6. 工具与能力约束
+
+### 6.1 文件工具
+
+- `read_file` 仅支持绝对路径。
+- `write_file` 仅用于创建新文件，禁止覆盖已有文件。
+- 已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。
+- `write_file` / `edit_file` 都必须传绝对路径。
+- `edit_file` 默认要求 `oldString` 在文件中唯一命中；若不唯一，应补充上下文或显式使用 `replaceAll=true`。
+- 编辑已有文件前，建议先读取同一文件，避免基于陈旧上下文误改。
+
+### 6.2 Shell 与网络
+
+- Shell 执行默认高风险，优先白名单、超时与最小权限策略。
+- `websearch` 等联网能力依赖外部配置；失败时应给出可解释错误，而不是静默吞掉。
+
+### 6.3 MCP
+
+- MCP tool 暴露名统一使用 `serverAlias__toolName`。
+- 是否向 `plan` 模式暴露，只能通过 `project_runtime.json -> mcp.servers.*.expose_to_plan` 控制。
+- MCP 鉴权信息只能通过环境变量占位注入；仓库文件中禁止硬编码 Token、PAT 或其他密钥。
+- MCP 工具关闭阶段异常只能作为 `close_warning` 附加记录，不能覆盖真实主异常。
+
+## 7. 扩展规范
+
+### 7.1 新增 Slash Command
+
+必须同时处理下面几个位置：
+
+- 在 `src/agent/slash_commands/registry.py` 注册命令元信息
+- 在 `src/agent/slash_commands/resolver.py` 增加解析后的执行编排
+- 如需稳定 prompt，优先在 `src/agent/slash_commands/prompts/` 下新增模板
+- Web 端命令展示统一消费后端返回的命令元信息，不要在前端写死命令列表
+
+### 7.2 新增工具
+
+必须同时处理下面几个位置：
+
+- 在 `src/agent/tools/` 下新增或扩展对应模块
+- 在 `src/agent/tools/specs.py` 中补充工具 schema 与描述
+- 在 `src/agent/runtime/session.py` 中接入工具分发
+- 工具返回优先保持结构化，至少包含 `output` 与 `metadata.status`
+- 涉及路径、安全、权限控制的逻辑优先复用现有公共能力
+
+### 7.3 新增 Subagent
+
+- 在 `src/agent/runtime/agents.py` 注册 agent
+- 声明 `model="subagent"` 与清晰 `description`
+- 在 `src/agent/runtime/prompts/` 下提供对应 prompt 文件
+- 如无特殊需求，优先复用基础工具集合；新增能力优先在工具层扩展，不在会话层写死分支
+
+### 7.4 新增 Hook
+
+Tool Hook：
+
+- 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`
+- 按需实现 `before_call`、`after_call`、`on_error`
+
+LLM Hook：
+
+- 继承 `src/agent/adapters/llm/client.py` 中的 `LLMHook`
+- 在调用前后添加观测、审计或脱敏逻辑
+
+### 7.5 调整 Web 输出
+
+- 新增展示字段时，优先修改 `src/agent/web/schemas.py` 与 `src/agent/web/serializers.py`
+- `src/agent/web/app.py` 只保留路由、参数校验与 HTTP/SSE 响应封装
+- 不要在路由函数中散落手工字段映射
+
+## 8. 测试要求
+
+- 统一使用 `pytest`，测试文件命名为 `test_<module>.py`
+- 新增或调整工具时，至少覆盖 `tests/test_handlers.py` 与 `tests/test_run_session.py`
+- 涉及 Web API 时补充 `tests/test_web_api.py`
+- 新增或调整 agent / subagent 时，至少覆盖：
+  - `task` 描述是否包含最新 subagent 名称与 description
+  - 非 `subagent` agent 是否被 `task` 正确拒绝
+- 安全相关逻辑必须覆盖边界用例，例如路径穿越、危险命令、超时、权限限制
+
+推荐最低自检命令：
 
 ```bash
-# CLI 入口
-my-agent
-python3 src/main.py
-
-# Web 入口
-my-agent web
-my-agent web --host 127.0.0.1 --port 8000
-
-# 直接启动 Web 服务
-uvicorn src.web_main:app --reload
-```
-
-### 6.2 测试与质量
-
-```bash
-# 运行测试
 pytest -q
-
-# 语法检查
 PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
-
-# 代码格式化（推荐）
-ruff check src/
-black src/
 ```
 
-### 6.3 调试技巧
+## 9. 安全与日志
+
+- 禁止硬编码任何密钥或令牌，统一使用环境变量。
+- 所有路径输入必须通过工作区边界校验。
+- Shell 执行默认高风险，优先白名单、超时与最小权限策略。
+- LLM 调用必须配置显式超时；主代理在 `task` 委派后二轮推理超时时，必须记录错误日志并返回可解释失败结果。
+- 日志必须通过程序显式传递 `agent`、`model` 等上下文字段，禁止依赖 LLM 推断日志元信息。
+- 业务正常链路日志仅保留 LLM 调用前后、工具调用前后；其余调试日志默认不落盘。
+
+## 10. 常用命令
 
 ```bash
-# 查看帮助
+pip install -e .
+my-agent
 my-agent --help
-
-# 带日志运行
-my-agent --verbose
-
-# 检查工具注册
-python3 -c "from agent.tools.handlers import TOOL_HANDLERS; print(list(TOOL_HANDLERS.keys()))"
+my-agent web start --host 127.0.0.1 --port 8000
+my-agent web status
+my-agent web stop
+my-agent web prune
+pytest -q
+PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 ```
 
----
+TypeScript / JavaScript LSP 依赖安装：
 
-## 7. 开发时必须遵守的约束
+```bash
+npm install -g typescript typescript-language-server
+```
 
-### 7.1 代码风格
+## 11. 文档维护规则
 
-- **缩进**：4 空格，不使用 Tab
-- **命名规范**：
-  - 变量/函数：`snake_case`
-  - 常量：`UPPER_CASE`
-  - 类名：`PascalCase`
-- **类型标注**：公共函数优先补全类型标注
-- **注释**：关键位置编写清晰中文注释
-
-### 7.2 文件操作规范
-
-- 所有路径输入必须通过 `path_utils.py` 进行工作区边界校验
-- 禁止路径穿越攻击（使用 `..` 访问父目录）
-- 副作用操作与纯逻辑分离
-
-### 7.3 工具开发规范
-
-- 新增工具必须在 `handlers.py` 注册
-- 工具 Schema 定义在 `specs.py`
-- 工具实现放在 `tools/` 目录下独立模块
-- 涉及路径的工具必须使用 `path_utils.py`
-
-### 7.4 Web 开发规范
-
-- 消息序列化统一使用 `serializers.py`
-- @路径补全逻辑统一在 `path_suggestions.py`
-- 前端校验 `workspace_root` 一致性
-
-### 7.5 配置管理
-
-- 运行时配置统一从 `project_runtime.json` / `llm_runtime.json` 读取
-- 禁止在业务模块扩散硬编码配置
-- MCP 鉴权只能通过环境变量注入
-
----
-
-## 8. 风险点与待确认项
-
-### 8.1 已知风险点
-
-| 风险 | 说明 | 缓解措施 |
-|------|------|---------|
-| Bash 工具 | 高风险操作，可能执行危险命令 | 使用白名单、超时与最小权限策略 |
-| 路径穿越 | 恶意输入可能访问工作区外文件 | 强制通过 path_utils.py 校验 |
-| LLM 超时 | 长任务可能导致超时 | 配置显式超时，task 委派后记录错误日志 |
-| Token 泄露 | 硬编码密钥风险 | 统一使用环境变量，禁止硬编码 |
-| MCP 异常 | 关闭阶段异常可能覆盖主异常 | 优先保留主异常，close_warning 附加记录 |
-
-### 8.2 待确认/待完善项
-
-1. **AGENTS.md 一致性**：本文档与 AGENTS.md 存在部分内容重叠，后续应统一维护入口
-2. **测试覆盖率**：新增工具/Agent 时需要补充对应测试
-3. **文档覆盖**：本说明书基于当前已识别的高价值文件生成，如有遗漏模块需后续补充
-4. **TypeScript LSP**：需确认全局安装状态，缺少时需返回明确提示
-5. **MCP Server**：配置需按实际环境调整，禁止在仓库中硬编码 Token
-
-### 8.3 扩展开发指南
-
-如需扩展功能，参考优先级：
-
-1. **优先查阅**：`docs/architecture.md` - 架构设计文档
-2. **扩展指南**：`docs/extending.md` - 扩展开发详细指南
-3. **参考实现**：同类工具/模块的现有实现
-4. **遵循红线**：本文档第 4 章的分层职责约束
-
----
-
-**维护说明**：本文档应与项目同步更新，当发生以下情况时需要修订：
-- 新增核心模块或入口
-- 调整分层职责红线
-- 修改运行方式或技术栈
-- 发现新的风险点或待确认项
+- 本文件是开发主手册，所有重大实现调整后都要优先更新这里。
+- `AGENTS.md` 只保留会进入 LLM 上下文的最小高优先级规则，不要把本文件整段复制过去。
+- `README.md` 只保留入口信息与文档导航，不要把实现约束重新堆回去。
+- `docs/architecture.md` 与 `docs/extending.md` 主要面向人类理解项目，不承担开发规范主事实。
+- 若发现文档与实现不一致，应先修正本文件，再同步其他引用文档。

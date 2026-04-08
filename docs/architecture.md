@@ -1,97 +1,82 @@
-# 架构与运行时说明
+# 架构导读
 
-本文档承接 README 中下沉的实现细节，面向需要理解仓库内部结构和运行时行为的开发者。
+本文档面向想快速理解项目设计的开发者，重点解释系统为什么这样拆分、各层怎样协作。涉及硬性开发规范、扩展红线与测试要求时，以 `analyze_docs/project-context.md` 为准。
 
-## 分层结构
+## 整体形态
 
-### 运行时
+`my-main-agent` 是一个围绕“本地工作区内安全执行”设计的 Agent 框架，核心由 4 层组成：
 
-- `src/agent/runtime/session.py`：会话主循环、模式切换、工具路由
-- `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要组装
-- `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度
-- `src/agent/runtime/workspace.py`：工作区根目录与运行态目录解析
-- `src/agent/runtime/agents.py`：Agent 元信息唯一来源
+- 入口层：CLI 与 Web 负责接收输入、展示结果、管理会话生命周期。
+- 运行时编排层：负责模式切换、工具调度、子 Agent 委派、流式事件组织。
+- 能力层：包括本地工具、MCP 工具、LSP 查询、技能运行时。
+- 适配层：负责把不同大模型协议、厂商差异和外部依赖统一成稳定接口。
 
-### LLM 适配层
+这种拆分的目标不是“层数好看”，而是让高风险能力和纯编排逻辑解耦，降低扩展时把业务逻辑重新堆回主循环的风险。
 
-- `src/agent/adapters/llm/client.py`：统一调用入口、Hook 与错误收口
-- `src/agent/adapters/llm/protocols.py`：协议层适配
-- `src/agent/adapters/llm/vendors.py`：厂商差异适配
+## 核心链路
 
-### 工具层
+### 1. CLI / Web 共用同一套会话运行时
 
-- `src/agent/tools/`：工具实现目录
-- `src/agent/tools/path_utils.py`：路径解析与工作区边界校验
-- `src/agent/tools/specs.py`：工具 schema 与描述模板装配
+- CLI 入口在 `src/agent/cli.py`
+- Web 入口在 `src/agent/web/app.py`
+- 两者最终都会复用 `src/agent/runtime/session.py`
 
-### Web 层
+这样做的价值是：命令行和 Web 在模式切换、工具执行、问题恢复、会话记录上的语义保持一致，避免出现“双实现、双规则”。
 
-- `src/agent/web/app.py`：路由、异常转换与流式响应封装
-- `src/agent/web/serializers.py`：Web 序列化唯一归口
-- `src/agent/web/schemas.py`：请求与响应模型
+### 2. 会话主循环只负责编排，不负责业务实现
 
-## 运行时约束
+`src/agent/runtime/session.py` 是系统中最核心的编排模块，负责：
 
-- 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定
-- 文件工具和 Shell 工具默认受工作区边界限制
-- `task` 工具中的 subagent 列表必须从 `runtime/agents.py` 动态生成
-- 当前主 Agent 模式状态由 `runtime/session.py` 维护
-- Web 会话控制按 `session_id` 维度管理
+- 构造 system prompt 与上下文
+- 发起 LLM 调用
+- 解析 tool call
+- 分发到具体工具
+- 处理 `question`、`plan_enter`、`plan_exit`、`task` 等特殊协作流程
+- 汇总最终消息和流式输出
 
-## 模式切换与问题恢复
+它不应该承载具体工具细节，否则每增加一个功能都会让主循环继续膨胀。
 
-- `plan_enter` / `plan_exit` 仅负责发起切换申请
-- 模式确认与取消由运行时状态机和 Web 交互控制
-- `question` 工具按 `session_id` 保存待答问题
-- Web 端的答题与拒绝接口用于恢复执行
+### 3. 工具层与 MCP 层负责扩展能力
 
-## Web 流式接口
+- 本地工具位于 `src/agent/tools/`
+- MCP 运行时位于 `src/agent/mcp/runtime.py`
+- LSP 查询能力通过 `src/agent/tools/lsp_tool.py` 向上暴露
 
-主要设计点：
+这三块共同承担“能力扩展”职责。运行时层只知道“可以调用什么”，不应该关心“底层具体如何读文件、发 JSON-RPC、走 MCP 协议”。
 
-- 聊天、模式切换确认、问题答复都支持流式接口
-- Web 时间线按 `session` 维度累计展示
-- 助手消息优先基于后端返回的 `display_parts` 顺序渲染
-- 停止会话通过 `POST /api/sessions/{session_id}/stop` 完成
+### 4. Web 层优先做协议转换，不做业务决策
 
-## 配置体系
+Web 层的设计原则是“薄路由、重运行时”：
 
-### `llm_runtime.json`
+- `src/agent/web/app.py` 负责 API 路由、参数归一化、SSE 响应封装
+- `src/agent/web/serializers.py` 负责把运行时消息稳定映射为前端消费结构
+- `src/agent/web/path_suggestions.py` 负责 `@` 路径补全
 
-负责：
+这样前端接口字段演进时，不需要把映射逻辑散落在路由函数里。
 
-- provider、vendor、`base_url`
-- `api_mode`
-- 可用模型与默认模型
-- 超时
-- 主模式默认模型选择
+## 为什么要保留 Plan / Build 模式
 
-### `project_runtime.json`
+项目不是简单的一轮问答工具，而是要兼顾“先澄清、再实施”的复杂任务流程：
 
-负责：
+- `build` 模式偏向直接执行、修改代码、做验证
+- `plan` 模式偏向澄清边界、沉淀方案、降低误改风险
 
-- compaction
-- file extraction
-- agent loop / subagent loop
-- logging
-- session memory
-- LSP
+模式切换又不是纯 UI 行为，因此被设计成运行时状态机的一部分，而不是前端独占逻辑。
 
-## LSP 说明
+## 为什么强调工作区边界
 
-- `write_file` / `edit_file` 在处理 `.py`、`.java` 文件后会尝试触发 LSP 诊断
-- Python 默认使用 `pylsp`
-- Java 需要 `jdtls` 与兼容 JDK 21 环境
-- LSP 不可用不会改变文件工具的成功语义，但会在结果中追加诊断状态
+这是项目最重要的安全前提之一。
 
-## 安全边界
+- 文件读写默认限制在工作区内
+- Shell 默认高风险，需要白名单、超时与最小权限策略
+- Web 路径补全、LSP 查询、MCP 暴露都围绕“当前工作区”组织
 
-- 任何路径输入都必须经过工作区边界校验
-- Shell 执行属于高风险能力，优先依赖白名单、超时和最小权限
-- 密钥统一走环境变量，不写入代码和配置仓库
+没有这层边界，Agent 很容易从“开发助手”滑向“无约束执行器”。
 
-## 日志与会话存储
+## 阅读建议
 
-- 日志由 `src/agent/config/logging_setup.py` 统一初始化
-- 会话历史、todo、plan 占位文件和长输出默认写入 `~/.my-agent/`
-- 会话历史裁剪与日志截断行为统一由 `project_runtime.json` 控制
+如果你是第一次接触这个项目，推荐顺序如下：
+
+1. 先读 `README.md`，了解怎么启动与文档分工
+2. 再读 `analyze_docs/project-context.md`，掌握开发规范与高价值入口
+3. 最后结合本文件理解系统为什么这样拆分

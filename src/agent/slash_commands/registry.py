@@ -31,9 +31,9 @@ _SLASH_COMMANDS: tuple[SlashCommandDefinition, ...] = (
     ),
     SlashCommandDefinition(
         name="analyze",
-        description="研读当前工作区并生成项目说明书，供后续开发复用。",
+        description="初始化当前项目的开发手册；若已存在则停止，避免覆盖人工维护内容。",
         usage="/analyze",
-        placeholder="生成当前项目的上下文说明书",
+        placeholder="初始化当前项目的开发手册",
         handler_key="analyze_project",
         prompt_template_path=PROMPTS_DIR / "analyze.txt",
     ),

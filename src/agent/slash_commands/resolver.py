@@ -79,6 +79,14 @@ def _resolve_analyze_project(command: SlashCommandDefinition, user_input: str) -
             display_text="/analyze",
             immediate_output="当前工作区不存在 `AGENTS.md`，请先执行 `/init` 完成初始化后再使用 `/analyze`。",
         )
+    target_path = (workspace.root / "analyze_docs" / "project-context.md").resolve()
+    if target_path.exists():
+        return ResolvedSlashCommand(
+            command=command,
+            user_input=user_input,
+            display_text="/analyze",
+            immediate_output="当前工作区已存在 `analyze_docs/project-context.md`，`/analyze` 仅用于初始化第一版开发手册，已停止生成。",
+        )
     return ResolvedSlashCommand(
         command=command,
         user_input=_render_analyze_prompt(command),
