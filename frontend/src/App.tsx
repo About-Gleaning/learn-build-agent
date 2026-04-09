@@ -2317,18 +2317,6 @@ export function App() {
     return providerModelOptions[0]?.key || "";
   }, [mode, modeDefaults, providerDefaults, providerModelOptions]);
 
-  const displayProvider =
-    (isRuntimeBusy ? activeProvider : "") || selectedProviderModel?.provider || modeDefaults.get(mode)?.defaultProvider || "--";
-  const displayModel =
-    (isRuntimeBusy ? activeModel : "") ||
-    selectedProviderModel?.model ||
-    providerDefaults.get(activeProvider || selectedProviderModel?.provider || "") ||
-    modeDefaults.get(mode)?.defaultModel ||
-    "--";
-  const currentRuntimeSummary = `${mode} / ${displayProvider} / ${displayModel}`;
-  const followText = shouldFollow ? "自动跟随开启" : "自动跟随关闭";
-  const latestMessageTime = latestMessage ? formatTime(latestMessage.createdAt) : "--";
-
   useEffect(() => {
     if (!shouldFollow) {
       return;
@@ -3684,7 +3672,6 @@ export function App() {
               <span className="terminal-session">session {sessionId}</span>
             </div>
             <div className="terminal-topbar-actions">
-              <span className="terminal-topbar-item">{currentRuntimeSummary}</span>
               <span className={`terminal-topbar-item ${isStreaming ? "is-live" : ""}`}>
                 {isLoadingSession ? "loading-session" : isStreaming ? "streaming" : isApplyingModeSwitch ? "switching" : "idle"}
               </span>
@@ -3694,7 +3681,7 @@ export function App() {
                 onClick={isSessionLoadOpen ? closeSessionLoadPanel : openSessionLoadPanel}
                 disabled={isSessionInteractionLocked || isQuestionMode}
               >
-                {isLoadingSession ? "session-loading..." : isSessionLoadOpen ? "取消加载" : "session-load"}
+                {isLoadingSession ? "加载中..." : isSessionLoadOpen ? "取消加载" : "加载session"}
               </button>
             </div>
           </header>
@@ -3869,12 +3856,7 @@ export function App() {
                   ))}
                 </select>
               </div>
-              <div className="terminal-statusline-meta">
-                <span>model {displayModel}</span>
-                <span>{followText}</span>
-                <span>最近消息 {latestMessageTime}</span>
-              </div>
-                <button
+              <button
                   type="button"
                   onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
                   disabled={isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
@@ -3895,11 +3877,11 @@ export function App() {
             <form className="terminal-composer" onSubmit={handleSubmit}>
               <div className="terminal-composer-head">
                 <span className="terminal-prompt">{isQuestionMode ? "ask&gt;" : "cmd&gt;"}</span>
-                <span className="terminal-composer-summary">
-                  {isQuestionMode && activeQuestion
-                    ? `${activeQuestion.title || "等待回答"} · ${questionCursor + 1}/${activeQuestion.questions.length}`
-                    : currentRuntimeSummary}
-                </span>
+                {isQuestionMode && activeQuestion ? (
+                  <span className="terminal-composer-summary">
+                    {`${activeQuestion.title || "等待回答"} · ${questionCursor + 1}/${activeQuestion.questions.length}`}
+                  </span>
+                ) : null}
               </div>
               {isQuestionMode && activeQuestion && currentQuestion && currentQuestionDraft ? (
                 <div className="question-composer" aria-label="问题回答输入区">
@@ -4061,8 +4043,6 @@ export function App() {
               )}
               <div className="composer-footer">
                 <div className="composer-tips">
-                  <span>{followText}</span>
-                  <span>最近消息: {latestMessageTime}</span>
                   {!isQuestionMode ? <span>{isLoadingPathSuggestions ? "@ 补全加载中" : "@ 搜索：首位可直接触发，中间需前置空格"}</span> : null}
                   {isQuestionMode ? <span>左右键切题，上下键选项，Tab 切换到 notes</span> : null}
                 </div>
