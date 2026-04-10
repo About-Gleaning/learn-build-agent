@@ -2154,6 +2154,13 @@ export function App() {
     }
     return `当前前端预期连接工作区 ${EXPECTED_WORKSPACE_ROOT}，但后端返回的工作区是 ${actualWorkspaceRoot}。请先停止异常残留实例，再重新执行 my-agent web。`;
   }, [runtimeOptions]);
+  const composerWorkspaceTip = useMemo(() => {
+    if (isLoadingPathSuggestions) {
+      return "@ 补全加载中";
+    }
+    const workspaceRoot = runtimeOptions?.workspace_root?.trim() || "";
+    return workspaceRoot ? `${workspaceRoot}` : "未获取工作空间地址";
+  }, [isLoadingPathSuggestions, runtimeOptions]);
   const hasWorkspaceMismatch = Boolean(workspaceMismatchMessage);
   const slashCommands = runtimeOptions?.slash_commands || [];
   const slashCommandToken = useMemo(() => getSlashCommandToken(input), [input]);
@@ -4043,7 +4050,7 @@ export function App() {
               )}
               <div className="composer-footer">
                 <div className="composer-tips">
-                  {!isQuestionMode ? <span>{isLoadingPathSuggestions ? "@ 补全加载中" : "@ 搜索：首位可直接触发，中间需前置空格"}</span> : null}
+                  {!isQuestionMode ? <span title={composerWorkspaceTip}>{composerWorkspaceTip}</span> : null}
                   {isQuestionMode ? <span>左右键切题，上下键选项，Tab 切换到 notes</span> : null}
                 </div>
                 <div className="composer-actions">

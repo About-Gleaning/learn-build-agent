@@ -942,11 +942,17 @@ button:disabled {
 }
 
 .composer-tips {
+  min-width: 0;
+  flex: 1 1 auto;
   font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .composer-actions {
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 @media (max-width: 900px) {
