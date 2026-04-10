@@ -58,4 +58,5 @@
 ## 文档维护
 
 - `/analyze` 只用于初始化第一版 `analyze_docs/project-context.md`；若文件已存在则直接停止，不覆盖人工维护结果。
+- `/analyze` 初始化 `analyze_docs/project-context.md` 时，必须同步检查并补充 `AGENTS.md` 中的文档导航，明确列出该文档路径、用途与优先级，确保后续模型知道应优先阅读它。
 - 发生重大代码变更、开发规范调整、核心运行时行为变更后，必须同步更新 `analyze_docs/project-context.md`；必要时再同步精简更新本文件。

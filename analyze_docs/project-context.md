@@ -33,6 +33,7 @@
 ### 2.2 运行时核心
 
 - `src/agent/runtime/session.py`：会话主循环、模式切换、工具路由
+- `src/agent/runtime/session_hooks.py`：Session Hook 归口、排序与作用域过滤
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要拼装
 - `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度
 - `src/agent/runtime/agents.py`：Agent 元信息唯一来源
@@ -185,6 +186,7 @@ LSP 查询请求
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
+- `SessionHook` 必须覆盖同步/流式会话的所有合法返回路径，包括 slash command 的即时完成与即时错误分支；Hook 上下文中的 `mode` 必须始终表示当前有效模式，而不是仅表示入口参数。
 
 ### 5.4 Web 开发栈
 
@@ -259,6 +261,13 @@ LSP 查询请求
 - 如无特殊需求，优先复用基础工具集合；新增能力优先在工具层扩展，不在会话层写死分支
 
 ### 7.4 新增 Hook
+
+Session Hook：
+
+- 继承 `src/agent/runtime/session_hooks.py` 中的 `SessionHook`
+- 按需实现 `before_session`、`after_session`、`on_error`
+- 多个 Hook 通过 `order` 控制执行顺序：`before` 正序，`after/error` 倒序
+- 若只希望作用于部分代理，可使用 `agent_kinds` / `agent_names` 做过滤
 
 Tool Hook：
 
