@@ -122,7 +122,7 @@ LLM 返回 tool_calls
 当前内置命令：
 
 - `/init`：当工作区缺失 `AGENTS.md` 时初始化首版规范文件
-- `/analyze`：当工作区缺失 `analyze_docs/project-context.md` 时初始化首版开发手册；若文件已存在则直接停止
+- `/analyze`：当工作区缺失 `analyze_docs/project-context.md` 时初始化首版开发手册；若文件已存在则直接停止。若工作区属于多项目或多模块结构，首版手册必须额外梳理模块边界、依赖方向、启动入口与公共模块职责，不能按单项目视角简化。
 
 ### 3.4 Web 链路
 
