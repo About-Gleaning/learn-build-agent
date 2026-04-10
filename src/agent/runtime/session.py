@@ -4,6 +4,7 @@ import subprocess
 import uuid
 import json
 import inspect
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,7 @@ from ..core.message import (
     extract_tool_calls,
     get_role,
     get_message_text,
+    normalize_error,
     utc_now_iso,
 )
 from ..runtime.agents import get_agent
@@ -72,6 +74,12 @@ from .stream_display import (
     _merge_display_parts_with_message,
     _new_stream_event_id,
     _resolve_agent_kind,
+)
+from .session_hooks import (
+    SessionHook,
+    SessionHookContext,
+    invoke_session_hook,
+    resolve_effective_session_hooks,
 )
 from .tool_executor import ToolExecutor, ToolHook, ToolResult, get_global_tool_hooks
 from .workspace import get_workspace
@@ -1637,6 +1645,122 @@ def _set_message_runtime_info(
         message["info"]["turn_completed_at"] = turn_completed_at
 
 
+def _build_session_hook_context(
+    *,
+    active_session_id: str,
+    active_agent: str,
+    depth: int,
+    stream: bool,
+    delegation_id: str | None,
+    parent_tool_call_id: str | None,
+    turn_started_at: str,
+    max_rounds: int,
+    user_input: str,
+    mode: MainAgentMode | None = None,
+    ) -> SessionHookContext:
+    return {
+        "session_id": active_session_id,
+        "agent": active_agent,
+        "agent_kind": _resolve_agent_kind(active_agent),
+        "depth": depth,
+        "stream": stream,
+        "delegation_id": str(delegation_id or "").strip(),
+        "parent_tool_call_id": str(parent_tool_call_id or "").strip(),
+        "turn_started_at": turn_started_at,
+        "max_rounds": max_rounds,
+        "round_count": 0,
+        "status": "running",
+        "finish_reason": "",
+        "latency_ms": 0,
+        "user_input": user_input,
+        "mode": str(mode or "").strip(),
+    }
+
+
+def _normalize_session_hook_mode(mode: str | MainAgentMode | None) -> str:
+    normalized_mode = str(mode or "").strip().lower()
+    return normalized_mode if normalized_mode in {"build", "plan"} else ""
+
+
+def _set_session_hook_mode(ctx: SessionHookContext, mode: str | MainAgentMode | None) -> None:
+    normalized_mode = _normalize_session_hook_mode(mode)
+    if normalized_mode:
+        ctx["mode"] = normalized_mode
+
+
+def _run_session_hooks(
+    hooks: list[SessionHook],
+    stage: str,
+    *,
+    ctx: SessionHookContext,
+    message: Message | None = None,
+    error: Exception | None = None,
+    normalized_error: dict[str, str] | None = None,
+) -> None:
+    ordered_hooks = hooks if stage == "before" else list(reversed(hooks))
+    for hook in ordered_hooks:
+        invoke_session_hook(
+            hook,
+            stage,
+            ctx=ctx,
+            message=message,
+            error=error,
+            normalized_error=normalized_error,
+        )
+
+
+def _complete_session_hook_context(
+    ctx: SessionHookContext,
+    *,
+    round_count: int,
+    started_at: float,
+    message: Message,
+) -> None:
+    final_agent = str(message.get("info", {}).get("agent", ctx.get("agent", ""))).strip()
+    if final_agent:
+        ctx["agent"] = final_agent
+        ctx["agent_kind"] = _resolve_agent_kind(final_agent)
+    _set_session_hook_mode(ctx, final_agent)
+    ctx["round_count"] = round_count
+    ctx["latency_ms"] = int((time.perf_counter() - started_at) * 1000)
+    info = message.get("info", {})
+    ctx["status"] = str(info.get("status", "completed")).strip() or "completed"
+    ctx["finish_reason"] = str(info.get("finish_reason", "")).strip()
+
+
+def _handle_session_hook_success(
+    hooks: list[SessionHook],
+    ctx: SessionHookContext | None,
+    *,
+    round_count: int,
+    started_at: float | None,
+    message: Message,
+) -> Message:
+    if ctx is None or started_at is None:
+        return message
+    _complete_session_hook_context(ctx, round_count=round_count, started_at=started_at, message=message)
+    _run_session_hooks(hooks, "after", ctx=ctx, message=message)
+    return message
+
+
+def _handle_session_hook_error(
+    hooks: list[SessionHook],
+    ctx: SessionHookContext | None,
+    *,
+    round_count: int,
+    started_at: float | None,
+    error: Exception,
+) -> None:
+    if ctx is None or started_at is None:
+        return
+    ctx["round_count"] = round_count
+    ctx["latency_ms"] = int((time.perf_counter() - started_at) * 1000)
+    ctx["status"] = "failed"
+    ctx["finish_reason"] = "error"
+    normalized = normalize_error(error)
+    _run_session_hooks(hooks, "error", ctx=ctx, error=error, normalized_error=normalized)
+
+
 def _build_tool_message(
     session_id: str,
     tool_call_id: str,
@@ -2148,6 +2272,7 @@ def subagent_loop(
     agent: str = "explore",
     *,
     llm_config: ResolvedLLMConfig | None = None,
+    session_hooks: list[SessionHook] | None = None,
 ) -> str:
     agent_name = (agent or "explore").strip().lower()
     agent_definition = get_agent(agent_name)
@@ -2174,6 +2299,7 @@ def subagent_loop(
         todo_tool_names={"todo_write", "todo_read"},
         llm_config=llm_config,
         max_rounds=subagent_max_rounds,
+        session_hooks=session_hooks,
     )
     return get_message_text(result)
 
@@ -2191,6 +2317,7 @@ def _run_session_stream(
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
+    session_hooks: list[SessionHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
     depth: int = 0,
@@ -2205,6 +2332,8 @@ def _run_session_stream(
     Args:
         max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
     """
+    effective_session_hooks = resolve_effective_session_hooks(session_hooks)
+    effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     turn_started_at = utc_now_iso()
     try:
         prepared_input = _prepare_session_input(
@@ -2227,6 +2356,20 @@ def _run_session_stream(
             history_messages = SESSION_MEMORY_STORE.load(active_session_id)
             SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
         active_agent = str(assistant_message["info"].get("agent", "build")).strip() or "build"
+        session_hook_ctx = _build_session_hook_context(
+            active_session_id=active_session_id,
+            active_agent=active_agent,
+            depth=depth,
+            stream=True,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            turn_started_at=turn_started_at,
+            max_rounds=effective_max_rounds,
+            user_input=user_input,
+            mode=active_agent,
+        )
+        session_hook_started_at = time.perf_counter()
+        _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
         runtime_provider = str(assistant_message["info"].get("provider", "")).strip()
         runtime_model = str(assistant_message["info"].get("model", "")).strip()
         yield _build_stream_event(
@@ -2261,7 +2404,13 @@ def _run_session_stream(
             process_items=list(assistant_message["info"].get("process_items", [])),
             display_parts=list(assistant_message["info"].get("display_parts", [])),
         )
-        return assistant_message
+        return _handle_session_hook_success(
+            effective_session_hooks,
+            session_hook_ctx,
+            round_count=0,
+            started_at=session_hook_started_at,
+            message=assistant_message,
+        )
 
     if prepared_input.immediate_output is not None:
         active_session_id = set_session_id(normalize_required_session_id(session_id))
@@ -2278,6 +2427,20 @@ def _run_session_stream(
             history_messages = SESSION_MEMORY_STORE.load(active_session_id)
             SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
         active_agent = str(assistant_message["info"].get("agent", "build")).strip() or "build"
+        session_hook_ctx = _build_session_hook_context(
+            active_session_id=active_session_id,
+            active_agent=active_agent,
+            depth=depth,
+            stream=True,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            turn_started_at=turn_started_at,
+            max_rounds=effective_max_rounds,
+            user_input=user_input,
+            mode=active_agent,
+        )
+        session_hook_started_at = time.perf_counter()
+        _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
         runtime_provider = str(assistant_message["info"].get("provider", "")).strip()
         runtime_model = str(assistant_message["info"].get("model", "")).strip()
         yield _build_stream_event(
@@ -2312,7 +2475,13 @@ def _run_session_stream(
             process_items=list(assistant_message["info"].get("process_items", [])),
             display_parts=list(assistant_message["info"].get("display_parts", [])),
         )
-        return assistant_message
+        return _handle_session_hook_success(
+            effective_session_hooks,
+            session_hook_ctx,
+            round_count=0,
+            started_at=session_hook_started_at,
+            message=assistant_message,
+        )
 
     bootstrap = _bootstrap_session(
         prepared_input.user_input,
@@ -2333,6 +2502,23 @@ def _run_session_stream(
     mode_enabled = bootstrap.mode_enabled
 
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
+    effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
+    active_loop_agent = bootstrap.initial_agent
+    effective_session_hooks = resolve_effective_session_hooks(session_hooks)
+    session_hook_ctx = _build_session_hook_context(
+        active_session_id=active_session_id,
+        active_agent=active_loop_agent,
+        depth=depth,
+        stream=True,
+        delegation_id=delegation_id,
+        parent_tool_call_id=parent_tool_call_id,
+        turn_started_at=turn_started_at,
+        max_rounds=effective_max_rounds,
+        user_input=prepared_input.user_input,
+        mode=bootstrap.initial_mode,
+    )
+    session_hook_started_at = time.perf_counter()
+    _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
     active_process_items = process_items if process_items is not None else []
     active_display_parts = display_parts if display_parts is not None else []
     display_text_merge_open = False
@@ -2436,9 +2622,11 @@ def _run_session_stream(
             get_mode=lambda: current_mode,
             get_latest_model=lambda: _latest_model(messages),
             get_current_runtime=lambda: current_runtime,
+            session_hooks=session_hooks,
         )
     )
 
+    round_no = 0
     try:
         yield _emit_event(
             "start",
@@ -2458,9 +2646,6 @@ def _run_session_stream(
             depth=depth,
             mode=bootstrap.initial_mode,
         )
-
-        effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
-        round_no = 0
         while True:
             round_no += 1
             if round_no > effective_max_rounds:
@@ -2521,13 +2706,20 @@ def _run_session_stream(
                     confirmation=limit_message["info"].get("confirmation"),
                     question=limit_message["info"].get("question"),
                 )
-                return limit_message
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=limit_message,
+                )
             pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
             messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
 
             selected_tools = bootstrap.initial_tools
             if mode_enabled:
                 current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
+                _set_session_hook_mode(session_hook_ctx, current_mode)
                 current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
                     messages,
                     mode=current_mode,
@@ -2553,7 +2745,13 @@ def _run_session_stream(
 
             stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
             if stopped_message is not None:
-                return stopped_message
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=stopped_message,
+                )
 
             yield _emit_event(
             "round_start",
@@ -2647,7 +2845,13 @@ def _run_session_stream(
 
             stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
             if stopped_message is not None:
-                return stopped_message
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=stopped_message,
+                )
 
             _set_message_runtime_info(
                 assistant_message,
@@ -2727,7 +2931,13 @@ def _run_session_stream(
                     confirmation=assistant_message["info"].get("confirmation"),
                     question=assistant_message["info"].get("question"),
                 )
-                return assistant_message
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=assistant_message,
+                )
 
             if finish_reason == "unknown" and not has_tool_calls:
                 yield _emit_event(
@@ -2751,7 +2961,13 @@ def _run_session_stream(
             for tool_call in tool_calls:
                 stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
                 if stopped_message is not None:
-                    return stopped_message
+                    return _handle_session_hook_success(
+                        effective_session_hooks,
+                        session_hook_ctx,
+                        round_count=round_no,
+                        started_at=session_hook_started_at,
+                        message=stopped_message,
+                    )
                 if tool_call["name"] == "task":
                     delegation_instance_id = _new_delegation_id()
                     task_request = _prepare_task_tool_request(
@@ -2780,6 +2996,7 @@ def _run_session_stream(
                             parent_tool_call_id=tool_call["id"],
                             process_items=active_process_items,
                             display_parts=active_display_parts,
+                            session_hooks=session_hooks,
                         )
                         delegated_finish_reason = str(delegated_message["info"].get("finish_reason", "")).strip().lower()
                         delegated_status = str(delegated_message["info"].get("status", "")).strip().lower()
@@ -2834,7 +3051,13 @@ def _run_session_stream(
 
                 stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
                 if stopped_message is not None:
-                    return stopped_message
+                    return _handle_session_hook_success(
+                        effective_session_hooks,
+                        session_hook_ctx,
+                        round_count=round_no,
+                        started_at=session_hook_started_at,
+                        message=stopped_message,
+                    )
 
                 if tool_call["name"] in {"plan_enter", "plan_exit"}:
                     status = str(metadata.get("status", "")).strip().lower()
@@ -2899,7 +3122,13 @@ def _run_session_stream(
                             confirmation=interrupted_message["info"].get("confirmation"),
                             question=interrupted_message["info"].get("question"),
                         )
-                        return interrupted_message
+                        return _handle_session_hook_success(
+                            effective_session_hooks,
+                            session_hook_ctx,
+                            round_count=round_no,
+                            started_at=session_hook_started_at,
+                            message=interrupted_message,
+                        )
 
                     if should_cancel:
                         should_interrupt = True
@@ -2974,7 +3203,13 @@ def _run_session_stream(
                     confirmation=interrupted_message["info"].get("confirmation"),
                     question=interrupted_message["info"].get("question"),
                 )
-                return interrupted_message
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=interrupted_message,
+                )
 
             if should_interrupt:
                 message = _build_cancelled_mode_switch_message(
@@ -3031,7 +3266,13 @@ def _run_session_stream(
                     confirmation=message["info"].get("confirmation"),
                     question=message["info"].get("question"),
                 )
-                return message
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=message,
+                )
 
             yield _emit_event(
                 "round_end",
@@ -3047,6 +3288,15 @@ def _run_session_stream(
                 model=current_runtime.model,
                 completed_at=utc_now_iso(),
             )
+    except Exception as exc:
+        _handle_session_hook_error(
+            effective_session_hooks,
+            session_hook_ctx,
+            round_count=round_no,
+            started_at=session_hook_started_at,
+            error=exc,
+        )
+        raise
     finally:
         if depth == 0:
             if is_session_stop_requested(active_session_id) and not stop_message_saved:
@@ -3076,6 +3326,7 @@ def _build_tool_handlers(
     get_mode: Callable[[], MainAgentMode],
     get_latest_model: Callable[[], str],
     get_current_runtime: Callable[[], ResolvedLLMConfig],
+    session_hooks: list[SessionHook] | None = None,
 ) -> dict[str, Callable[..., object]]:
     mcp_tools, _ = list_mcp_tools()
 
@@ -3170,6 +3421,7 @@ def _build_tool_handlers(
             agent=kw.get("agent", "explore"),
             session_id=session_id,
             llm_config=get_current_runtime(),
+            session_hooks=session_hooks,
         ),
         "plan_enter": lambda **kw: _run_plan_enter_tool(**kw),
         "plan_exit": lambda **kw: _run_plan_exit_tool(**kw),
@@ -3201,6 +3453,7 @@ def run_session(
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
+    session_hooks: list[SessionHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
     max_rounds: int | None = None,
@@ -3210,6 +3463,8 @@ def run_session(
     Args:
         max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
     """
+    effective_session_hooks = resolve_effective_session_hooks(session_hooks)
+    effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     turn_started_at = utc_now_iso()
     try:
         prepared_input = _prepare_session_input(
@@ -3231,7 +3486,28 @@ def run_session(
         if mode_enabled:
             history_messages = SESSION_MEMORY_STORE.load(active_session_id)
             SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
-        return assistant_message
+        active_agent = str(assistant_message["info"].get("agent", "build")).strip() or "build"
+        session_hook_ctx = _build_session_hook_context(
+            active_session_id=active_session_id,
+            active_agent=active_agent,
+            depth=0,
+            stream=False,
+            delegation_id=None,
+            parent_tool_call_id=None,
+            turn_started_at=turn_started_at,
+            max_rounds=effective_max_rounds,
+            user_input=user_input,
+            mode=active_agent,
+        )
+        session_hook_started_at = time.perf_counter()
+        _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
+        return _handle_session_hook_success(
+            effective_session_hooks,
+            session_hook_ctx,
+            round_count=0,
+            started_at=session_hook_started_at,
+            message=assistant_message,
+        )
 
     if prepared_input.immediate_output is not None:
         active_session_id = set_session_id(normalize_required_session_id(session_id))
@@ -3247,7 +3523,28 @@ def run_session(
         if mode_enabled:
             history_messages = SESSION_MEMORY_STORE.load(active_session_id)
             SESSION_MEMORY_STORE.save(active_session_id, [*history_messages, user_message, assistant_message])
-        return assistant_message
+        active_agent = str(assistant_message["info"].get("agent", "build")).strip() or "build"
+        session_hook_ctx = _build_session_hook_context(
+            active_session_id=active_session_id,
+            active_agent=active_agent,
+            depth=0,
+            stream=False,
+            delegation_id=None,
+            parent_tool_call_id=None,
+            turn_started_at=turn_started_at,
+            max_rounds=effective_max_rounds,
+            user_input=user_input,
+            mode=active_agent,
+        )
+        session_hook_started_at = time.perf_counter()
+        _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
+        return _handle_session_hook_success(
+            effective_session_hooks,
+            session_hook_ctx,
+            round_count=0,
+            started_at=session_hook_started_at,
+            message=assistant_message,
+        )
 
     bootstrap = _bootstrap_session(
         prepared_input.user_input,
@@ -3267,6 +3564,21 @@ def run_session(
     turn_started_at = bootstrap.turn_started_at
     mode_enabled = bootstrap.mode_enabled
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
+    active_loop_agent = bootstrap.initial_agent
+    session_hook_ctx = _build_session_hook_context(
+        active_session_id=active_session_id,
+        active_agent=active_loop_agent,
+        depth=0,
+        stream=False,
+        delegation_id=None,
+        parent_tool_call_id=None,
+        turn_started_at=turn_started_at,
+        max_rounds=effective_max_rounds,
+        user_input=prepared_input.user_input,
+        mode=bootstrap.initial_mode,
+    )
+    session_hook_started_at = time.perf_counter()
+    _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
     messages = list(bootstrap.messages)
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
@@ -3279,169 +3591,211 @@ def run_session(
             get_mode=lambda: current_mode,
             get_latest_model=lambda: _latest_model(messages),
             get_current_runtime=lambda: current_runtime,
+            session_hooks=session_hooks,
         )
     )
 
-    effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     round_no = 0
-    while True:
-        round_no += 1
-        if round_no > effective_max_rounds:
-            active_agent = current_mode if mode_enabled else (runtime_agent or "build")
-            limit_message = _build_max_rounds_exceeded_message(
-                session_id=active_session_id,
-                active_agent=active_agent,
-                current_runtime=current_runtime,
-                turn_started_at=turn_started_at,
-                max_rounds=effective_max_rounds,
-            )
-            messages.append(limit_message)
-            if mode_enabled:
-                SESSION_MEMORY_STORE.save(active_session_id, messages)
-            return limit_message
-        pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
-        messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
-
-        selected_tools = bootstrap.initial_tools
-        if mode_enabled:
-            current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
-            current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
-                messages,
-                mode=current_mode,
-                provider=provider,
-                provider_specified=False,
-                model=model,
-                model_specified=False,
-            )
-            selected_tools = _get_tools_for_mode(current_mode)
-            messages = _ensure_system_prompt(
-                messages,
-                _get_system_prompt_for_mode(
-                    current_mode,
-                    model=current_runtime.model,
-                    provider=current_runtime.provider,
-                    vendor=current_runtime.vendor,
+    try:
+        while True:
+            round_no += 1
+            if round_no > effective_max_rounds:
+                active_agent = current_mode if mode_enabled else (runtime_agent or "build")
+                limit_message = _build_max_rounds_exceeded_message(
                     session_id=active_session_id,
-                ),
-                active_session_id,
-            )
-        active_agent = current_mode if mode_enabled else (runtime_agent or "build")
-
-        assistant_message = _call_chat_completion(
-            messages=messages,
-            tools=selected_tools,
-            llm_config=current_runtime,
-            agent=active_agent,
-        )
-        _set_message_runtime_info(
-            assistant_message,
-            agent=active_agent,
-            model=current_runtime.model,
-            provider=current_runtime.provider,
-            turn_started_at=turn_started_at,
-        )
-        messages.append(assistant_message)
-
-        tool_calls = extract_tool_calls(assistant_message)
-        should_continue = _should_continue_after_assistant(assistant_message)
-        has_tool_calls = bool(tool_calls)
-
-        if not should_continue:
-            assistant_message["info"]["turn_completed_at"] = utc_now_iso()
-            if mode_enabled:
-                SESSION_MEMORY_STORE.save(active_session_id, messages)
-            return assistant_message
-
-        if _assistant_finish_reason(assistant_message) == "unknown" and not has_tool_calls:
-            continue
-
-        should_interrupt = False
-        task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
-        for tool_call in tool_calls:
-            if tool_call["name"] == "task":
-                task_request = _prepare_task_tool_request(tool_call["arguments"])
-                result = task_request.result
-                if task_request.should_execute:
-                    result["output"] = subagent_loop(
-                        task_request.prompt,
-                        agent=task_request.agent,
-                        session_id=active_session_id,
-                        llm_config=current_runtime,
-                    )
-            else:
-                result = tool_executor.execute(
-                    tool_call["name"],
-                    tool_call["arguments"],
-                    session_id=active_session_id,
-                    tool_call_id=tool_call["id"],
-                    round_no=round_no,
-                    hooks=effective_tool_hooks,
-                    agent=active_agent,
-                    model=current_runtime.model,
-                    vendor=current_runtime.vendor,
-                    task_available=task_available,
-                    workdir=str(_get_workdir()),
-                )
-            messages.append(
-                _build_tool_message(
-                    active_session_id,
-                    tool_call_id=tool_call["id"],
-                    tool_name=tool_call["name"],
-                    arguments=tool_call["arguments"],
-                    result=result,
-                    agent=active_agent,
+                    active_agent=active_agent,
+                    current_runtime=current_runtime,
                     turn_started_at=turn_started_at,
+                    max_rounds=effective_max_rounds,
                 )
-            )
+                messages.append(limit_message)
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=limit_message,
+                )
+            pre_compact_agent = current_mode if mode_enabled else (runtime_agent or "build")
+            messages = compact(messages, llm_config=current_runtime, agent=pre_compact_agent)
 
-            if tool_call["name"] in {"plan_enter", "plan_exit"}:
-                interrupted_message, should_cancel = _handle_mode_switch_tool_result(
+            selected_tools = bootstrap.initial_tools
+            if mode_enabled:
+                current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
+                _set_session_hook_mode(session_hook_ctx, current_mode)
+                current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
+                    messages,
+                    mode=current_mode,
+                    provider=provider,
+                    provider_specified=False,
+                    model=model,
+                    model_specified=False,
+                )
+                selected_tools = _get_tools_for_mode(current_mode)
+                messages = _ensure_system_prompt(
+                    messages,
+                    _get_system_prompt_for_mode(
+                        current_mode,
+                        model=current_runtime.model,
+                        provider=current_runtime.provider,
+                        vendor=current_runtime.vendor,
+                        session_id=active_session_id,
+                    ),
+                    active_session_id,
+                )
+            active_agent = current_mode if mode_enabled else (runtime_agent or "build")
+
+            assistant_message = _call_chat_completion(
+                messages=messages,
+                tools=selected_tools,
+                llm_config=current_runtime,
+                agent=active_agent,
+            )
+            _set_message_runtime_info(
+                assistant_message,
+                agent=active_agent,
+                model=current_runtime.model,
+                provider=current_runtime.provider,
+                turn_started_at=turn_started_at,
+            )
+            messages.append(assistant_message)
+
+            tool_calls = extract_tool_calls(assistant_message)
+            should_continue = _should_continue_after_assistant(assistant_message)
+            has_tool_calls = bool(tool_calls)
+
+            if not should_continue:
+                assistant_message["info"]["turn_completed_at"] = utc_now_iso()
+                if mode_enabled:
+                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=assistant_message,
+                )
+
+            if _assistant_finish_reason(assistant_message) == "unknown" and not has_tool_calls:
+                continue
+
+            should_interrupt = False
+            task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
+            for tool_call in tool_calls:
+                if tool_call["name"] == "task":
+                    task_request = _prepare_task_tool_request(tool_call["arguments"])
+                    result = task_request.result
+                    if task_request.should_execute:
+                        result["output"] = subagent_loop(
+                            task_request.prompt,
+                            agent=task_request.agent,
+                            session_id=active_session_id,
+                            llm_config=current_runtime,
+                            session_hooks=session_hooks,
+                        )
+                else:
+                    result = tool_executor.execute(
+                        tool_call["name"],
+                        tool_call["arguments"],
+                        session_id=active_session_id,
+                        tool_call_id=tool_call["id"],
+                        round_no=round_no,
+                        hooks=effective_tool_hooks,
+                        agent=active_agent,
+                        model=current_runtime.model,
+                        vendor=current_runtime.vendor,
+                        task_available=task_available,
+                        workdir=str(_get_workdir()),
+                    )
+                messages.append(
+                    _build_tool_message(
+                        active_session_id,
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_call["name"],
+                        arguments=tool_call["arguments"],
+                        result=result,
+                        agent=active_agent,
+                        turn_started_at=turn_started_at,
+                    )
+                )
+
+                if tool_call["name"] in {"plan_enter", "plan_exit"}:
+                    interrupted_message, should_cancel = _handle_mode_switch_tool_result(
+                        session_id=active_session_id,
+                        tool_name=tool_call["name"],
+                        result=result,
+                        messages=messages,
+                        active_agent=active_agent,
+                        current_runtime=current_runtime,
+                        current_provider_explicit=current_provider_explicit,
+                        current_model_explicit=current_model_explicit,
+                        turn_started_at=turn_started_at,
+                    )
+                    if interrupted_message is not None:
+                        if mode_enabled:
+                            SESSION_MEMORY_STORE.save(active_session_id, messages)
+                        return _handle_session_hook_success(
+                            effective_session_hooks,
+                            session_hook_ctx,
+                            round_count=round_no,
+                            started_at=session_hook_started_at,
+                            message=interrupted_message,
+                        )
+                    if should_cancel:
+                        should_interrupt = True
+                    continue
+
+                if tool_call["name"] != "question":
+                    continue
+
+                interrupted_message = _handle_question_tool_result(
                     session_id=active_session_id,
                     tool_name=tool_call["name"],
                     result=result,
                     messages=messages,
                     active_agent=active_agent,
                     current_runtime=current_runtime,
-                    current_provider_explicit=current_provider_explicit,
-                    current_model_explicit=current_model_explicit,
                     turn_started_at=turn_started_at,
                 )
                 if interrupted_message is not None:
                     if mode_enabled:
                         SESSION_MEMORY_STORE.save(active_session_id, messages)
-                    return interrupted_message
-                if should_cancel:
-                    should_interrupt = True
-                continue
+                    return _handle_session_hook_success(
+                        effective_session_hooks,
+                        session_hook_ctx,
+                        round_count=round_no,
+                        started_at=session_hook_started_at,
+                        message=interrupted_message,
+                    )
 
-            if tool_call["name"] != "question":
-                continue
-
-            interrupted_message = _handle_question_tool_result(
-                session_id=active_session_id,
-                tool_name=tool_call["name"],
-                result=result,
-                messages=messages,
-                active_agent=active_agent,
-                current_runtime=current_runtime,
-                turn_started_at=turn_started_at,
-            )
-            if interrupted_message is not None:
+            if should_interrupt:
+                message = _build_cancelled_mode_switch_message(
+                    session_id=active_session_id,
+                    active_agent=active_agent,
+                    current_runtime=current_runtime,
+                    turn_started_at=turn_started_at,
+                )
+                messages.append(message)
                 if mode_enabled:
                     SESSION_MEMORY_STORE.save(active_session_id, messages)
-                return interrupted_message
-
-        if should_interrupt:
-            message = _build_cancelled_mode_switch_message(
-                session_id=active_session_id,
-                active_agent=active_agent,
-                current_runtime=current_runtime,
-                turn_started_at=turn_started_at,
-            )
-            messages.append(message)
-            if mode_enabled:
-                SESSION_MEMORY_STORE.save(active_session_id, messages)
-            return message
+                return _handle_session_hook_success(
+                    effective_session_hooks,
+                    session_hook_ctx,
+                    round_count=round_no,
+                    started_at=session_hook_started_at,
+                    message=message,
+                )
+    except Exception as exc:
+        _handle_session_hook_error(
+            effective_session_hooks,
+            session_hook_ctx,
+            round_count=round_no,
+            started_at=session_hook_started_at,
+            error=exc,
+        )
+        raise
 
 
 def run_session_stream_events(
@@ -3457,6 +3811,7 @@ def run_session_stream_events(
     system_prompt: str | None = None,
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
+    session_hooks: list[SessionHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
     max_rounds: int | None = None,
@@ -3478,12 +3833,18 @@ def run_session_stream_events(
         system_prompt=system_prompt,
         todo_tool_names=todo_tool_names,
         tool_hooks=tool_hooks,
+        session_hooks=session_hooks,
         llm_config=llm_config,
         runtime_agent=runtime_agent,
         max_rounds=max_rounds,
     )
 
 
-def agent_loop(user_input: str, session_id: str) -> Message:
+def agent_loop(
+    user_input: str,
+    session_id: str,
+    *,
+    session_hooks: list[SessionHook] | None = None,
+) -> Message:
     """兼容入口：内部转发到新接口。"""
-    return run_session(user_input=user_input, session_id=session_id)
+    return run_session(user_input=user_input, session_id=session_id, session_hooks=session_hooks)

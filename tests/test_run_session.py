@@ -232,6 +232,10 @@ def test_run_session_should_resolve_analyze_slash_command_before_llm(monkeypatch
     assert "project-context.md" in captured["user_text"]
     assert "analyze_docs" in captured["user_text"]
     assert "README.md" in captured["user_text"]
+    assert "AGENTS.md" in captured["user_text"]
+    assert "后续开发主手册" in captured["user_text"]
+    assert "必须一并补充到" in captured["user_text"]
+    assert "文档分工与优先级" in captured["user_text"]
     history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze")
     assert _last_user_display_text(history_messages) == "/analyze"
 
