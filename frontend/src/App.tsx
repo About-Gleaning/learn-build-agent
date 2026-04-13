@@ -180,6 +180,11 @@ type PathSuggestion = {
   kind: "file" | "directory";
 };
 
+type PathSuggestionCacheEntry = {
+  createdAt: number;
+  suggestions: PathSuggestion[];
+};
+
 type ActivePathToken = {
   rawToken: string;
   query: string;
@@ -332,6 +337,10 @@ const API_BASE = resolveApiBase();
 const AUTO_SCROLL_THRESHOLD = 56;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const EXPECTED_WORKSPACE_ROOT = (import.meta.env.VITE_EXPECTED_WORKSPACE_ROOT as string | undefined)?.trim() || "";
+const PATH_SUGGESTION_LIMIT = 50;
+const PATH_SUGGESTION_DEBOUNCE_MS = 150;
+const PATH_SUGGESTION_CACHE_TTL_MS = 30_000;
+const PATH_SUGGESTION_CACHE_LIMIT = 100;
 
 function buildId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -400,8 +409,12 @@ function formatInsertedPath(path: string): string {
   return `${normalized} `;
 }
 
-async function fetchPathSuggestions(query: string): Promise<PathSuggestion[]> {
-  const resp = await fetch(`${API_BASE}/api/workspace/path-suggestions?q=${encodeURIComponent(query)}`);
+async function fetchPathSuggestions(query: string, signal?: AbortSignal): Promise<PathSuggestion[]> {
+  const params = new URLSearchParams({
+    q: query,
+    limit: String(PATH_SUGGESTION_LIMIT),
+  });
+  const resp = await fetch(`${API_BASE}/api/workspace/path-suggestions?${params.toString()}`, { signal });
   if (!resp.ok) {
     throw new Error(`路径补全请求失败: ${resp.status}`);
   }
@@ -2133,6 +2146,7 @@ export function App() {
   const copyFeedbackTimerRef = useRef<number | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const pathSuggestionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const pathSuggestionCacheRef = useRef<Map<string, PathSuggestionCacheEntry>>(new Map());
 
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
@@ -2225,29 +2239,53 @@ export function App() {
       setIsLoadingPathSuggestions(false);
       return;
     }
-    let cancelled = false;
+    const query = activePathToken.query;
+    const cache = pathSuggestionCacheRef.current;
+    const cached = cache.get(query);
+    if (cached && Date.now() - cached.createdAt <= PATH_SUGGESTION_CACHE_TTL_MS) {
+      setPathMenuActiveIndex(0);
+      setPathSuggestions(cached.suggestions);
+      setIsLoadingPathSuggestions(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      setIsLoadingPathSuggestions(true);
+      void fetchPathSuggestions(query, controller.signal)
+        .then((items) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+          const nextCache = pathSuggestionCacheRef.current;
+          nextCache.delete(query);
+          nextCache.set(query, { createdAt: Date.now(), suggestions: items });
+          while (nextCache.size > PATH_SUGGESTION_CACHE_LIMIT) {
+            const oldestKey = nextCache.keys().next().value;
+            if (!oldestKey) {
+              break;
+            }
+            nextCache.delete(oldestKey);
+          }
+          setPathSuggestions(items);
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+            return;
+          }
+          setPathSuggestions([]);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setIsLoadingPathSuggestions(false);
+          }
+        });
+    }, PATH_SUGGESTION_DEBOUNCE_MS);
+
     setPathMenuActiveIndex(0);
-    setIsLoadingPathSuggestions(true);
-    void fetchPathSuggestions(activePathToken.query)
-      .then((items) => {
-        if (cancelled) {
-          return;
-        }
-        setPathSuggestions(items);
-      })
-      .catch(() => {
-        if (cancelled) {
-          return;
-        }
-        setPathSuggestions([]);
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setIsLoadingPathSuggestions(false);
-        }
-      });
     return () => {
-      cancelled = true;
+      window.clearTimeout(timeoutId);
+      controller.abort();
     };
   }, [activePathToken?.query]);
 

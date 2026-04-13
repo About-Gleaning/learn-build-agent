@@ -183,10 +183,13 @@ def create_app() -> FastAPI:
         return RuntimeOptionsVO(**build_runtime_options())
 
     @app.get("/api/workspace/path-suggestions", response_model=PathSuggestionsVO)
-    def workspace_path_suggestions(q: str = Query(default="", max_length=256)) -> PathSuggestionsVO:
+    def workspace_path_suggestions(
+        q: str = Query(default="", max_length=256),
+        limit: int = Query(default=50, ge=1, le=50),
+    ) -> PathSuggestionsVO:
         normalized_query = (q or "").strip()
         try:
-            suggestions = suggest_workspace_paths(normalized_query)
+            suggestions = suggest_workspace_paths(normalized_query, limit=limit)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return PathSuggestionsVO(

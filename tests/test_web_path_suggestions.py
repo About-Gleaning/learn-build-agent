@@ -98,6 +98,66 @@ def test_suggest_workspace_paths_should_return_empty_list_when_no_match(tmp_path
         reset_workspace()
 
 
+def test_suggest_workspace_paths_should_skip_large_generated_directories(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "match.py").write_text("print('x')", encoding="utf-8")
+    for dirname in ("target", "build", ".gradle", "node_modules"):
+        (tmp_path / dirname).mkdir()
+        (tmp_path / dirname / "match.py").write_text("generated", encoding="utf-8")
+
+    configure_workspace(tmp_path, launch_mode="web")
+    try:
+        results = suggest_workspace_paths("match")
+    finally:
+        reset_workspace()
+
+    assert [item.relative_path for item in results] == ["src/match.py"]
+
+
+def test_suggest_workspace_paths_should_clamp_limit_and_keep_tiebreaker(tmp_path: Path):
+    for index in range(60):
+        (tmp_path / f"file-{index:02d}.txt").write_text("x", encoding="utf-8")
+
+    configure_workspace(tmp_path, launch_mode="web")
+    try:
+        assert [item.relative_path for item in suggest_workspace_paths("file", limit=2)] == [
+            "file-00.txt",
+            "file-01.txt",
+        ]
+        results = suggest_workspace_paths("file", limit=100)
+    finally:
+        reset_workspace()
+
+    assert len(results) == 50
+    assert results[0].relative_path == "file-00.txt"
+    assert results[-1].relative_path == "file-49.txt"
+
+
+def test_suggest_workspace_paths_should_reuse_index_cache(monkeypatch, tmp_path: Path):
+    (tmp_path / "alpha.txt").write_text("a", encoding="utf-8")
+    call_count = 0
+
+    from agent.web import path_suggestions
+
+    original_iter_workspace_entries = path_suggestions._iter_workspace_entries
+
+    def wrapped_iter_workspace_entries(root: Path):
+        nonlocal call_count
+        call_count += 1
+        return original_iter_workspace_entries(root)
+
+    monkeypatch.setattr(path_suggestions, "_iter_workspace_entries", wrapped_iter_workspace_entries)
+
+    configure_workspace(tmp_path, launch_mode="web")
+    try:
+        suggest_workspace_paths("alpha")
+        suggest_workspace_paths("alpha")
+    finally:
+        reset_workspace()
+
+    assert call_count == 1
+
+
 def test_suggest_workspace_paths_should_ignore_recent_selection_for_sorting(tmp_path: Path):
     (tmp_path / "b").mkdir()
     (tmp_path / "b" / "file.ts").write_text("b", encoding="utf-8")

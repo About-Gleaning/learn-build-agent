@@ -257,7 +257,7 @@ def test_workspace_path_suggestions_should_return_matches(monkeypatch):
 
     monkeypatch.setattr(
         "agent.web.app.suggest_workspace_paths",
-        lambda query: [
+        lambda query, limit=50: [
             PathSuggestion(
                 path="/tmp/project/src/test_app.py",
                 name="test_app.py",
@@ -280,6 +280,23 @@ def test_workspace_path_suggestions_should_return_matches(monkeypatch):
     assert payload["query"] == "test"
     assert payload["suggestions"][0]["relative_path"] == "src/test_app.py"
     assert payload["suggestions"][1]["kind"] == "directory"
+
+
+def test_workspace_path_suggestions_should_forward_limit(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+    captured: dict[str, int | str] = {}
+
+    def fake_suggest_workspace_paths(query: str, limit: int = 50):
+        captured.update(query=query, limit=limit)
+        return []
+
+    monkeypatch.setattr("agent.web.app.suggest_workspace_paths", fake_suggest_workspace_paths)
+
+    resp = client.get("/api/workspace/path-suggestions?q=test&limit=2")
+
+    assert resp.status_code == 200
+    assert captured == {"query": "test", "limit": 2}
 
 
 def test_workspace_path_suggestions_should_return_empty_list_for_empty_query():
