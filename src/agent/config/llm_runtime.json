@@ -12,6 +12,7 @@
       "models": {
         "ZHIPU/GLM-5": {},
         "kimi/kimi-k2.5": {},
+        "kimi-k2.5": {},
         "qwen3-max": {},
         "qwen3-coder-next": {},
         "qwen3.5-flash": {}

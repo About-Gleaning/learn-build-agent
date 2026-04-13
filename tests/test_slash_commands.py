@@ -48,12 +48,29 @@ def test_resolve_slash_command_should_render_analyze_prompt_with_multi_project_c
     assert resolved.command.name == "analyze"
     assert resolved.override_mode == "build"
     assert resolved.display_text == "/analyze"
+    assert "AGENTS-DEV.md" in resolved.user_input
+    assert "analyze_docs" not in resolved.user_input
+    assert "project-context.md" not in resolved.user_input
     assert "必须先判断当前工作区属于单项目、聚合多模块，还是多个项目并存的工作区" in resolved.user_input
     assert "必须识别每个项目/模块的角色" in resolved.user_input
     assert "`pom.xml`、`settings.gradle`、`build.gradle`" in resolved.user_input
     assert "必须在文档中明确写出依赖方向、公共能力推荐落点、变更影响面" in resolved.user_input
     assert "必须在“风险点与待确认项”中明确说明未确认的模块、依赖方向或运行入口" in resolved.user_input
     assert "还必须单独覆盖“项目/模块结构与依赖关系”" in resolved.user_input
+
+
+def test_resolve_slash_command_should_stop_analyze_when_dev_agents_exists(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    (tmp_path / "AGENTS-DEV.md").write_text("# 已存在\n", encoding="utf-8")
+    configure_workspace(tmp_path)
+
+    resolved = resolve_slash_command("/analyze")
+
+    assert resolved is not None
+    assert resolved.command.name == "analyze"
+    assert resolved.override_mode is None
+    assert resolved.display_text == "/analyze"
+    assert resolved.immediate_output == "当前工作区已存在 `AGENTS-DEV.md`，`/analyze` 仅用于初始化第一版开发主手册，已停止生成。"
 
 
 def test_resolve_slash_command_should_raise_when_registered_handler_missing(monkeypatch, tmp_path):

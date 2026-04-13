@@ -259,8 +259,9 @@ def test_run_session_should_resolve_analyze_slash_command_before_llm(monkeypatch
 
     assert get_message_text(result) == "已生成说明书"
     assert captured["agent"] == "build"
-    assert "project-context.md" in captured["user_text"]
-    assert "analyze_docs" in captured["user_text"]
+    assert "AGENTS-DEV.md" in captured["user_text"]
+    assert "project-context.md" not in captured["user_text"]
+    assert "analyze_docs" not in captured["user_text"]
     assert "README.md" in captured["user_text"]
     assert "AGENTS.md" in captured["user_text"]
     assert "后续开发主手册" in captured["user_text"]
@@ -285,6 +286,26 @@ def test_run_session_should_stop_analyze_when_agents_missing(monkeypatch, tmp_pa
     assert "请先执行 `/init`" in get_message_text(result)
     assert called["chat"] is False
     history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze_missing")
+    assert _last_user_display_text(history_messages) == "/analyze"
+
+
+def test_run_session_should_stop_analyze_when_dev_agents_exists(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("# 已存在\n", encoding="utf-8")
+    (tmp_path / "AGENTS-DEV.md").write_text("# 已存在\n", encoding="utf-8")
+    called = {"chat": False}
+
+    def fake_chat(*args, **kwargs):
+        called["chat"] = True
+        raise AssertionError("已有 AGENTS-DEV.md 时不应继续调用 LLM")
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/analyze", session_id="s_analyze_dev_exists", mode="plan")
+
+    assert "已存在 `AGENTS-DEV.md`" in get_message_text(result)
+    assert called["chat"] is False
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze_dev_exists")
     assert _last_user_display_text(history_messages) == "/analyze"
 
 
