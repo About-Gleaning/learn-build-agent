@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from ..runtime.workspace import get_workspace
 
 MAX_PATH_SUGGESTIONS = 50
-INDEX_TTL_SECONDS = 5.0
+INDEX_TTL_SECONDS = 30.0
 PATH_MRU_LIMIT = 200
 SKIP_DIR_NAMES = {
     ".git",
@@ -19,6 +20,16 @@ SKIP_DIR_NAMES = {
     ".vscode",
     "__pycache__",
     "node_modules",
+    "target",
+    "build",
+    ".gradle",
+    "out",
+    "dist",
+    ".venv",
+    "venv",
+    ".tox",
+    ".ruff_cache",
+    "coverage",
     ".mypy_cache",
     ".pytest_cache",
     ".runtime",
@@ -61,11 +72,11 @@ def _iter_workspace_entries(root: Path) -> list[_IndexedPath]:
         current = stack.pop()
         try:
             with os.scandir(current) as iterator:
-                entries = sorted(iterator, key=lambda item: (not item.is_dir(follow_symlinks=False), item.name.lower()))
+                entries = list(iterator)
         except OSError:
             continue
 
-        for entry in reversed(entries):
+        for entry in entries:
             try:
                 entry_path = Path(entry.path).resolve()
             except OSError:
@@ -74,6 +85,8 @@ def _iter_workspace_entries(root: Path) -> list[_IndexedPath]:
                 continue
             relative_path = entry_path.relative_to(root).as_posix()
             kind = "directory" if entry.is_dir(follow_symlinks=False) else "file"
+            if kind == "directory" and entry.name.lower() in SKIP_DIR_NAMES:
+                continue
             indexed.append(
                 _IndexedPath(
                     path=entry_path,
@@ -85,7 +98,7 @@ def _iter_workspace_entries(root: Path) -> list[_IndexedPath]:
                     depth=len(Path(relative_path).parts),
                 )
             )
-            if kind == "directory" and entry.name not in SKIP_DIR_NAMES:
+            if kind == "directory":
                 stack.append(entry_path)
     return indexed
 
@@ -231,13 +244,14 @@ def suggest_workspace_paths(query: str, *, limit: int = MAX_PATH_SUGGESTIONS) ->
     if not normalized_query:
         return []
     query_lower = normalized_query.lower()
+    safe_limit = min(max(limit, 1), MAX_PATH_SUGGESTIONS)
     matches: list[tuple[_IndexedPath, _MatchResult]] = []
     for item in _load_workspace_index():
         match_result = _build_match_result(item, query_lower)
         if match_result is None:
             continue
         matches.append((item, match_result))
-    matches.sort(key=lambda entry: (-entry[1].score, entry[0].relative_path))
+    best_matches = heapq.nsmallest(safe_limit, matches, key=lambda entry: (-entry[1].score, entry[0].relative_path))
     return [
         PathSuggestion(
             path=str(item.path),
@@ -245,5 +259,5 @@ def suggest_workspace_paths(query: str, *, limit: int = MAX_PATH_SUGGESTIONS) ->
             relative_path=item.relative_path,
             kind=item.kind,
         )
-        for item, _ in matches[: max(limit, 1)]
+        for item, _ in best_matches
     ]
