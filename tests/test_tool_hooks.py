@@ -12,6 +12,7 @@ from agent.runtime.tool_executor import (
     ToolLoggingHook,
     ToolExecutor,
     clear_global_tool_hooks,
+    get_global_tool_hooks,
     register_global_tool_hook,
 )
 from agent.runtime.workspace import configure_workspace, get_workspace
@@ -27,8 +28,8 @@ def reset_global_tool_hooks():
 
 
 class RecorderToolHook(ToolHook):
-    def __init__(self, name: str, records: list[str], fail_fast: bool = False) -> None:
-        super().__init__(name=name, fail_fast=fail_fast)
+    def __init__(self, name: str, records: list[str], fail_fast: bool = False, order: int = 1000) -> None:
+        super().__init__(name=name, fail_fast=fail_fast, order=order)
         self.records = records
 
     def before_call(self, ctx):
@@ -93,6 +94,27 @@ def test_tool_hooks_order_global_then_local(monkeypatch):
 
     assert get_message_text(result) == "done"
     assert records == ["g1.before", "l1.before", "g1.after", "l1.after"]
+
+
+def test_tool_hooks_should_sort_by_order():
+    records: list[str] = []
+    clear_global_tool_hooks()
+    register_global_tool_hook(RecorderToolHook("late", records, order=200))
+    register_global_tool_hook(RecorderToolHook("early", records, order=100))
+
+    executor = ToolExecutor({"demo_tool": lambda: "ok"})
+    result = executor.execute(
+        "demo_tool",
+        "{}",
+        session_id="s_tool_order",
+        tool_call_id="call_order",
+        round_no=1,
+        hooks=get_global_tool_hooks(),
+        task_available=False,
+    )
+
+    assert result["output"] == "ok"
+    assert records == ["early.before", "late.before", "early.after", "late.after"]
 
 
 def test_tool_hook_fail_open_should_continue(monkeypatch):

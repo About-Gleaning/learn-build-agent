@@ -2,10 +2,10 @@
 
 ## 文档优先级
 
-- 开发实现以 `analyze_docs/project-context.md` 为唯一开发主手册。
+- 开发实现以 `AGENTS-DEV.md` 为唯一开发主手册。
 - `README.md` 只负责仓库入口、启动说明与文档导航。
 - `docs/` 下文档是给人类理解项目的学习材料，不作为开发规范主来源。
-- 若 `AGENTS.md` 与 `analyze_docs/project-context.md` 不一致，以 `analyze_docs/project-context.md` 为准，并同步更新本文件。
+- 若 `AGENTS.md` 与 `AGENTS-DEV.md` 不一致，以 `AGENTS-DEV.md` 为准，并同步更新本文件。
 
 ## 必须遵守的高优先级规则
 
@@ -16,6 +16,9 @@
 - 查询型 `lsp` 工具统一走 `src/agent/tools/lsp_tool.py` -> `src/agent/lsp/client.py` -> `src/agent/lsp/manager.py` 链路。
 - Web 层消息序列化统一收敛在 `src/agent/web/serializers.py`，不要在 `src/agent/web/app.py` 手工散落映射逻辑。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止继续散落使用 `Path.cwd()` 推导边界。
+- Session Memory 统一通过 `src/agent/runtime/session_memory.py` 的 `SessionMemoryStore` 抽象读写，默认按工作区落盘到运行态 `workspaces/sessions/`。
+- assistant 级 `process_items`、`display_parts`、`response_meta` 回填与落库统一走 `src/agent/runtime/loop_hooks.py`；`SessionHook` 只负责整次 session 生命周期观察，不承担 loop 内归属判断。
+- LLM 调用观测归 `LLMHook`，工具执行观测归 `ToolHook`；不要把 provider 调用细节或工具审计逻辑重新塞回 `src/agent/runtime/session.py`。
 - `write_file` 仅用于创建新文件，禁止覆盖已有文件；已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。
 - 所有路径输入必须经过工作区边界校验；禁止硬编码密钥、Token、PAT 或其他凭证。
 - 新增或调整工具时，至少覆盖 `tests/test_handlers.py` 与 `tests/test_run_session.py`；涉及 Web API 时补充 `tests/test_web_api.py`。
@@ -53,11 +56,11 @@
 - Git 提交信息统一使用中文，尽量直接描述行为变化，参考现有风格，如：`优化write工具在长文本内容情况下json序列化失败的问题`。
 - 单次提交应尽量聚焦一个主题，避免把运行时重构、测试补充、文档改动混成无关大包。
 - 发起 PR 时，说明变更目的、核心实现点、测试结果与潜在影响范围；若涉及 Web 行为，附上必要的界面或交互说明。
-- 只要出现重大代码变更、开发规范调整或核心运行时行为变化，PR 内必须同步更新 `analyze_docs/project-context.md`；必要时同步精简更新 `AGENTS.md`。
+- 只要出现重大代码变更、开发规范调整或核心运行时行为变化，PR 内必须同步更新 `AGENTS-DEV.md`；必要时同步精简更新 `AGENTS.md`。
 
 ## 文档维护
 
-- `/analyze` 只用于初始化第一版 `analyze_docs/project-context.md`；若文件已存在则直接停止，不覆盖人工维护结果。
-- `/analyze` 初始化 `analyze_docs/project-context.md` 时，必须同步检查并补充 `AGENTS.md` 中的文档导航，明确列出该文档路径、用途与优先级，确保后续模型知道应优先阅读它。
+- `/analyze` 只用于初始化第一版 `AGENTS-DEV.md`；若文件已存在则直接停止，不覆盖人工维护结果。
+- `/analyze` 初始化 `AGENTS-DEV.md` 时，必须同步检查并补充 `AGENTS.md` 中的文档导航，明确列出该文档路径、用途与优先级，确保后续模型知道应优先阅读它。
 - `/analyze` 遇到多项目或多模块工作区时，必须先识别项目/模块边界、依赖方向、启动入口与公共模块职责，再输出开发手册；禁止把共享模块误写成可独立运行服务。
-- 发生重大代码变更、开发规范调整、核心运行时行为变更后，必须同步更新 `analyze_docs/project-context.md`；必要时再同步精简更新本文件。
+- 发生重大代码变更、开发规范调整、核心运行时行为变更后，必须同步更新 `AGENTS-DEV.md`；必要时再同步精简更新本文件。

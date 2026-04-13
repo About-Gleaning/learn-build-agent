@@ -778,3 +778,101 @@ def test_clear_session_should_also_clear_stop_state():
 
     assert resp.status_code == 200
     assert session_runtime.is_session_stop_requested("s_clear_stop") is False
+
+
+def test_session_messages_should_keep_display_parts_on_original_assistant(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_web_history_projection")
+    user = create_message("user", "s_web_history_projection", status="completed")
+    append_text_part(user, "测试加载历史归属")
+    assistant_1 = create_message("assistant", "s_web_history_projection", status="completed")
+    append_text_part(assistant_1, "先执行工具")
+    assistant_1["info"]["display_parts"] = [
+        {
+            "id": "disp_call_1",
+            "kind": "tool_call",
+            "title": "build 调用工具: glob",
+            "detail": '{"pattern":"*.py"}',
+            "text": "",
+            "created_at": "t1",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "glob",
+            "tool_call_id": "call_web_1",
+        },
+        {
+            "id": "disp_result_1",
+            "kind": "tool_result",
+            "title": "build 工具结果: glob",
+            "detail": "completed []",
+            "text": "",
+            "created_at": "t2",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "glob",
+            "tool_call_id": "call_web_1",
+        },
+        {
+            "id": "disp_text_1",
+            "kind": "assistant_text",
+            "title": "build 回复",
+            "detail": "",
+            "text": "先执行工具",
+            "created_at": "t3",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "",
+            "tool_call_id": "",
+        },
+    ]
+    assistant_2 = create_message("assistant", "s_web_history_projection", status="completed")
+    append_text_part(assistant_2, "最终总结")
+    assistant_2["info"]["display_parts"] = [
+        {
+            "id": "disp_text_2",
+            "kind": "assistant_text",
+            "title": "build 回复",
+            "detail": "",
+            "text": "最终总结",
+            "created_at": "t4",
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 2,
+            "status": "completed",
+            "delegation_id": "",
+            "parent_tool_call_id": "",
+            "tool_name": "",
+            "tool_call_id": "",
+        }
+    ]
+    session_runtime.SESSION_MEMORY_STORE.save("s_web_history_projection", [user, assistant_1, assistant_2])
+
+    app = create_app()
+    client = TestClient(app)
+    resp = client.get("/api/sessions/s_web_history_projection/messages?limit=20")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assistants = [message for message in payload["messages"] if message["role"] == "assistant"]
+    assert len(assistants) == 2
+    first_display_kinds = [item["kind"] for item in assistants[0]["display_parts"]]
+    second_display_kinds = [item["kind"] for item in assistants[1]["display_parts"]]
+    assert "tool_call" in first_display_kinds
+    assert "tool_result" in first_display_kinds
+    assert second_display_kinds == ["assistant_text"]

@@ -6,7 +6,7 @@ from typing import Any, Callable, TypedDict
 
 from ..config.logging_setup import build_log_extra, sanitize_log_text
 from ..core.context import set_session_id
-from ..core.hooks import HookDispatcher
+from ..core.hooks import HookDispatcher, HookFilter, hook_matches_filter, ordered_hooks
 from .compaction import apply_tool_output_truncation
 
 logger = logging.getLogger(__name__)
@@ -135,9 +135,30 @@ ToolOutputProcessor = Callable[[ToolResult, ToolHookContext, ToolExecutionOption
 class ToolHook:
     """工具调用 Hook 基类，支持调用前后与异常阶段扩展。"""
 
-    def __init__(self, name: str, fail_fast: bool = False) -> None:
+    def __init__(
+        self,
+        name: str,
+        fail_fast: bool = False,
+        *,
+        order: int = 1000,
+        enabled: bool = True,
+        filters: HookFilter | None = None,
+    ) -> None:
         self.name = name
         self.fail_fast = fail_fast
+        self.order = order
+        self.enabled = enabled
+        self.filters = filters or HookFilter()
+
+    def should_run(self, ctx: ToolHookContext) -> bool:
+        if not self.enabled:
+            return False
+        unified_ctx = {
+            "agent": {"name": ctx.get("agent", "")},
+            "runtime": {"model": ctx.get("model", "")},
+            "data": {"tool_name": ctx.get("tool_name", "")},
+        }
+        return hook_matches_filter(self.filters, unified_ctx)
 
     def before_call(self, ctx: ToolHookContext) -> None:
         """在工具调用前执行。"""
@@ -152,8 +173,8 @@ class ToolHook:
 class ToolLoggingHook(ToolHook):
     """默认工具日志 Hook，记录调用前后与异常关键信息。"""
 
-    def __init__(self, fail_fast: bool = False) -> None:
-        super().__init__(name="tool_logging", fail_fast=fail_fast)
+    def __init__(self, fail_fast: bool = False, *, order: int = 1000) -> None:
+        super().__init__(name="tool_logging", fail_fast=fail_fast, order=order)
 
     def before_call(self, ctx: ToolHookContext) -> None:
         logger.info(
@@ -315,6 +336,8 @@ def invoke_tool_hook(
     error: Exception | None = None,
     normalized_error: ToolNormalizedError | None = None,
 ) -> None:
+    if not hook.should_run(ctx):
+        return
     _DISPATCHER.dispatch(
         hook,
         stage,
@@ -410,7 +433,7 @@ class ToolExecutor:
         error_code: str = "execution_error",
     ) -> None:
         normalized = normalize_tool_error(error, code=error_code) if error is not None else None
-        for hook in hooks:
+        for hook in ordered_hooks(hooks):
             invoke_tool_hook(
                 hook,
                 stage,

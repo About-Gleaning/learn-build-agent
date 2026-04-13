@@ -33,6 +33,7 @@ from agent.runtime.session import (
     run_session_stream_events,
 )
 from agent.runtime.session_memory import InMemorySessionMemoryStore, SessionMemoryStore
+from agent.runtime.delegation_hooks import DelegationHook, DelegationHookContext
 from agent.core.message import (
     append_reasoning_part,
     append_text_part,
@@ -101,6 +102,35 @@ def _last_tool_result_metadata(messages):
         if isinstance(metadata, dict):
             return metadata
     return {}
+
+
+class RecorderDelegationHook(DelegationHook):
+    def __init__(self, records: list[str]) -> None:
+        super().__init__("trace_delegation")
+        self.records = records
+
+    def on_delegation_requested(self, ctx: DelegationHookContext) -> None:
+        self.records.append(f"requested:{ctx.get('agent')}:{ctx.get('parent_tool_call_id')}")
+
+    def on_delegation_started(self, ctx: DelegationHookContext) -> None:
+        self.records.append(f"started:{ctx.get('agent')}:{ctx.get('status')}")
+
+    def on_delegation_completed(self, ctx: DelegationHookContext) -> None:
+        self.records.append(f"completed:{ctx.get('agent')}:{ctx.get('output_preview')}")
+
+    def on_delegation_failed(
+        self,
+        ctx: DelegationHookContext,
+        error: Exception,
+        normalized_error: dict[str, str],
+    ) -> None:
+        self.records.append(f"failed:{ctx.get('agent')}:{normalized_error.get('details')}")
+
+    def on_delegation_interrupted(self, ctx: DelegationHookContext) -> None:
+        self.records.append(f"interrupted:{ctx.get('agent')}:{ctx.get('status')}")
+
+    def on_delegation_finally(self, ctx: DelegationHookContext) -> None:
+        self.records.append(f"finally:{ctx.get('agent')}:{ctx.get('status')}")
 
 
 def _tool_names(tools):
@@ -229,8 +259,9 @@ def test_run_session_should_resolve_analyze_slash_command_before_llm(monkeypatch
 
     assert get_message_text(result) == "已生成说明书"
     assert captured["agent"] == "build"
-    assert "project-context.md" in captured["user_text"]
-    assert "analyze_docs" in captured["user_text"]
+    assert "AGENTS-DEV.md" in captured["user_text"]
+    assert "project-context.md" not in captured["user_text"]
+    assert "analyze_docs" not in captured["user_text"]
     assert "README.md" in captured["user_text"]
     assert "AGENTS.md" in captured["user_text"]
     assert "后续开发主手册" in captured["user_text"]
@@ -255,6 +286,26 @@ def test_run_session_should_stop_analyze_when_agents_missing(monkeypatch, tmp_pa
     assert "请先执行 `/init`" in get_message_text(result)
     assert called["chat"] is False
     history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze_missing")
+    assert _last_user_display_text(history_messages) == "/analyze"
+
+
+def test_run_session_should_stop_analyze_when_dev_agents_exists(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("# 已存在\n", encoding="utf-8")
+    (tmp_path / "AGENTS-DEV.md").write_text("# 已存在\n", encoding="utf-8")
+    called = {"chat": False}
+
+    def fake_chat(*args, **kwargs):
+        called["chat"] = True
+        raise AssertionError("已有 AGENTS-DEV.md 时不应继续调用 LLM")
+
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/analyze", session_id="s_analyze_dev_exists", mode="plan")
+
+    assert "已存在 `AGENTS-DEV.md`" in get_message_text(result)
+    assert called["chat"] is False
+    history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze_dev_exists")
     assert _last_user_display_text(history_messages) == "/analyze"
 
 
@@ -786,7 +837,14 @@ def test_task_subagent_question_should_interrupt_top_level_and_preserve_resume_c
 
     monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream_chat)
 
-    events = list(run_session_stream_events("主任务", session_id="s_task_question"))
+    records: list[str] = []
+    events = list(
+        run_session_stream_events(
+            "主任务",
+            session_id="s_task_question",
+            delegation_hooks=[RecorderDelegationHook(records)],
+        )
+    )
 
     done_event = next(event for event in events if event["type"] == "done")
     assert done_event["finish_reason"] == "question_required"
@@ -797,6 +855,12 @@ def test_task_subagent_question_should_interrupt_top_level_and_preserve_resume_c
     assert pending["agent_kind"] == "subagent"
     assert pending["resume_runtime_agent"] == "explore"
     assert pending["delegation_id"] == done_event["delegation_id"]
+    assert records == [
+        "requested:explore:call_task_question",
+        "started:explore:running",
+        "interrupted:explore:question_required",
+        "finally:explore:question_required",
+    ]
 
 
 def test_subagent_question_answer_should_resume_with_subagent_runtime(monkeypatch):
@@ -1531,10 +1595,21 @@ def test_run_session_should_answer_after_task_result(monkeypatch, caplog):
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     monkeypatch.setattr(session_module, "subagent_loop", lambda *args, **kwargs: "项目中没有 hello.py")
 
+    records: list[str] = []
     with caplog.at_level("INFO"):
-        result = run_session("请帮我查 hello.py", session_id="s_task_followup")
+        result = run_session(
+            "请帮我查 hello.py",
+            session_id="s_task_followup",
+            delegation_hooks=[RecorderDelegationHook(records)],
+        )
 
     assert get_message_text(result) == "最终结论：项目中没有 hello.py"
+    assert records == [
+        "requested:explore:call_task_answer",
+        "started:explore:running",
+        "completed:explore:项目中没有 hello.py",
+        "finally:explore:completed",
+    ]
 
 
 def test_run_session_should_return_error_when_followup_llm_times_out_after_task(monkeypatch):
@@ -1566,6 +1641,41 @@ def test_run_session_should_return_error_when_followup_llm_times_out_after_task(
 
     assert result["info"]["status"] == "failed"
     assert "request timeout" in get_message_text(result)
+
+
+def test_delegation_hook_should_run_failed_and_finally_when_task_raises(monkeypatch):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id="call_task_boom",
+            name="task",
+            arguments='{"prompt":"检查异常","agent":"explore"}',
+        )
+        return assistant
+
+    def broken_subagent(*args, **kwargs):
+        raise RuntimeError("subagent boom")
+
+    records: list[str] = []
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "subagent_loop", broken_subagent)
+
+    with pytest.raises(RuntimeError, match="subagent boom"):
+        run_session(
+            "触发异常",
+            session_id="s_task_delegation_failed",
+            delegation_hooks=[RecorderDelegationHook(records)],
+        )
+
+    assert records == [
+        "requested:explore:call_task_boom",
+        "started:explore:running",
+        "failed:explore:RuntimeError",
+        "finally:explore:failed",
+    ]
+
 
 def test_task_tool_description_should_include_registered_subagents():
     task_tool = build_task_tool()
@@ -2544,6 +2654,9 @@ def test_file_session_memory_store_should_share_session_file_across_workspaces(t
 
 
 def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_stream_1")
+
     def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
         yield {"type": "text_delta", "delta": "流式"}
@@ -2566,6 +2679,18 @@ def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
     done_event = next(event for event in events if event["type"] == "done" and event["agent_kind"] == "primary")
     assert done_event["display_parts"][0]["kind"] == "assistant_text"
     assert done_event["display_parts"][0]["text"] == "流式回答"
+
+    history = session_module.SESSION_MEMORY_STORE.load("s_stream_1")
+    assistant = next(message for message in history if message["info"].get("role") == "assistant")
+    round_start_event = next(event for event in events if event["type"] == "round_start" and event["round"] == 1)
+    persisted_round_start = next(
+        item for item in assistant["info"].get("process_items", []) if item["kind"] == "round_start"
+    )
+    process_kinds = [item["kind"] for item in assistant["info"].get("process_items", [])]
+    assert persisted_round_start["id"] == round_start_event["event_id"]
+    assert persisted_round_start["created_at"] == round_start_event["timestamp"]
+    assert "round_start" in process_kinds
+    assert "round_end" in process_kinds
 
 
 def test_run_session_stream_events_should_emit_runtime_alert_without_entering_done_payload(monkeypatch):
@@ -2653,6 +2778,101 @@ def test_run_session_stream_events_should_emit_tool_events(monkeypatch):
     assert all("depth" in event for event in events)
 
 
+def test_run_session_stream_events_should_persist_display_parts_per_assistant(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_stream_projection_split")
+    call_state = {"count": 0}
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_text_part(assistant, "先看目录")
+            append_tool_call_part(assistant, tool_call_id="call_split_1", name="glob", arguments='{"pattern":"*.py"}')
+            return assistant
+        append_text_part(assistant, "最终回答")
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+    monkeypatch.setattr(
+        session_module.ToolExecutor,
+        "execute",
+        lambda self, name, arguments, **kwargs: {"output": "[]", "metadata": {"status": "completed"}},
+    )
+
+    events = list(run_session_stream_events("测试按 assistant 落库", session_id="s_stream_projection_split"))
+    assert any(event["type"] == "done" for event in events)
+
+    history = session_module.SESSION_MEMORY_STORE.load("s_stream_projection_split")
+    assistants = [message for message in history if message["info"].get("role") == "assistant"]
+
+    assert len(assistants) == 2
+    first_display_kinds = [item["kind"] for item in assistants[0]["info"].get("display_parts", [])]
+    second_display_kinds = [item["kind"] for item in assistants[1]["info"].get("display_parts", [])]
+    first_process_kinds = [item["kind"] for item in assistants[0]["info"].get("process_items", [])]
+    second_process_kinds = [item["kind"] for item in assistants[1]["info"].get("process_items", [])]
+    assert "tool_call" in first_display_kinds
+    assert "tool_result" in first_display_kinds
+    assert "assistant_text" in first_display_kinds
+    assert second_display_kinds == ["assistant_text"]
+    assert "round_end" in first_process_kinds
+    assert "round_end" in second_process_kinds
+    assert "round_end" not in first_display_kinds
+    assert "round_end" not in second_display_kinds
+    assert assistants[0]["info"]["response_meta"]["tool_call_count"] == 1
+    assert assistants[1]["info"]["response_meta"]["tool_call_count"] == 0
+
+
+def test_run_session_stream_events_should_not_copy_previous_projection_into_max_round_message(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_stream_projection_limit")
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_text_part(assistant, "先看目录")
+        append_tool_call_part(assistant, tool_call_id="call_limit_1", name="glob", arguments='{"pattern":"*.py"}')
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+    monkeypatch.setattr(
+        session_module.ToolExecutor,
+        "execute",
+        lambda self, name, arguments, **kwargs: {"output": "[]", "metadata": {"status": "completed"}},
+    )
+
+    events = list(
+        run_session_stream_events(
+            "测试超限投影归属",
+            session_id="s_stream_projection_limit",
+            max_rounds=1,
+        )
+    )
+    done_event = next(event for event in events if event["type"] == "done")
+
+    history = session_module.SESSION_MEMORY_STORE.load("s_stream_projection_limit")
+    assistants = [message for message in history if message["info"].get("role") == "assistant"]
+    limit_assistant = assistants[-1]
+    limit_process_kinds = [item["kind"] for item in limit_assistant["info"].get("process_items", [])]
+    limit_display_kinds = [item["kind"] for item in limit_assistant["info"].get("display_parts", [])]
+
+    assert done_event["finish_reason"] == "error"
+    assert limit_assistant["info"]["error"]["code"] == "loop_round_limit_exceeded"
+    assert "round_end" in limit_process_kinds
+    assert "tool_call" not in limit_process_kinds
+    assert "tool_result" not in limit_process_kinds
+    assert "assistant_text" not in limit_display_kinds
+    assert "tool_call" not in limit_display_kinds
+    assert "tool_result" not in limit_display_kinds
+    assert limit_assistant["info"]["response_meta"]["tool_call_count"] == 0
+    assert done_event["response_meta"]["tool_call_count"] == 0
+
+
 def test_run_session_stream_events_should_include_subagent_timeline(monkeypatch):
     call_state = {"count": 0}
 
@@ -2722,12 +2942,17 @@ def test_run_session_stream_done_should_include_response_summary(monkeypatch):
 
     events = list(run_session_stream_events("测试 summary", session_id="s_stream_summary"))
     done_event = next(event for event in events if event["type"] == "done" and event["agent_kind"] == "primary")
+    history = session_module.SESSION_MEMORY_STORE.load("s_stream_summary")
+    assistants = [message for message in history if message["info"].get("role") == "assistant"]
+    first_meta = assistants[0]["info"]["response_meta"]
 
-    assert done_event["response_meta"]["tool_call_count"] == 1
-    assert done_event["response_meta"]["round_count"] >= 2
-    assert "todo_read" in done_event["response_meta"]["tool_names"]
-    assert any(item["kind"] == "tool_call" for item in done_event["process_items"])
-    assert [item["kind"] for item in done_event["display_parts"]] == ["tool_call", "tool_result", "assistant_text"]
+    assert first_meta["tool_call_count"] == 1
+    assert "todo_read" in first_meta["tool_names"]
+    assert done_event["response_meta"]["tool_call_count"] == 0
+    assert done_event["response_meta"]["round_count"] == 1
+    assert done_event["response_meta"]["tool_names"] == []
+    assert all(item["kind"] != "tool_call" for item in done_event["process_items"])
+    assert [item["kind"] for item in done_event["display_parts"]] == ["assistant_text"]
 
 
 def test_run_session_stream_done_should_keep_text_and_tool_order(monkeypatch):
@@ -2751,9 +2976,15 @@ def test_run_session_stream_done_should_keep_text_and_tool_order(monkeypatch):
 
     events = list(run_session_stream_events("测试交错顺序", session_id="s_stream_interleave"))
     done_event = next(event for event in events if event["type"] == "done")
+    history = session_module.SESSION_MEMORY_STORE.load("s_stream_interleave")
+    assistants = [message for message in history if message["info"].get("role") == "assistant"]
+    first_display_parts = assistants[0]["info"].get("display_parts", [])
+    second_display_parts = assistants[1]["info"].get("display_parts", [])
 
-    assert [item["kind"] for item in done_event["display_parts"]] == ["assistant_text", "tool_call", "tool_result", "assistant_text"]
-    assert done_event["display_parts"][0]["text"] == "先说明"
+    assert [item["kind"] for item in first_display_parts] == ["assistant_text", "tool_call", "tool_result"]
+    assert [item["kind"] for item in second_display_parts] == ["assistant_text"]
+    assert [item["kind"] for item in done_event["display_parts"]] == ["assistant_text"]
+    assert first_display_parts[0]["text"] == "先说明"
     assert done_event["display_parts"][-1]["text"] == "再总结"
 
 

@@ -25,7 +25,7 @@ def _render_analyze_prompt(command: SlashCommandDefinition) -> str:
         raise ValueError(f"未找到 slash command prompt 模板: {template_path}")
 
     workspace = get_workspace()
-    target_path = (workspace.root / "analyze_docs" / "project-context.md").resolve()
+    target_path = (workspace.root / "AGENTS-DEV.md").resolve()
     template = template_path.read_text(encoding="utf-8").strip()
     return template.format(
         workspace_root=workspace.root,
@@ -33,7 +33,6 @@ def _render_analyze_prompt(command: SlashCommandDefinition) -> str:
         target_doc_path=target_path,
         readme_path=(workspace.root / "README.md").resolve(),
         agents_path=(workspace.root / "AGENTS.md").resolve(),
-        docs_dir=(workspace.root / "analyze_docs").resolve(),
     )
 
 
@@ -79,13 +78,13 @@ def _resolve_analyze_project(command: SlashCommandDefinition, user_input: str) -
             display_text="/analyze",
             immediate_output="当前工作区不存在 `AGENTS.md`，请先执行 `/init` 完成初始化后再使用 `/analyze`。",
         )
-    target_path = (workspace.root / "analyze_docs" / "project-context.md").resolve()
+    target_path = (workspace.root / "AGENTS-DEV.md").resolve()
     if target_path.exists():
         return ResolvedSlashCommand(
             command=command,
             user_input=user_input,
             display_text="/analyze",
-            immediate_output="当前工作区已存在 `analyze_docs/project-context.md`，`/analyze` 仅用于初始化第一版开发手册，已停止生成。",
+            immediate_output="当前工作区已存在 `AGENTS-DEV.md`，`/analyze` 仅用于初始化第一版开发主手册，已停止生成。",
         )
     return ResolvedSlashCommand(
         command=command,

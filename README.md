@@ -2,7 +2,7 @@
 
 一个面向本地工作区运行的 Python Agent 项目，提供 CLI、Web、工具调用、主/子 Agent 路由，以及面向代码任务的基础安全边界。
 
-`README.md` 的职责是仓库入口，不承载完整开发规范。日常开发、架构约束、扩展方式与测试要求，统一以 `analyze_docs/project-context.md` 为准。
+`README.md` 的职责是仓库入口，不承载完整开发规范。日常开发、架构约束、扩展方式与测试要求，统一以 `AGENTS-DEV.md` 为准。
 
 ## 核心能力
 
@@ -11,6 +11,7 @@
 - Slash Commands：当前内置 `/init`、`/analyze`。
 - 多模型支持：当前内置 `qwen`、`gpt`、`gemini`、`kimi` provider。
 - 工具能力：支持文件读写、代码编辑、LSP 查询、搜索、Shell、网页抓取、联网搜索、提问澄清、待办管理与子 Agent 委派。
+- 会话记忆：默认按工作区文件持久化保存历史，CLI/Web 重启后可按 session 继续读取上下文。
 - 安全边界：文件和命令默认受工作区限制，避免越界访问。
 
 ## 环境要求
@@ -98,11 +99,11 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 ## Slash Commands
 
 - `/init`：若工作区根目录不存在 `AGENTS.md`，则初始化一份面向运行中 Agent 的简明规范文件；若已存在则直接停止，不做覆写。
-- `/analyze`：若工作区不存在 `analyze_docs/project-context.md`，则生成第一版开发手册；若已存在则直接停止，后续由人工维护。
+- `/analyze`：若工作区不存在 `AGENTS-DEV.md`，则生成第一版开发手册；若已存在则直接停止，后续由人工维护。
 
 ## 文档导航
 
-- `analyze_docs/project-context.md`：开发主手册，包含架构红线、扩展规范、测试要求与运行时约束。
+- `AGENTS-DEV.md`：开发主手册，包含架构红线、Session Memory、Hook 扩展规范、测试要求与运行时约束。
 - `docs/architecture.md`：面向人类阅读的架构讲解文档。
 - `docs/extending.md`：面向人类阅读的扩展思路与实践指南。
 - `AGENTS.md`：会加载到 LLM 上下文中的最小高优先级规则。

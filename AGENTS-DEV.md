@@ -1,10 +1,11 @@
 # my-main-agent 开发主手册
 
-本文档是当前仓库的唯一开发主手册。日常开发、问题排查、架构调整、能力扩展与测试补充，统一以本文件为准。
+`AGENTS-DEV.md` 是当前仓库的唯一开发主手册。日常开发、问题排查、架构调整、能力扩展与测试补充，统一以本文件为准。
 
 文档分工如下：
 
 - `README.md`：仓库入口、安装启动、文档导航
+- `AGENTS-DEV.md`：开发主手册，记录开发规范、架构边界、扩展落点与测试要求
 - `AGENTS.md`：会进入 LLM 上下文的最小高优先级规则
 - `docs/architecture.md`：架构讲解材料
 - `docs/extending.md`：扩展学习材料
@@ -33,7 +34,11 @@
 ### 2.2 运行时核心
 
 - `src/agent/runtime/session.py`：会话主循环、模式切换、工具路由
+- `src/agent/runtime/session_memory.py`：Session Memory 存储抽象、文件落盘与历史规范化
 - `src/agent/runtime/session_hooks.py`：Session Hook 归口、排序与作用域过滤
+- `src/agent/runtime/loop_hooks.py`：Loop Hook 归口，负责 assistant 级展示投影与落库
+- `src/agent/runtime/delegation_hooks.py`：Subagent 委派生命周期 Hook 归口
+- `src/agent/runtime/plugin_hooks.py`：插件扩展 Hook 执行器，支持 `command` / `http` / `prompt` / `agent`
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要拼装
 - `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度
 - `src/agent/runtime/agents.py`：Agent 元信息唯一来源
@@ -122,7 +127,7 @@ LLM 返回 tool_calls
 当前内置命令：
 
 - `/init`：当工作区缺失 `AGENTS.md` 时初始化首版规范文件
-- `/analyze`：当工作区缺失 `analyze_docs/project-context.md` 时初始化首版开发手册；若文件已存在则直接停止。若工作区属于多项目或多模块结构，首版手册必须额外梳理模块边界、依赖方向、启动入口与公共模块职责，不能按单项目视角简化。
+- `/analyze`：当工作区缺失 `AGENTS-DEV.md` 时初始化首版开发手册；若文件已存在则直接停止。若工作区属于多项目或多模块结构，首版手册必须额外梳理模块边界、依赖方向、启动入口与公共模块职责，不能按单项目视角简化。
 
 ### 3.4 Web 链路
 
@@ -181,21 +186,32 @@ LSP 查询请求
 - 再尝试加载当前工作区 `AGENTS.md`
 - 任一文件不存在、为空或读取失败时都应自动忽略
 
-### 5.3 模式切换与问题恢复
+### 5.3 Session Memory
+
+- 会话历史统一通过 `src/agent/runtime/session_memory.py` 中的 `SessionMemoryStore` 抽象读写，业务流程不得绕过该抽象直接操作存储文件。
+- 默认实现是 `FileSessionMemoryStore`，按当前工作区落盘到 `get_workspace().sessions_dir`，也就是运行态目录中的 `workspaces/sessions/`。
+- `InMemorySessionMemoryStore` 仅适合测试或单进程临时替换；运行时默认不应退回纯内存存储，否则 CLI/Web 重启后无法恢复历史。
+- `project_runtime.json -> session_memory.trim_enabled/max_messages` 是历史裁剪配置来源；保存前必须统一复用存储层裁剪逻辑，避免不同入口保存出不一致历史。
+- 存储层只保存非 system 消息，并继续遵守 compaction checkpoint 裁剪；读取历史时必须经过 `normalize_history_prefix` 规范化，避免非法 tool 链片段直接作为会话起点。
+- 清理会话必须走 `clear_session_memory` 或 `SessionMemoryStore.clear`，同时清理与该 session 绑定的待确认模式切换和待答问题状态。
+
+### 5.4 模式切换与问题恢复
 
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
 - `SessionHook` 必须覆盖同步/流式会话的所有合法返回路径，包括 slash command 的即时完成与即时错误分支；Hook 上下文中的 `mode` 必须始终表示当前有效模式，而不是仅表示入口参数。
+- assistant 级 `process_items`、`display_parts` 与 `response_meta` 必须按单条 assistant 消息分别落库，禁止重新退回到整轮 turn 只汇总到最后一条 assistant 的旧语义。
+- 若需要把展示投影、摘要汇总、落库等非业务能力下沉，优先使用 `loop_hooks.py` 的 Loop Hook；`session_hooks.py` 只负责整次 session 生命周期，不承担 loop 内归属判定。
 
-### 5.4 Web 开发栈
+### 5.5 Web 开发栈
 
 - `my-agent web` 支持按工作区并行启动多套实例。
 - 端口冲突时必须自动分配空闲端口，并把实际前后端地址写入当前工作区对应状态文件。
 - `my-agent web prune` 必须扫描全部工作区状态，只清理 `degraded/stale` 异常残留，保留健康实例。
 - Web 前端必须校验后端返回的 `workspace_root` 是否与当前实例预期工作区一致；若不一致，必须阻断继续聊天。
 
-### 5.5 路径补全
+### 5.6 路径补全
 
 - Web 输入框 `@` 路径补全只允许搜索当前工作区。
 - 若 `@` 不在输入框首位，则前一字符必须是空格。
@@ -203,7 +219,7 @@ LSP 查询请求
 - 排序规则必须优先服务“快速命中文件”，采用匹配分数降序、相对路径升序的稳定排序。
 - 最近选择（MRU）只记录，不参与排序。
 
-### 5.6 LSP 约束
+### 5.7 LSP 约束
 
 - Java LSP 的 Maven profile 仅支持按当前文件路径和 Maven `pom.xml` 自动探测；探测不唯一时直接报错。
 - TypeScript LSP 默认覆盖 `.ts`、`.tsx`、`.js`、`.jsx`，统一通过 `typescript-language-server --stdio` 启动。
@@ -262,22 +278,52 @@ LSP 查询请求
 
 ### 7.4 新增 Hook
 
+Hook 分为两类：
+
+- 系统内置 Hook：日志、鉴权、human in the loop、落库、审计、指标等核心运行时能力，优先用 Python 代码实现。
+- 插件扩展 Hook：面向外部增强，统一通过 `src/agent/runtime/plugin_hooks.py` 执行，当前固定支持 `command`、`http`、`prompt`、`agent` 四类。
+
+通用约束：
+
+- 新增 Hook 应优先复用 `src/agent/core/hooks.py` 中的统一协议：`HookContext`、`HookResult`、`HookFilter`、`BaseHook`。
+- 统一上下文按 `event`、`identity`、`agent`、`runtime`、`data` 分组；新增字段优先放入对应分组，避免继续把所有入参平铺到 context 顶层。
+- Hook 可通过 `order` 控制顺序；相同 order 按注册顺序保持稳定。`before` 类阶段正序执行，收尾类阶段按需要倒序执行。
+- 插件 Hook 返回统一 `decision`：`allow`、`deny`、`modify`、`pause`、`fail`。具备阻断能力的 Hook 必须明确 `fail_fast` 策略。
+- 非主流程能力优先放入 Hook；主流程只允许增加必要的生命周期 dispatch 点，不应直接写日志、HTTP 回调、落库、脚本执行等副作用。
+
 Session Hook：
 
 - 继承 `src/agent/runtime/session_hooks.py` 中的 `SessionHook`
 - 按需实现 `before_session`、`after_session`、`on_error`
 - 多个 Hook 通过 `order` 控制执行顺序：`before` 正序，`after/error` 倒序
 - 若只希望作用于部分代理，可使用 `agent_kinds` / `agent_names` 做过滤
+- 适合 session/turn 级日志、指标、错误观察、subagent session 开始/结束观察；不负责 tool 明细或 message 投影归属判断
+
+Loop Hook：
+
+- 继承 `src/agent/runtime/loop_hooks.py` 中的 `LoopHook`
+- 按需实现 `before_loop`、`after_loop`、`on_loop_error`
+- 默认 `LoopPersistenceHook` 负责把单条 assistant 消息的 `process_items`、`display_parts` 与 `response_meta` 回填到消息并触发保存
+- 适合 assistant 级展示投影、摘要汇总、落库和归属观测；不要把这些职责塞回 `SessionHook`、`LLMHook` 或 Web serializer
 
 Tool Hook：
 
 - 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`
 - 按需实现 `before_call`、`after_call`、`on_error`
+- 支持 `order`、`enabled` 与 `HookFilter`；适合工具执行前后审计、权限控制、结果处理和指标统计
 
 LLM Hook：
 
 - 继承 `src/agent/adapters/llm/client.py` 中的 `LLMHook`
 - 在调用前后添加观测、审计或脱敏逻辑
+- 支持 `order`、`enabled` 与 `HookFilter`；适合 prompt/request 观测、响应记录和最终 assistant message 的旁路处理
+
+Delegation Hook：
+
+- 继承 `src/agent/runtime/delegation_hooks.py` 中的 `DelegationHook`
+- 用于 `task` / subagent 委派生命周期，按需实现 `on_delegation_requested`、`on_delegation_started`、`on_delegation_completed`、`on_delegation_failed`、`on_delegation_interrupted`、`on_delegation_finally`
+- 不要把 subagent 委派生命周期硬塞进普通 Tool Hook；`task` 虽以工具形式暴露，但本质上会启动子 agent session
+- 真实 `task` 委派路径由 session 统一分发 Delegation Hook；非 `fail_fast` Hook 异常只记录告警并继续，`fail_fast=True` 才中断主流程
 
 ### 7.5 调整 Web 输出
 
