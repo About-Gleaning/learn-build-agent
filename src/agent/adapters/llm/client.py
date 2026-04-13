@@ -8,7 +8,7 @@ from openai import OpenAI
 
 from ...config.logging_setup import build_log_extra, sanitize_log_text
 from ...config.settings import ResolvedLLMConfig, resolve_llm_config
-from ...core.hooks import HookDispatcher
+from ...core.hooks import HookDispatcher, HookFilter, hook_matches_filter, ordered_hooks
 from ...core.message import (
     Message,
     create_error_message,
@@ -45,9 +45,33 @@ class HookContext(TypedDict, total=False):
 class LLMHook:
     """LLM 调用 Hook 基类，支持调用前后与错误阶段扩展。"""
 
-    def __init__(self, name: str, fail_fast: bool = False) -> None:
+    def __init__(
+        self,
+        name: str,
+        fail_fast: bool = False,
+        *,
+        order: int = 1000,
+        enabled: bool = True,
+        filters: HookFilter | None = None,
+    ) -> None:
         self.name = name
         self.fail_fast = fail_fast
+        self.order = order
+        self.enabled = enabled
+        self.filters = filters or HookFilter()
+
+    def should_run(self, ctx: HookContext) -> bool:
+        if not self.enabled:
+            return False
+        unified_ctx = {
+            "agent": {"name": ctx.get("agent", "")},
+            "runtime": {
+                "provider": ctx.get("provider", ""),
+                "model": ctx.get("model", ""),
+            },
+            "data": {},
+        }
+        return hook_matches_filter(self.filters, unified_ctx)
 
     def before_call(self, ctx: HookContext) -> None:
         """在调用 provider 之前执行。"""
@@ -62,8 +86,8 @@ class LLMHook:
 class LoggingHook(LLMHook):
     """默认日志 Hook，记录调用前后与异常关键信息。"""
 
-    def __init__(self, fail_fast: bool = False) -> None:
-        super().__init__(name="logging", fail_fast=fail_fast)
+    def __init__(self, fail_fast: bool = False, *, order: int = 1000) -> None:
+        super().__init__(name="logging", fail_fast=fail_fast, order=order)
 
     def before_call(self, ctx: HookContext) -> None:
         log_extra = build_log_extra(agent=ctx.get("agent", ""), model=ctx.get("model", ""))
@@ -200,6 +224,8 @@ def _invoke_hook(
     error: Exception | None = None,
     normalized_error: dict[str, str] | None = None,
 ) -> None:
+    if not hook.should_run(ctx):
+        return
     _DISPATCHER.dispatch(
         hook,
         stage,
@@ -216,6 +242,10 @@ def _invoke_hook(
 def _default_hooks() -> None:
     if not any(isinstance(hook, LoggingHook) for hook in _GLOBAL_HOOKS):
         register_global_hook(LoggingHook())
+
+
+def _resolve_effective_hooks(hooks: list[LLMHook] | None = None) -> list[LLMHook]:
+    return ordered_hooks(get_global_hooks() + (hooks or []))
 
 
 def _resolve_effective_config(llm_config: ResolvedLLMConfig | None) -> ResolvedLLMConfig:
@@ -288,7 +318,7 @@ def create_chat_completion(
         "source_messages": messages,
     }
 
-    effective_hooks = get_global_hooks() + (hooks or [])
+    effective_hooks = _resolve_effective_hooks(hooks)
     start = time.perf_counter()
     ctx["start_time"] = start
 
@@ -371,7 +401,7 @@ def create_chat_completion_stream(
         "source_messages": messages,
     }
 
-    effective_hooks = get_global_hooks() + (hooks or [])
+    effective_hooks = _resolve_effective_hooks(hooks)
     start = time.perf_counter()
     ctx["start_time"] = start
 

@@ -34,6 +34,9 @@
 
 - `src/agent/runtime/session.py`：会话主循环、模式切换、工具路由
 - `src/agent/runtime/session_hooks.py`：Session Hook 归口、排序与作用域过滤
+- `src/agent/runtime/loop_hooks.py`：Loop Hook 归口，负责 assistant 级展示投影与落库
+- `src/agent/runtime/delegation_hooks.py`：Subagent 委派生命周期 Hook 归口
+- `src/agent/runtime/plugin_hooks.py`：插件扩展 Hook 执行器，支持 `command` / `http` / `prompt` / `agent`
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要拼装
 - `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度
 - `src/agent/runtime/agents.py`：Agent 元信息唯一来源
@@ -187,6 +190,8 @@ LSP 查询请求
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
 - `SessionHook` 必须覆盖同步/流式会话的所有合法返回路径，包括 slash command 的即时完成与即时错误分支；Hook 上下文中的 `mode` 必须始终表示当前有效模式，而不是仅表示入口参数。
+- assistant 级 `process_items`、`display_parts` 与 `response_meta` 必须按单条 assistant 消息分别落库，禁止重新退回到整轮 turn 只汇总到最后一条 assistant 的旧语义。
+- 若需要把展示投影、摘要汇总、落库等非业务能力下沉，优先使用 `loop_hooks.py` 的 Loop Hook；`session_hooks.py` 只负责整次 session 生命周期，不承担 loop 内归属判定。
 
 ### 5.4 Web 开发栈
 
@@ -262,22 +267,45 @@ LSP 查询请求
 
 ### 7.4 新增 Hook
 
+Hook 分为两类：
+
+- 系统内置 Hook：日志、鉴权、human in the loop、落库、审计、指标等核心运行时能力，优先用 Python 代码实现。
+- 插件扩展 Hook：面向外部增强，统一通过 `src/agent/runtime/plugin_hooks.py` 执行，当前固定支持 `command`、`http`、`prompt`、`agent` 四类。
+
+通用约束：
+
+- 新增 Hook 应优先复用 `src/agent/core/hooks.py` 中的统一协议：`HookContext`、`HookResult`、`HookFilter`、`BaseHook`。
+- 统一上下文按 `event`、`identity`、`agent`、`runtime`、`data` 分组；新增字段优先放入对应分组，避免继续把所有入参平铺到 context 顶层。
+- Hook 可通过 `order` 控制顺序；相同 order 按注册顺序保持稳定。`before` 类阶段正序执行，收尾类阶段按需要倒序执行。
+- 插件 Hook 返回统一 `decision`：`allow`、`deny`、`modify`、`pause`、`fail`。具备阻断能力的 Hook 必须明确 `fail_fast` 策略。
+- 非主流程能力优先放入 Hook；主流程只允许增加必要的生命周期 dispatch 点，不应直接写日志、HTTP 回调、落库、脚本执行等副作用。
+
 Session Hook：
 
 - 继承 `src/agent/runtime/session_hooks.py` 中的 `SessionHook`
 - 按需实现 `before_session`、`after_session`、`on_error`
 - 多个 Hook 通过 `order` 控制执行顺序：`before` 正序，`after/error` 倒序
 - 若只希望作用于部分代理，可使用 `agent_kinds` / `agent_names` 做过滤
+- 适合 session/turn 级日志、指标、错误观察、subagent session 开始/结束观察；不负责 tool 明细或 message 投影归属判断
 
 Tool Hook：
 
 - 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`
 - 按需实现 `before_call`、`after_call`、`on_error`
+- 支持 `order`、`enabled` 与 `HookFilter`；适合工具执行前后审计、权限控制、结果处理和指标统计
 
 LLM Hook：
 
 - 继承 `src/agent/adapters/llm/client.py` 中的 `LLMHook`
 - 在调用前后添加观测、审计或脱敏逻辑
+- 支持 `order`、`enabled` 与 `HookFilter`；适合 prompt/request 观测、响应记录和最终 assistant message 的旁路处理
+
+Delegation Hook：
+
+- 继承 `src/agent/runtime/delegation_hooks.py` 中的 `DelegationHook`
+- 用于 `task` / subagent 委派生命周期，按需实现 `on_delegation_requested`、`on_delegation_started`、`on_delegation_completed`、`on_delegation_failed`、`on_delegation_interrupted`、`on_delegation_finally`
+- 不要把 subagent 委派生命周期硬塞进普通 Tool Hook；`task` 虽以工具形式暴露，但本质上会启动子 agent session
+- 真实 `task` 委派路径由 session 统一分发 Delegation Hook；非 `fail_fast` Hook 异常只记录告警并继续，`fail_fast=True` 才中断主流程
 
 ### 7.5 调整 Web 输出
 

@@ -40,8 +40,8 @@ def reset_global_hooks():
 
 
 class RecorderHook(LLMHook):
-    def __init__(self, name: str, recorder: list[str], fail_fast: bool = False) -> None:
-        super().__init__(name=name, fail_fast=fail_fast)
+    def __init__(self, name: str, recorder: list[str], fail_fast: bool = False, order: int = 1000) -> None:
+        super().__init__(name=name, fail_fast=fail_fast, order=order)
         self.recorder = recorder
 
     def before_call(self, ctx):
@@ -353,6 +353,24 @@ def test_hooks_execute_in_order_global_then_local(monkeypatch):
         "g1.after",
         "g2.after",
         "l1.after",
+    ]
+
+
+def test_hooks_should_sort_by_order(monkeypatch):
+    clear_global_hooks()
+    recorder: list[str] = []
+    register_global_hook(RecorderHook("late", recorder, order=200))
+    register_global_hook(RecorderHook("early", recorder, order=100))
+
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
+
+    create_chat_completion(_build_user_message(), tools=[], llm_config=_build_chat_config())
+
+    assert recorder == [
+        "early.before",
+        "late.before",
+        "early.after",
+        "late.after",
     ]
 
 

@@ -62,7 +62,20 @@ from ..tools.webfetch import webfetch
 from ..tools.websearch import websearch
 from ..tools.write_file_tool import run_write
 from .compaction import compact
+from .delegation_hooks import (
+    DelegationHook,
+    DelegationHookContext,
+    normalize_delegation_error,
+    resolve_effective_delegation_hooks,
+    run_delegation_hooks,
+)
 from .session_memory import FileSessionMemoryStore, InMemorySessionMemoryStore, SessionMemoryStore, normalize_history_prefix
+from .loop_hooks import (
+    LoopHook,
+    LoopHookContext,
+    invoke_loop_hook,
+    resolve_effective_loop_hooks,
+)
 from .stream_display import (
     _append_display_event_part,
     _append_display_reasoning_part,
@@ -91,6 +104,24 @@ MainAgentMode = Literal["build", "plan"]
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 TODO = TodoManager()
+
+
+@dataclass
+class AssistantProjection:
+    """单条 assistant 消息的展示投影状态。"""
+
+    assistant_message: Message | None = None
+    process_items: list[ProcessItem] | None = None
+    display_parts: list[DisplayPart] | None = None
+    display_text_merge_open: bool = False
+    display_reasoning_merge_open: bool = False
+
+    def __post_init__(self) -> None:
+        if self.process_items is None:
+            self.process_items = []
+        if self.display_parts is None:
+            self.display_parts = []
+
 def _build_default_session_memory_store() -> SessionMemoryStore:
     settings = resolve_session_memory_settings()
     return FileSessionMemoryStore(
@@ -1761,6 +1792,140 @@ def _handle_session_hook_error(
     _run_session_hooks(hooks, "error", ctx=ctx, error=error, normalized_error=normalized)
 
 
+def _build_loop_hook_context(
+    *,
+    active_session_id: str,
+    active_agent: str,
+    agent_kind: str,
+    depth: int,
+    stream: bool,
+    delegation_id: str | None,
+    parent_tool_call_id: str | None,
+    turn_started_at: str,
+    round_no: int,
+    current_mode: str,
+    tool_call_owner_map: dict[str, str],
+    projection: AssistantProjection,
+    save_enabled: bool,
+    save_callback: Callable[[], None],
+) -> LoopHookContext:
+    assistant_message = projection.assistant_message
+    turn_completed_at = ""
+    if isinstance(assistant_message, dict):
+        turn_completed_at = str(assistant_message.get("info", {}).get("turn_completed_at", "")).strip()
+    return {
+        "session_id": active_session_id,
+        "agent": active_agent,
+        "agent_kind": agent_kind,
+        "depth": depth,
+        "stream": stream,
+        "delegation_id": str(delegation_id or "").strip(),
+        "parent_tool_call_id": str(parent_tool_call_id or "").strip(),
+        "turn_started_at": turn_started_at,
+        "turn_completed_at": turn_completed_at,
+        "round_no": round_no,
+        "mode": current_mode,
+        "tool_call_owner_map": dict(tool_call_owner_map),
+        "assistant_message": assistant_message,
+        "process_items": list(projection.process_items or []),
+        "display_parts": list(projection.display_parts or []),
+        "save_enabled": save_enabled,
+        "save_callback": save_callback,
+    }
+
+
+def _run_loop_hooks(
+    hooks: list[LoopHook],
+    stage: str,
+    *,
+    ctx: LoopHookContext,
+    error: Exception | None = None,
+    normalized_error: dict[str, str] | None = None,
+) -> None:
+    ordered_hooks = hooks if stage == "before" else list(reversed(hooks))
+    for hook in ordered_hooks:
+        invoke_loop_hook(
+            hook,
+            stage,
+            ctx=ctx,
+            error=error,
+            normalized_error=normalized_error,
+        )
+
+
+def _record_projection_event(projection: AssistantProjection | None, event: dict[str, Any]) -> None:
+    if projection is None:
+        return
+    process_item = _build_process_item(event)
+    if process_item is not None:
+        projection.process_items.append(process_item)
+    _append_display_event_part(projection.display_parts, event=event)
+    projection.display_text_merge_open = False
+    projection.display_reasoning_merge_open = False
+
+
+def _record_projection_text_delta(
+    projection: AssistantProjection | None,
+    *,
+    delta_event: dict[str, Any],
+    delta: str,
+    active_agent: str,
+    agent_kind: str,
+    depth: int,
+    round_no: int,
+    delegation_id: str | None,
+    parent_tool_call_id: str | None,
+) -> None:
+    if projection is None or not delta:
+        return
+    _append_display_text_part(
+        projection.display_parts,
+        kind="assistant_text",
+        title=f"{active_agent} 回复",
+        delta=delta,
+        created_at=str(delta_event.get("timestamp", "")) or utc_now_iso(),
+        agent=active_agent,
+        agent_kind=agent_kind,
+        depth=depth,
+        round_no=round_no,
+        delegation_id=delegation_id,
+        parent_tool_call_id=parent_tool_call_id,
+        merge_allowed=projection.display_text_merge_open,
+    )
+    projection.display_text_merge_open = True
+    projection.display_reasoning_merge_open = False
+
+
+def _record_projection_reasoning_delta(
+    projection: AssistantProjection | None,
+    *,
+    delta_event: dict[str, Any],
+    delta: str,
+    active_agent: str,
+    agent_kind: str,
+    depth: int,
+    round_no: int,
+    delegation_id: str | None,
+    parent_tool_call_id: str | None,
+) -> None:
+    if projection is None or not delta:
+        return
+    _append_display_reasoning_part(
+        projection.display_parts,
+        delta=delta,
+        created_at=str(delta_event.get("timestamp", "")) or utc_now_iso(),
+        agent=active_agent,
+        agent_kind=agent_kind,
+        depth=depth,
+        round_no=round_no,
+        delegation_id=delegation_id,
+        parent_tool_call_id=parent_tool_call_id,
+        merge_allowed=projection.display_reasoning_merge_open,
+    )
+    projection.display_reasoning_merge_open = True
+    projection.display_text_merge_open = False
+
+
 def _build_tool_message(
     session_id: str,
     tool_call_id: str,
@@ -2061,6 +2226,54 @@ def _new_delegation_id() -> str:
     return f"delegation_{uuid.uuid4().hex[:12]}"
 
 
+def _build_delegation_hook_context(
+    *,
+    active_session_id: str,
+    delegation_id: str,
+    parent_tool_call_id: str,
+    parent_message_id: str,
+    parent_agent: str,
+    agent: str,
+    depth: int,
+    mode: str,
+    provider: str,
+    model: str,
+    prompt: str,
+) -> DelegationHookContext:
+    return {
+        "session_id": active_session_id,
+        "delegation_id": delegation_id,
+        "parent_tool_call_id": parent_tool_call_id,
+        "parent_message_id": parent_message_id,
+        "parent_agent": parent_agent,
+        "agent": agent,
+        "agent_kind": _resolve_agent_kind(agent),
+        "depth": depth,
+        "mode": mode,
+        "provider": provider,
+        "model": model,
+        "prompt": prompt,
+        "status": "running",
+        "finish_reason": "",
+    }
+
+
+def _complete_delegation_hook_context_from_message(ctx: DelegationHookContext, message: Message) -> None:
+    info = message.get("info", {})
+    ctx["status"] = str(info.get("status", "completed")).strip() or "completed"
+    ctx["finish_reason"] = str(info.get("finish_reason", "")).strip()
+    ctx["result_message_id"] = str(info.get("message_id", "")).strip()
+    ctx["output_preview"] = _sanitize_preview(get_message_text(message))
+
+
+def _complete_delegation_hook_context_from_result(ctx: DelegationHookContext, result: ToolResult) -> None:
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    ctx["status"] = str(metadata.get("status", "completed")).strip() or "completed"
+    ctx["finish_reason"] = str(metadata.get("finish_reason", "")).strip()
+    ctx["output_preview"] = _tool_result_preview(result)
+    ctx["metadata"] = dict(metadata)
+
+
 def configure_session_memory_store(store: SessionMemoryStore) -> None:
     """配置会话记忆存储实现，便于替换为 Redis 等后端。"""
     global SESSION_MEMORY_STORE
@@ -2273,6 +2486,10 @@ def subagent_loop(
     *,
     llm_config: ResolvedLLMConfig | None = None,
     session_hooks: list[SessionHook] | None = None,
+    delegation_hooks: list[DelegationHook] | None = None,
+    delegation_id: str | None = None,
+    parent_tool_call_id: str | None = None,
+    depth: int = 1,
 ) -> str:
     agent_name = (agent or "explore").strip().lower()
     agent_definition = get_agent(agent_name)
@@ -2300,6 +2517,10 @@ def subagent_loop(
         llm_config=llm_config,
         max_rounds=subagent_max_rounds,
         session_hooks=session_hooks,
+        delegation_hooks=delegation_hooks,
+        delegation_id=delegation_id,
+        parent_tool_call_id=parent_tool_call_id,
+        depth=depth,
     )
     return get_message_text(result)
 
@@ -2318,6 +2539,7 @@ def _run_session_stream(
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
     session_hooks: list[SessionHook] | None = None,
+    delegation_hooks: list[DelegationHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
     depth: int = 0,
@@ -2333,6 +2555,7 @@ def _run_session_stream(
         max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
     """
     effective_session_hooks = resolve_effective_session_hooks(session_hooks)
+    effective_delegation_hooks = resolve_effective_delegation_hooks(delegation_hooks)
     effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     turn_started_at = utc_now_iso()
     try:
@@ -2502,6 +2725,7 @@ def _run_session_stream(
     mode_enabled = bootstrap.mode_enabled
 
     effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
+    effective_delegation_hooks = resolve_effective_delegation_hooks(delegation_hooks)
     effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     active_loop_agent = bootstrap.initial_agent
     effective_session_hooks = resolve_effective_session_hooks(session_hooks)
@@ -2519,10 +2743,19 @@ def _run_session_stream(
     )
     session_hook_started_at = time.perf_counter()
     _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
-    active_process_items = process_items if process_items is not None else []
-    active_display_parts = display_parts if display_parts is not None else []
+    effective_loop_hooks = resolve_effective_loop_hooks()
+    external_projection = (
+        AssistantProjection(process_items=process_items, display_parts=display_parts)
+        if process_items is not None and display_parts is not None
+        else None
+    )
+    current_projection = AssistantProjection()
+    active_process_items = current_projection.process_items
+    active_display_parts = current_projection.display_parts
     display_text_merge_open = False
     display_reasoning_merge_open = False
+    tool_call_owner_map: dict[str, str] = {}
+    projection_by_message_id: dict[str, AssistantProjection] = {}
     messages = list(bootstrap.messages)
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
@@ -2533,7 +2766,6 @@ def _run_session_stream(
     stop_message_saved = False
 
     def _emit_event(event_type: str, **payload: Any) -> dict[str, Any]:
-        nonlocal display_reasoning_merge_open, display_text_merge_open
         event = _build_stream_event(
             event_type,
             session_id=active_session_id,
@@ -2544,13 +2776,38 @@ def _run_session_stream(
             parent_tool_call_id=payload.pop("parent_tool_call_id", parent_tool_call_id),
             **payload,
         )
-        process_item = _build_process_item(event)
-        if process_item is not None:
-            active_process_items.append(process_item)
-        _append_display_event_part(active_display_parts, event=event)
-        display_text_merge_open = False
-        display_reasoning_merge_open = False
         return event
+
+    def _save_messages() -> None:
+        if mode_enabled:
+            SESSION_MEMORY_STORE.save(active_session_id, messages)
+
+    def _persist_projection(
+        projection: AssistantProjection,
+        *,
+        active_agent: str,
+        current_mode_name: str,
+        round_no: int,
+        agent_kind_name: str,
+    ) -> ResponseMeta:
+        loop_ctx = _build_loop_hook_context(
+            active_session_id=active_session_id,
+            active_agent=active_agent,
+            agent_kind=agent_kind_name,
+            depth=depth,
+            stream=True,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
+            turn_started_at=turn_started_at,
+            round_no=round_no,
+            current_mode=current_mode_name,
+            tool_call_owner_map=tool_call_owner_map,
+            projection=projection,
+            save_enabled=mode_enabled,
+            save_callback=_save_messages,
+        )
+        _run_loop_hooks(effective_loop_hooks, "after", ctx=loop_ctx)
+        return loop_ctx.get("response_meta", projection.assistant_message["info"].get("response_meta", {}))  # type: ignore[index]
 
     def _build_stop_result_message(active_agent: str, runtime_config: ResolvedLLMConfig) -> Message:
         nonlocal stop_message_saved
@@ -2561,16 +2818,15 @@ def _run_session_stream(
             turn_started_at=turn_started_at,
         )
         completed_at = str(message["info"].get("turn_completed_at", ""))
-        response_meta = _attach_response_summary(
-            message,
-            process_items=active_process_items,
-            display_parts=active_display_parts,
-            turn_started_at=turn_started_at,
-            turn_completed_at=completed_at,
-        )
         messages.append(message)
-        if mode_enabled:
-            SESSION_MEMORY_STORE.save(active_session_id, messages)
+        stop_projection = AssistantProjection(assistant_message=message, process_items=active_process_items, display_parts=active_display_parts)
+        response_meta = _persist_projection(
+            stop_projection,
+            active_agent=active_agent,
+            current_mode_name=current_mode,
+            round_no=round_no,
+            agent_kind_name=_resolve_agent_kind(active_agent),
+        )
         stop_message_saved = True
         if depth == 0:
             clear_session_stop(active_session_id)
@@ -2604,7 +2860,7 @@ def _run_session_stream(
             turn_started_at=turn_started_at,
             turn_completed_at=completed_at,
             response_meta=response_meta,
-            process_items=[dict(item) for item in active_process_items],
+            process_items=[dict(item) for item in stop_projection.process_items],
             display_parts=message["info"].get("display_parts", []),
             confirmation=message["info"].get("confirmation"),
             question=message["info"].get("question"),
@@ -2623,6 +2879,7 @@ def _run_session_stream(
             get_latest_model=lambda: _latest_model(messages),
             get_current_runtime=lambda: current_runtime,
             session_hooks=session_hooks,
+            delegation_hooks=delegation_hooks,
         )
     )
 
@@ -2660,7 +2917,7 @@ def _run_session_stream(
                 )
                 completed_at = str(limit_message["info"].get("turn_completed_at", ""))
                 messages.append(limit_message)
-                yield _emit_event(
+                round_end_event = _emit_event(
                     "round_end",
                     agent=active_agent,
                     agent_kind=agent_kind,
@@ -2674,15 +2931,18 @@ def _run_session_stream(
                     model=current_runtime.model,
                     completed_at=completed_at,
                 )
-                response_meta = _attach_response_summary(
-                    limit_message,
-                    process_items=active_process_items,
-                    display_parts=active_display_parts,
-                    turn_started_at=turn_started_at,
-                    turn_completed_at=completed_at,
+                limit_projection = AssistantProjection(assistant_message=limit_message)
+                _record_projection_event(limit_projection, round_end_event)
+                if external_projection is not None:
+                    _record_projection_event(external_projection, round_end_event)
+                yield round_end_event
+                response_meta = _persist_projection(
+                    limit_projection,
+                    active_agent=active_agent,
+                    current_mode_name=current_mode,
+                    round_no=round_no,
+                    agent_kind_name=agent_kind,
                 )
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
                 if depth == 0:
                     clear_session_stop(active_session_id)
                 yield _emit_event(
@@ -2701,7 +2961,7 @@ def _run_session_stream(
                     turn_started_at=turn_started_at,
                     turn_completed_at=completed_at,
                     response_meta=response_meta,
-                    process_items=[dict(item) for item in active_process_items],
+                    process_items=[dict(item) for item in limit_projection.process_items],
                     display_parts=limit_message["info"].get("display_parts", []),
                     confirmation=limit_message["info"].get("confirmation"),
                     question=limit_message["info"].get("question"),
@@ -2753,18 +3013,45 @@ def _run_session_stream(
                     message=stopped_message,
                 )
 
-            yield _emit_event(
-            "round_start",
-            agent=active_agent,
-            agent_kind=agent_kind,
-            depth=depth,
-            delegation_id=delegation_id,
-            parent_tool_call_id=parent_tool_call_id,
-            round=round_no,
-            provider=current_runtime.provider,
-            model=current_runtime.model,
-            started_at=utc_now_iso(),
+            round_started_at = utc_now_iso()
+            round_start_event = _emit_event(
+                "round_start",
+                agent=active_agent,
+                agent_kind=agent_kind,
+                depth=depth,
+                delegation_id=delegation_id,
+                parent_tool_call_id=parent_tool_call_id,
+                round=round_no,
+                provider=current_runtime.provider,
+                model=current_runtime.model,
+                started_at=round_started_at,
             )
+            yield round_start_event
+            current_projection = AssistantProjection()
+            active_process_items = current_projection.process_items
+            active_display_parts = current_projection.display_parts
+            display_text_merge_open = False
+            display_reasoning_merge_open = False
+            _record_projection_event(current_projection, round_start_event)
+            if external_projection is not None:
+                _record_projection_event(external_projection, round_start_event)
+            loop_hook_ctx = _build_loop_hook_context(
+                active_session_id=active_session_id,
+                active_agent=active_agent,
+                agent_kind=agent_kind,
+                depth=depth,
+                stream=True,
+                delegation_id=delegation_id,
+                parent_tool_call_id=parent_tool_call_id,
+                turn_started_at=turn_started_at,
+                round_no=round_no,
+                current_mode=current_mode,
+                tool_call_owner_map=tool_call_owner_map,
+                projection=current_projection,
+                save_enabled=mode_enabled,
+                save_callback=_save_messages,
+            )
+            _run_loop_hooks(effective_loop_hooks, "before", ctx=loop_hook_ctx)
 
             stream_iter = _call_chat_completion_stream(
                 messages=messages,
@@ -2809,6 +3096,17 @@ def _run_session_stream(
                         )
                         display_text_merge_open = True
                         display_reasoning_merge_open = False
+                        _record_projection_text_delta(
+                            external_projection,
+                            delta_event=delta_event,
+                            delta=delta,
+                            active_agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            round_no=round_no,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                        )
                         yield delta_event
                     continue
 
@@ -2840,6 +3138,17 @@ def _run_session_stream(
                         )
                         display_reasoning_merge_open = True
                         display_text_merge_open = False
+                        _record_projection_reasoning_delta(
+                            external_projection,
+                            delta_event=delta_event,
+                            delta=delta,
+                            active_agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            round_no=round_no,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                        )
                         yield delta_event
                     continue
 
@@ -2860,6 +3169,8 @@ def _run_session_stream(
                 provider=current_runtime.provider,
                 turn_started_at=turn_started_at,
             )
+            current_projection.assistant_message = assistant_message
+            projection_by_message_id[str(assistant_message["info"].get("message_id", ""))] = current_projection
             messages.append(assistant_message)
 
             tool_calls = extract_tool_calls(assistant_message)
@@ -2869,7 +3180,8 @@ def _run_session_stream(
 
             if has_tool_calls:
                 for tool_call in tool_calls:
-                    yield _emit_event(
+                    tool_call_owner_map[tool_call["id"]] = str(assistant_message["info"].get("message_id", ""))
+                    tool_call_event = _emit_event(
                         "tool_call",
                         agent=active_agent,
                         agent_kind=agent_kind,
@@ -2881,33 +3193,39 @@ def _run_session_stream(
                         name=tool_call["name"],
                         arguments=tool_call["arguments"],
                     )
+                    _record_projection_event(current_projection, tool_call_event)
+                    if external_projection is not None:
+                        _record_projection_event(external_projection, tool_call_event)
+                    yield tool_call_event
 
             if not should_continue:
                 completed_at = utc_now_iso()
                 assistant_message["info"]["turn_completed_at"] = completed_at
-                yield _emit_event(
-                "round_end",
-                agent=active_agent,
-                agent_kind=agent_kind,
-                depth=depth,
-                delegation_id=delegation_id,
-                parent_tool_call_id=parent_tool_call_id,
-                round=round_no,
-                status=assistant_message["info"].get("status", "completed"),
-                finish_reason=assistant_message["info"].get("finish_reason", "stop"),
-                provider=current_runtime.provider,
-                model=current_runtime.model,
-                completed_at=completed_at,
+                round_end_event = _emit_event(
+                    "round_end",
+                    agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    delegation_id=delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    round=round_no,
+                    status=assistant_message["info"].get("status", "completed"),
+                    finish_reason=assistant_message["info"].get("finish_reason", "stop"),
+                    provider=current_runtime.provider,
+                    model=current_runtime.model,
+                    completed_at=completed_at,
                 )
-                response_meta = _attach_response_summary(
-                    assistant_message,
-                    process_items=active_process_items,
-                    display_parts=active_display_parts,
-                    turn_started_at=turn_started_at,
-                    turn_completed_at=completed_at,
+                _record_projection_event(current_projection, round_end_event)
+                if external_projection is not None:
+                    _record_projection_event(external_projection, round_end_event)
+                yield round_end_event
+                response_meta = _persist_projection(
+                    current_projection,
+                    active_agent=active_agent,
+                    current_mode_name=current_mode,
+                    round_no=round_no,
+                    agent_kind_name=agent_kind,
                 )
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
                 if depth == 0:
                     clear_session_stop(active_session_id)
                 yield _emit_event(
@@ -2976,38 +3294,74 @@ def _run_session_stream(
                     )
                     result = task_request.result
                     if task_request.should_execute:
-                        registry = _get_skill_registry()
-                        delegated_message = yield from _run_session_stream(
-                            task_request.prompt,
-                            session_id=active_session_id,
-                            tools=_get_base_tools_for_agent("build"),
-                            system_prompt=_call_build_system_prompt(
-                                agent=task_request.agent,
-                                model=current_runtime.model,
-                                provider=current_runtime.provider,
-                                vendor=current_runtime.vendor,
-                                session_id=active_session_id,
-                            ),
-                            runtime_agent=task_request.agent,
-                            todo_tool_names={"todo_write", "todo_read"},
-                            llm_config=current_runtime,
-                            depth=depth + 1,
+                        delegation_ctx = _build_delegation_hook_context(
+                            active_session_id=active_session_id,
                             delegation_id=delegation_instance_id,
                             parent_tool_call_id=tool_call["id"],
-                            process_items=active_process_items,
-                            display_parts=active_display_parts,
-                            session_hooks=session_hooks,
+                            parent_message_id=str(assistant_message["info"].get("message_id", "")),
+                            parent_agent=active_agent,
+                            agent=task_request.agent,
+                            depth=depth + 1,
+                            mode=current_mode,
+                            provider=current_runtime.provider,
+                            model=current_runtime.model,
+                            prompt=task_request.prompt,
                         )
-                        delegated_finish_reason = str(delegated_message["info"].get("finish_reason", "")).strip().lower()
-                        delegated_status = str(delegated_message["info"].get("status", "")).strip().lower()
-                        if delegated_finish_reason == "question_required" or (
-                            delegated_status == "interrupted" and isinstance(delegated_message["info"].get("question"), dict)
-                        ):
-                            result = _pending_question_result_from_message(delegated_message)
-                            result["metadata"]["delegation_id"] = delegation_instance_id
-                            result["metadata"]["parent_tool_call_id"] = tool_call["id"]
-                        else:
-                            result["output"] = get_message_text(delegated_message)
+                        run_delegation_hooks(effective_delegation_hooks, "requested", ctx=delegation_ctx)
+                        try:
+                            run_delegation_hooks(effective_delegation_hooks, "started", ctx=delegation_ctx)
+                            try:
+                                delegated_message = yield from _run_session_stream(
+                                    task_request.prompt,
+                                    session_id=active_session_id,
+                                    tools=_get_base_tools_for_agent("build"),
+                                    system_prompt=_call_build_system_prompt(
+                                        agent=task_request.agent,
+                                        model=current_runtime.model,
+                                        provider=current_runtime.provider,
+                                        vendor=current_runtime.vendor,
+                                        session_id=active_session_id,
+                                    ),
+                                    runtime_agent=task_request.agent,
+                                    todo_tool_names={"todo_write", "todo_read"},
+                                    llm_config=current_runtime,
+                                    depth=depth + 1,
+                                    delegation_id=delegation_instance_id,
+                                    parent_tool_call_id=tool_call["id"],
+                                    process_items=external_projection.process_items if external_projection is not None else active_process_items,
+                                    display_parts=external_projection.display_parts if external_projection is not None else active_display_parts,
+                                    session_hooks=session_hooks,
+                                    delegation_hooks=delegation_hooks,
+                                )
+                            except Exception as exc:
+                                delegation_ctx["status"] = "failed"
+                                delegation_ctx["finish_reason"] = "error"
+                                delegation_ctx["output_preview"] = _sanitize_preview(str(exc))
+                                run_delegation_hooks(
+                                    effective_delegation_hooks,
+                                    "error",
+                                    ctx=delegation_ctx,
+                                    error=exc,
+                                    normalized_error=normalize_delegation_error(exc),
+                                )
+                                raise
+                            else:
+                                _complete_delegation_hook_context_from_message(delegation_ctx, delegated_message)
+                                delegated_finish_reason = str(delegated_message["info"].get("finish_reason", "")).strip().lower()
+                                delegated_status = str(delegated_message["info"].get("status", "")).strip().lower()
+                                if delegated_finish_reason == "question_required" or (
+                                    delegated_status == "interrupted" and isinstance(delegated_message["info"].get("question"), dict)
+                                ):
+                                    result = _pending_question_result_from_message(delegated_message)
+                                    result["metadata"]["delegation_id"] = delegation_instance_id
+                                    result["metadata"]["parent_tool_call_id"] = tool_call["id"]
+                                    _complete_delegation_hook_context_from_result(delegation_ctx, result)
+                                    run_delegation_hooks(effective_delegation_hooks, "interrupted", ctx=delegation_ctx)
+                                else:
+                                    result["output"] = get_message_text(delegated_message)
+                                    run_delegation_hooks(effective_delegation_hooks, "after", ctx=delegation_ctx)
+                        finally:
+                            run_delegation_hooks(effective_delegation_hooks, "finally", ctx=delegation_ctx)
                 else:
                     result = tool_executor.execute(
                         tool_call["name"],
@@ -3035,7 +3389,7 @@ def _run_session_stream(
                     )
                 )
                 metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-                yield _emit_event(
+                tool_result_event = _emit_event(
                     "tool_result",
                     agent=active_agent,
                     agent_kind=agent_kind,
@@ -3048,6 +3402,14 @@ def _run_session_stream(
                     status=str(metadata.get("status", "completed")),
                     output_preview=_tool_result_preview(result),
                 )
+                owner_projection = current_projection
+                owner_message_id = tool_call_owner_map.get(tool_call["id"], "")
+                if owner_message_id:
+                    owner_projection = projection_by_message_id.get(owner_message_id, current_projection)
+                _record_projection_event(owner_projection, tool_result_event)
+                if external_projection is not None:
+                    _record_projection_event(external_projection, tool_result_event)
+                yield tool_result_event
 
                 stopped_message = yield from _consume_stop_request_if_needed(active_agent, current_runtime)
                 if stopped_message is not None:
@@ -3090,15 +3452,18 @@ def _run_session_stream(
                         model=current_runtime.model,
                         completed_at=completed_at,
                         )
-                        response_meta = _attach_response_summary(
-                            interrupted_message,
+                        interrupted_projection = AssistantProjection(
+                            assistant_message=interrupted_message,
                             process_items=active_process_items,
                             display_parts=active_display_parts,
-                            turn_started_at=turn_started_at,
-                            turn_completed_at=completed_at,
                         )
-                        if mode_enabled:
-                            SESSION_MEMORY_STORE.save(active_session_id, messages)
+                        response_meta = _persist_projection(
+                            interrupted_projection,
+                            active_agent=active_agent,
+                            current_mode_name=current_mode,
+                            round_no=round_no,
+                            agent_kind_name=agent_kind,
+                        )
                         if depth == 0:
                             clear_session_stop(active_session_id)
                         yield _emit_event(
@@ -3117,7 +3482,7 @@ def _run_session_stream(
                             turn_started_at=turn_started_at,
                             turn_completed_at=completed_at,
                             response_meta=response_meta,
-                            process_items=[dict(item) for item in active_process_items],
+                            process_items=[dict(item) for item in interrupted_projection.process_items],
                             display_parts=interrupted_message["info"].get("display_parts", []),
                             confirmation=interrupted_message["info"].get("confirmation"),
                             question=interrupted_message["info"].get("question"),
@@ -3171,15 +3536,18 @@ def _run_session_stream(
                     model=current_runtime.model,
                     completed_at=completed_at,
                 )
-                response_meta = _attach_response_summary(
-                    interrupted_message,
+                interrupted_projection = AssistantProjection(
+                    assistant_message=interrupted_message,
                     process_items=active_process_items,
                     display_parts=active_display_parts,
-                    turn_started_at=turn_started_at,
-                    turn_completed_at=completed_at,
                 )
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                response_meta = _persist_projection(
+                    interrupted_projection,
+                    active_agent=active_agent,
+                    current_mode_name=current_mode,
+                    round_no=round_no,
+                    agent_kind_name=agent_kind,
+                )
                 if depth == 0:
                     clear_session_stop(active_session_id)
                 yield _emit_event(
@@ -3198,7 +3566,7 @@ def _run_session_stream(
                     turn_started_at=turn_started_at,
                     turn_completed_at=completed_at,
                     response_meta=response_meta,
-                    process_items=[dict(item) for item in active_process_items],
+                    process_items=[dict(item) for item in interrupted_projection.process_items],
                     display_parts=interrupted_message["info"].get("display_parts", []),
                     confirmation=interrupted_message["info"].get("confirmation"),
                     question=interrupted_message["info"].get("question"),
@@ -3234,15 +3602,18 @@ def _run_session_stream(
                 model=current_runtime.model,
                 completed_at=completed_at,
                 )
-                response_meta = _attach_response_summary(
-                    message,
+                cancelled_projection = AssistantProjection(
+                    assistant_message=message,
                     process_items=active_process_items,
                     display_parts=active_display_parts,
-                    turn_started_at=turn_started_at,
-                    turn_completed_at=completed_at,
                 )
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                response_meta = _persist_projection(
+                    cancelled_projection,
+                    active_agent=active_agent,
+                    current_mode_name=current_mode,
+                    round_no=round_no,
+                    agent_kind_name=agent_kind,
+                )
                 if depth == 0:
                     clear_session_stop(active_session_id)
                 yield _emit_event(
@@ -3261,7 +3632,7 @@ def _run_session_stream(
                     turn_started_at=turn_started_at,
                     turn_completed_at=completed_at,
                     response_meta=response_meta,
-                    process_items=[dict(item) for item in active_process_items],
+                    process_items=[dict(item) for item in cancelled_projection.process_items],
                     display_parts=message["info"].get("display_parts", []),
                     confirmation=message["info"].get("confirmation"),
                     question=message["info"].get("question"),
@@ -3274,7 +3645,7 @@ def _run_session_stream(
                     message=message,
                 )
 
-            yield _emit_event(
+            round_end_event = _emit_event(
                 "round_end",
                 agent=active_agent,
                 agent_kind=agent_kind,
@@ -3287,6 +3658,17 @@ def _run_session_stream(
                 provider=current_runtime.provider,
                 model=current_runtime.model,
                 completed_at=utc_now_iso(),
+            )
+            _record_projection_event(current_projection, round_end_event)
+            if external_projection is not None:
+                _record_projection_event(external_projection, round_end_event)
+            yield round_end_event
+            _persist_projection(
+                current_projection,
+                active_agent=active_agent,
+                current_mode_name=current_mode,
+                round_no=round_no,
+                agent_kind_name=agent_kind,
             )
     except Exception as exc:
         _handle_session_hook_error(
@@ -3307,16 +3689,18 @@ def _run_session_stream(
                     turn_started_at=turn_started_at,
                 )
                 completed_at = str(fallback_message["info"].get("turn_completed_at", ""))
-                _attach_response_summary(
-                    fallback_message,
-                    process_items=active_process_items,
-                    display_parts=active_display_parts,
-                    turn_started_at=turn_started_at,
-                    turn_completed_at=completed_at,
-                )
                 messages.append(fallback_message)
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                _persist_projection(
+                    AssistantProjection(
+                        assistant_message=fallback_message,
+                        process_items=active_process_items,
+                        display_parts=active_display_parts,
+                    ),
+                    active_agent=current_mode if mode_enabled else (runtime_agent or "build"),
+                    current_mode_name=current_mode,
+                    round_no=round_no,
+                    agent_kind_name=_resolve_agent_kind(current_mode if mode_enabled else (runtime_agent or "build")),
+                )
             clear_session_stop(active_session_id)
 
 
@@ -3327,6 +3711,7 @@ def _build_tool_handlers(
     get_latest_model: Callable[[], str],
     get_current_runtime: Callable[[], ResolvedLLMConfig],
     session_hooks: list[SessionHook] | None = None,
+    delegation_hooks: list[DelegationHook] | None = None,
 ) -> dict[str, Callable[..., object]]:
     mcp_tools, _ = list_mcp_tools()
 
@@ -3422,6 +3807,7 @@ def _build_tool_handlers(
             session_id=session_id,
             llm_config=get_current_runtime(),
             session_hooks=session_hooks,
+            delegation_hooks=delegation_hooks,
         ),
         "plan_enter": lambda **kw: _run_plan_enter_tool(**kw),
         "plan_exit": lambda **kw: _run_plan_exit_tool(**kw),
@@ -3454,9 +3840,13 @@ def run_session(
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
     session_hooks: list[SessionHook] | None = None,
+    delegation_hooks: list[DelegationHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
     max_rounds: int | None = None,
+    depth: int = 0,
+    delegation_id: str | None = None,
+    parent_tool_call_id: str | None = None,
 ) -> Message:
     """新会话入口：返回最终助手 Message（含结构化 parts）。
     
@@ -3464,6 +3854,7 @@ def run_session(
         max_rounds: 最大循环轮次，为 None 时使用默认配置（主 agent 使用 agent_loop.max_rounds）。
     """
     effective_session_hooks = resolve_effective_session_hooks(session_hooks)
+    effective_delegation_hooks = resolve_effective_delegation_hooks(delegation_hooks)
     effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     turn_started_at = utc_now_iso()
     try:
@@ -3490,10 +3881,10 @@ def run_session(
         session_hook_ctx = _build_session_hook_context(
             active_session_id=active_session_id,
             active_agent=active_agent,
-            depth=0,
+            depth=depth,
             stream=False,
-            delegation_id=None,
-            parent_tool_call_id=None,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
             turn_started_at=turn_started_at,
             max_rounds=effective_max_rounds,
             user_input=user_input,
@@ -3527,10 +3918,10 @@ def run_session(
         session_hook_ctx = _build_session_hook_context(
             active_session_id=active_session_id,
             active_agent=active_agent,
-            depth=0,
+            depth=depth,
             stream=False,
-            delegation_id=None,
-            parent_tool_call_id=None,
+            delegation_id=delegation_id,
+            parent_tool_call_id=parent_tool_call_id,
             turn_started_at=turn_started_at,
             max_rounds=effective_max_rounds,
             user_input=user_input,
@@ -3568,10 +3959,10 @@ def run_session(
     session_hook_ctx = _build_session_hook_context(
         active_session_id=active_session_id,
         active_agent=active_loop_agent,
-        depth=0,
+        depth=depth,
         stream=False,
-        delegation_id=None,
-        parent_tool_call_id=None,
+        delegation_id=delegation_id,
+        parent_tool_call_id=parent_tool_call_id,
         turn_started_at=turn_started_at,
         max_rounds=effective_max_rounds,
         user_input=prepared_input.user_input,
@@ -3579,11 +3970,13 @@ def run_session(
     )
     session_hook_started_at = time.perf_counter()
     _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
+    effective_loop_hooks = resolve_effective_loop_hooks()
     messages = list(bootstrap.messages)
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
     current_provider_explicit = bootstrap.current_provider_explicit
     current_model_explicit = bootstrap.current_model_explicit
+    tool_call_owner_map: dict[str, str] = {}
 
     tool_executor = ToolExecutor(
         _build_tool_handlers(
@@ -3592,6 +3985,7 @@ def run_session(
             get_latest_model=lambda: _latest_model(messages),
             get_current_runtime=lambda: current_runtime,
             session_hooks=session_hooks,
+            delegation_hooks=delegation_hooks,
         )
     )
 
@@ -3646,6 +4040,37 @@ def run_session(
                     active_session_id,
                 )
             active_agent = current_mode if mode_enabled else (runtime_agent or "build")
+            agent_kind = _resolve_agent_kind(active_agent)
+            current_projection = AssistantProjection()
+            round_start_event = _build_stream_event(
+                "round_start",
+                session_id=active_session_id,
+                agent=active_agent,
+                agent_kind=agent_kind,
+                depth=depth,
+                round=round_no,
+                provider=current_runtime.provider,
+                model=current_runtime.model,
+                started_at=utc_now_iso(),
+            )
+            _record_projection_event(current_projection, round_start_event)
+            loop_hook_ctx = _build_loop_hook_context(
+                active_session_id=active_session_id,
+                active_agent=active_agent,
+                agent_kind=agent_kind,
+                depth=depth,
+                stream=False,
+                delegation_id=delegation_id,
+                parent_tool_call_id=parent_tool_call_id,
+                turn_started_at=turn_started_at,
+                round_no=round_no,
+                current_mode=current_mode,
+                tool_call_owner_map=tool_call_owner_map,
+                projection=current_projection,
+                save_enabled=mode_enabled,
+                save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+            )
+            _run_loop_hooks(effective_loop_hooks, "before", ctx=loop_hook_ctx)
 
             assistant_message = _call_chat_completion(
                 messages=messages,
@@ -3660,6 +4085,8 @@ def run_session(
                 provider=current_runtime.provider,
                 turn_started_at=turn_started_at,
             )
+            current_projection.assistant_message = assistant_message
+            current_projection.display_parts = _build_display_parts_from_message(assistant_message)
             messages.append(assistant_message)
 
             tool_calls = extract_tool_calls(assistant_message)
@@ -3668,8 +4095,26 @@ def run_session(
 
             if not should_continue:
                 assistant_message["info"]["turn_completed_at"] = utc_now_iso()
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                _run_loop_hooks(
+                    effective_loop_hooks,
+                    "after",
+                    ctx=_build_loop_hook_context(
+                        active_session_id=active_session_id,
+                        active_agent=active_agent,
+                        agent_kind=agent_kind,
+                        depth=depth,
+                        stream=False,
+                        delegation_id=delegation_id,
+                        parent_tool_call_id=parent_tool_call_id,
+                        turn_started_at=turn_started_at,
+                        round_no=round_no,
+                        current_mode=current_mode,
+                        tool_call_owner_map=tool_call_owner_map,
+                        projection=current_projection,
+                        save_enabled=mode_enabled,
+                        save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                    ),
+                )
                 return _handle_session_hook_success(
                     effective_session_hooks,
                     session_hook_ctx,
@@ -3684,17 +4129,74 @@ def run_session(
             should_interrupt = False
             task_available = any(tool["function"]["name"] == "task" for tool in selected_tools)
             for tool_call in tool_calls:
+                tool_call_owner_map[tool_call["id"]] = str(assistant_message["info"].get("message_id", ""))
+                _record_projection_event(
+                    current_projection,
+                    _build_stream_event(
+                        "tool_call",
+                        session_id=active_session_id,
+                        agent=active_agent,
+                        agent_kind=agent_kind,
+                        depth=depth,
+                        round=round_no,
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                        arguments=tool_call["arguments"],
+                    ),
+                )
                 if tool_call["name"] == "task":
-                    task_request = _prepare_task_tool_request(tool_call["arguments"])
+                    delegation_instance_id = _new_delegation_id()
+                    task_request = _prepare_task_tool_request(
+                        tool_call["arguments"],
+                        delegation_id=delegation_instance_id,
+                    )
                     result = task_request.result
                     if task_request.should_execute:
-                        result["output"] = subagent_loop(
-                            task_request.prompt,
+                        delegation_ctx = _build_delegation_hook_context(
+                            active_session_id=active_session_id,
+                            delegation_id=delegation_instance_id,
+                            parent_tool_call_id=tool_call["id"],
+                            parent_message_id=str(assistant_message["info"].get("message_id", "")),
+                            parent_agent=active_agent,
                             agent=task_request.agent,
-                            session_id=active_session_id,
-                            llm_config=current_runtime,
-                            session_hooks=session_hooks,
+                            depth=depth + 1,
+                            mode=current_mode,
+                            provider=current_runtime.provider,
+                            model=current_runtime.model,
+                            prompt=task_request.prompt,
                         )
+                        run_delegation_hooks(effective_delegation_hooks, "requested", ctx=delegation_ctx)
+                        try:
+                            run_delegation_hooks(effective_delegation_hooks, "started", ctx=delegation_ctx)
+                            try:
+                                result["output"] = subagent_loop(
+                                    task_request.prompt,
+                                    agent=task_request.agent,
+                                    session_id=active_session_id,
+                                    llm_config=current_runtime,
+                                    session_hooks=session_hooks,
+                                    delegation_hooks=delegation_hooks,
+                                    delegation_id=delegation_instance_id,
+                                    parent_tool_call_id=tool_call["id"],
+                                    depth=depth + 1,
+                                )
+                            except Exception as exc:
+                                delegation_ctx["status"] = "failed"
+                                delegation_ctx["finish_reason"] = "error"
+                                delegation_ctx["output_preview"] = _sanitize_preview(str(exc))
+                                run_delegation_hooks(
+                                    effective_delegation_hooks,
+                                    "error",
+                                    ctx=delegation_ctx,
+                                    error=exc,
+                                    normalized_error=normalize_delegation_error(exc),
+                                )
+                                raise
+                            else:
+                                _complete_delegation_hook_context_from_result(delegation_ctx, result)
+                                run_delegation_hooks(effective_delegation_hooks, "after", ctx=delegation_ctx)
+                        finally:
+                            run_delegation_hooks(effective_delegation_hooks, "finally", ctx=delegation_ctx)
                 else:
                     result = tool_executor.execute(
                         tool_call["name"],
@@ -3720,7 +4222,23 @@ def run_session(
                         turn_started_at=turn_started_at,
                     )
                 )
-
+                metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+                _record_projection_event(
+                    current_projection,
+                    _build_stream_event(
+                        "tool_result",
+                        session_id=active_session_id,
+                        agent=active_agent,
+                        agent_kind=agent_kind,
+                        depth=depth,
+                        round=round_no,
+                        delegation_id=str(metadata.get("delegation_id", "")).strip() or None,
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                        status=str(metadata.get("status", "completed")),
+                        output_preview=_tool_result_preview(result),
+                    ),
+                )
                 if tool_call["name"] in {"plan_enter", "plan_exit"}:
                     interrupted_message, should_cancel = _handle_mode_switch_tool_result(
                         session_id=active_session_id,
@@ -3734,8 +4252,30 @@ def run_session(
                         turn_started_at=turn_started_at,
                     )
                     if interrupted_message is not None:
-                        if mode_enabled:
-                            SESSION_MEMORY_STORE.save(active_session_id, messages)
+                        _run_loop_hooks(
+                            effective_loop_hooks,
+                            "after",
+                            ctx=_build_loop_hook_context(
+                                active_session_id=active_session_id,
+                                active_agent=active_agent,
+                                agent_kind=agent_kind,
+                                depth=depth,
+                                stream=False,
+                                delegation_id=delegation_id,
+                                parent_tool_call_id=parent_tool_call_id,
+                                turn_started_at=turn_started_at,
+                                round_no=round_no,
+                                current_mode=current_mode,
+                                tool_call_owner_map=tool_call_owner_map,
+                                projection=AssistantProjection(
+                                    assistant_message=interrupted_message,
+                                    process_items=current_projection.process_items,
+                                    display_parts=current_projection.display_parts,
+                                ),
+                                save_enabled=mode_enabled,
+                                save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                            ),
+                        )
                         return _handle_session_hook_success(
                             effective_session_hooks,
                             session_hook_ctx,
@@ -3760,8 +4300,30 @@ def run_session(
                     turn_started_at=turn_started_at,
                 )
                 if interrupted_message is not None:
-                    if mode_enabled:
-                        SESSION_MEMORY_STORE.save(active_session_id, messages)
+                    _run_loop_hooks(
+                        effective_loop_hooks,
+                        "after",
+                        ctx=_build_loop_hook_context(
+                            active_session_id=active_session_id,
+                            active_agent=active_agent,
+                            agent_kind=agent_kind,
+                            depth=depth,
+                            stream=False,
+                            delegation_id=delegation_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                            turn_started_at=turn_started_at,
+                            round_no=round_no,
+                            current_mode=current_mode,
+                            tool_call_owner_map=tool_call_owner_map,
+                            projection=AssistantProjection(
+                                assistant_message=interrupted_message,
+                                process_items=current_projection.process_items,
+                                display_parts=current_projection.display_parts,
+                            ),
+                            save_enabled=mode_enabled,
+                            save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                        ),
+                    )
                     return _handle_session_hook_success(
                         effective_session_hooks,
                         session_hook_ctx,
@@ -3778,8 +4340,30 @@ def run_session(
                     turn_started_at=turn_started_at,
                 )
                 messages.append(message)
-                if mode_enabled:
-                    SESSION_MEMORY_STORE.save(active_session_id, messages)
+                _run_loop_hooks(
+                    effective_loop_hooks,
+                    "after",
+                    ctx=_build_loop_hook_context(
+                        active_session_id=active_session_id,
+                        active_agent=active_agent,
+                        agent_kind=agent_kind,
+                        depth=depth,
+                        stream=False,
+                        delegation_id=delegation_id,
+                        parent_tool_call_id=parent_tool_call_id,
+                        turn_started_at=turn_started_at,
+                        round_no=round_no,
+                        current_mode=current_mode,
+                        tool_call_owner_map=tool_call_owner_map,
+                        projection=AssistantProjection(
+                            assistant_message=message,
+                            process_items=current_projection.process_items,
+                            display_parts=current_projection.display_parts,
+                        ),
+                        save_enabled=mode_enabled,
+                        save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                    ),
+                )
                 return _handle_session_hook_success(
                     effective_session_hooks,
                     session_hook_ctx,
@@ -3787,7 +4371,34 @@ def run_session(
                     started_at=session_hook_started_at,
                     message=message,
                 )
+            _run_loop_hooks(
+                effective_loop_hooks,
+                "after",
+                ctx=_build_loop_hook_context(
+                    active_session_id=active_session_id,
+                    active_agent=active_agent,
+                    agent_kind=agent_kind,
+                    depth=depth,
+                    stream=False,
+                    delegation_id=delegation_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    turn_started_at=turn_started_at,
+                    round_no=round_no,
+                    current_mode=current_mode,
+                    tool_call_owner_map=tool_call_owner_map,
+                    projection=current_projection,
+                    save_enabled=mode_enabled,
+                    save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                ),
+            )
     except Exception as exc:
+        _run_loop_hooks(
+            effective_loop_hooks,
+            "error",
+            ctx=loop_hook_ctx if "loop_hook_ctx" in locals() else {},
+            error=exc,
+            normalized_error=normalize_error(exc),
+        )
         _handle_session_hook_error(
             effective_session_hooks,
             session_hook_ctx,
@@ -3812,6 +4423,7 @@ def run_session_stream_events(
     todo_tool_names: set[str] | None = None,
     tool_hooks: list[ToolHook] | None = None,
     session_hooks: list[SessionHook] | None = None,
+    delegation_hooks: list[DelegationHook] | None = None,
     llm_config: ResolvedLLMConfig | None = None,
     runtime_agent: str | None = None,
     max_rounds: int | None = None,
@@ -3834,6 +4446,7 @@ def run_session_stream_events(
         todo_tool_names=todo_tool_names,
         tool_hooks=tool_hooks,
         session_hooks=session_hooks,
+        delegation_hooks=delegation_hooks,
         llm_config=llm_config,
         runtime_agent=runtime_agent,
         max_rounds=max_rounds,
