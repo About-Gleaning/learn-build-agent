@@ -337,6 +337,7 @@ const API_BASE = resolveApiBase();
 const AUTO_SCROLL_THRESHOLD = 56;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const EXPECTED_WORKSPACE_ROOT = (import.meta.env.VITE_EXPECTED_WORKSPACE_ROOT as string | undefined)?.trim() || "";
+const SESSION_STORAGE_KEY_PREFIX = "my-agent:last-session-id:";
 const PATH_SUGGESTION_LIMIT = 50;
 const PATH_SUGGESTION_DEBOUNCE_MS = 150;
 const PATH_SUGGESTION_CACHE_TTL_MS = 30_000;
@@ -354,6 +355,34 @@ function buildSessionId(): string {
 
 function isValidSessionId(sessionId: string): boolean {
   return SESSION_ID_PATTERN.test(sessionId);
+}
+
+function buildSessionStorageKey(): string {
+  const workspaceKey = EXPECTED_WORKSPACE_ROOT || window.location.origin;
+  return `${SESSION_STORAGE_KEY_PREFIX}${workspaceKey}`;
+}
+
+function loadPersistedSessionId(): string {
+  try {
+    const storedSessionId = window.localStorage.getItem(buildSessionStorageKey())?.trim() || "";
+    if (storedSessionId && isValidSessionId(storedSessionId)) {
+      return storedSessionId;
+    }
+  } catch {
+    // localStorage 可能被隐私模式或浏览器策略禁用，失败时保持原有随机会话行为。
+  }
+  return buildSessionId();
+}
+
+function persistSessionId(sessionId: string): void {
+  if (!isValidSessionId(sessionId)) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(buildSessionStorageKey(), sessionId);
+  } catch {
+    // 持久化只是刷新恢复兜底，失败不能影响当前会话交互。
+  }
 }
 
 function buildProviderModelKey(provider: string, model: string): string {
@@ -2103,7 +2132,7 @@ function renderQuestionPrompt(params: { message: UiMessage; isLatest: boolean })
 }
 
 export function App() {
-  const [sessionId, setSessionId] = useState(() => buildSessionId());
+  const [sessionId, setSessionId] = useState(() => loadPersistedSessionId());
   const [sessionLoadDraft, setSessionLoadDraft] = useState("");
   const [isSessionLoadOpen, setIsSessionLoadOpen] = useState(false);
   const [isLoadingSession, setIsLoadingSession] = useState(false);
@@ -2430,6 +2459,10 @@ export function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    persistSessionId(sessionId);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!activeQuestion) {
