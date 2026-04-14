@@ -709,7 +709,7 @@ def test_run_read_should_reject_other_session_runtime_file(tmp_path):
 
 
 def test_run_read_should_allow_skills_file_under_runtime_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     _set_test_session("skills-read")
     skill_file = get_workspace().skills_dir / "demo-skill" / "references" / "rule.md"
@@ -818,7 +818,7 @@ def test_run_lsp_should_fail_for_query_error_status(tmp_path, monkeypatch):
 
 
 def test_run_load_skill_should_return_structured_success(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     _set_test_session("skills-load")
     skill_dir = get_workspace().skills_dir / "demo-skill"
@@ -841,7 +841,7 @@ def test_run_load_skill_should_return_structured_success(tmp_path, monkeypatch):
 
 
 def test_run_load_skill_should_reject_empty_name(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     _set_test_session("skills-load-empty")
     registry = SkillRegistry(get_workspace().skills_dir)
@@ -854,7 +854,7 @@ def test_run_load_skill_should_reject_empty_name(tmp_path, monkeypatch):
 
 
 def test_run_load_skill_should_match_name_case_insensitively(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     _set_test_session("skills-load-case")
     skill_dir = get_workspace().skills_dir / "demo-skill"
@@ -873,7 +873,7 @@ def test_run_load_skill_should_match_name_case_insensitively(tmp_path, monkeypat
 
 
 def test_run_load_skill_should_return_not_found_when_skill_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     _set_test_session("skills-load-missing")
     registry = SkillRegistry(get_workspace().skills_dir)
@@ -915,7 +915,7 @@ def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
 
 
 def test_run_write_should_allow_runtime_skills_file_creation(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     _set_test_session("skills-write")
     target = get_workspace().skills_dir / "demo-skill" / "SKILL.md"
@@ -1089,7 +1089,7 @@ def test_lsp_result_metadata_should_include_wait_fields():
         diagnostics_wait_ms=830,
         diagnostics_settled=True,
         lsp_workspace_root="/tmp/project",
-        lsp_data_dir="/tmp/.my-agent/lsp/java/abc123",
+        lsp_data_dir="/tmp/.codepilot/lsp/java/abc123",
         lsp_workspace_selection_reason="maven_aggregator_root",
         lsp_server_key="java:/tmp/project:direct_lsp",
         lsp_snapshot_uri="file:///tmp/project/src/Foo.java",
@@ -1107,7 +1107,7 @@ def test_lsp_result_metadata_should_include_wait_fields():
     assert metadata["diagnostics_wait_ms"] == 830
     assert metadata["diagnostics_settled"] is True
     assert metadata["lsp_workspace_root"] == "/tmp/project"
-    assert metadata["lsp_data_dir"] == "/tmp/.my-agent/lsp/java/abc123"
+    assert metadata["lsp_data_dir"] == "/tmp/.codepilot/lsp/java/abc123"
     assert metadata["lsp_workspace_selection_reason"] == "maven_aggregator_root"
     assert metadata["recent_publish_uris"] == "src/Foo.java#2(3)"
 

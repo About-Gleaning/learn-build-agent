@@ -96,7 +96,7 @@ def resolve_frontend_dir() -> Path:
     frontend_dir = resolve_project_root() / "frontend"
     if not frontend_dir.is_dir():
         raise WebStackError(
-            f"未找到前端目录：{frontend_dir}。当前版本的 `my-agent web` 需要仓库内置 `frontend/` 才能一键启动。"
+            f"未找到前端目录：{frontend_dir}。当前版本的 `codepilot web` 需要仓库内置 `frontend/` 才能一键启动。"
         )
     if not (frontend_dir / "package.json").is_file():
         raise WebStackError(f"前端目录缺少 `package.json`：{frontend_dir}")
@@ -106,7 +106,7 @@ def resolve_frontend_dir() -> Path:
 def ensure_frontend_dev_prerequisites(frontend_dir: Path) -> str:
     pnpm_binary = shutil.which("pnpm")
     if not pnpm_binary:
-        raise WebStackError("未检测到 `pnpm`。请先安装 `pnpm`，再重新执行 `my-agent web`。")
+        raise WebStackError("未检测到 `pnpm`。请先安装 `pnpm`，再重新执行 `codepilot web`。")
     if not (frontend_dir / "node_modules").is_dir():
         raise WebStackError(
             f"前端依赖未安装：{frontend_dir / 'node_modules'}。请先执行 `cd {frontend_dir} && pnpm install`。"
@@ -237,9 +237,9 @@ def start_frontend_dev_server(
         cwd=frontend_dir,
         log_path=log_path,
         env={
-            # my-agent web 必须走当前 Vite 实例的同源代理，避免本地 .env 固定到旧后端端口。
+            # codepilot web 必须走当前 Vite 实例的同源代理，避免本地 .env 固定到旧后端端口。
             "VITE_API_BASE_URL": "",
-            "MY_AGENT_VITE_BACKEND_URL": backend_url,
+            "CODEPILOT_VITE_BACKEND_URL": backend_url,
             "VITE_EXPECTED_WORKSPACE_ROOT": str(workspace_root.resolve()),
         },
     )
@@ -486,7 +486,7 @@ def format_web_stack_prune_report(
         if item.error:
             lines.append(f"  错误: {item.error}")
     if unmanaged_processes:
-        lines.append("发现未登记的疑似 my-agent Web 后端监听进程，prune 不会自动停止它们：")
+        lines.append("发现未登记的疑似 codepilot Web 后端监听进程，prune 不会自动停止它们：")
         for process in unmanaged_processes:
             lines.append(f"- PID {process.pid} | 端口 {process.port} | {process.command}")
     return "\n".join(lines)
@@ -507,6 +507,54 @@ def prune_web_dev_stacks() -> list[WebStackPruneResult]:
             continue
         results.append(WebStackPruneResult(inspection=inspection, action="removed"))
     return results
+
+
+def stop_all_web_dev_stacks() -> list[WebStackPruneResult]:
+    results: list[WebStackPruneResult] = []
+    for inspection in inspect_all_web_dev_stacks():
+        try:
+            _stop_pid(inspection.state.frontend_pid)
+            _stop_pid(inspection.state.backend_pid)
+            _remove_state_file(inspection.state_path)
+        except OSError as exc:
+            results.append(WebStackPruneResult(inspection=inspection, action="failed", error=str(exc)))
+            continue
+        results.append(WebStackPruneResult(inspection=inspection, action="removed"))
+    return results
+
+
+def format_web_stack_stop_all_report(
+    results: list[WebStackPruneResult],
+    *,
+    unmanaged_processes: list[UnmanagedWebProcess] | None = None,
+) -> str:
+    unmanaged_processes = unmanaged_processes or []
+    if not results and not unmanaged_processes:
+        return "未发现任何已登记的 Web 开发栈实例。"
+
+    lines: list[str] = []
+    stopped_count = sum(1 for item in results if item.action == "removed")
+    failed_count = sum(1 for item in results if item.action == "failed")
+    lines.append(f"停止完成：共 {len(results)} 个已登记实例，已停止 {stopped_count} 个，失败 {failed_count} 个。")
+    for item in results:
+        inspection = item.inspection
+        action_label = "已停止" if item.action == "removed" else "停止失败"
+        lines.extend(
+            [
+                f"- {action_label} | {inspection.status} | 工作区: {inspection.state.workspace_root}",
+                f"  状态文件: {inspection.state_path}",
+                f"  后端: {inspection.state.backend_url} (PID {inspection.state.backend_pid})",
+                f"  前端: {(inspection.state.frontend_local_url or inspection.state.frontend_url)} (PID {inspection.state.frontend_pid})",
+                f"  健康检查: {_format_stack_health(inspection)}",
+            ]
+        )
+        if item.error:
+            lines.append(f"  错误: {item.error}")
+    if unmanaged_processes:
+        lines.append("发现未登记的疑似 codepilot Web 后端监听进程，stop --all 不会自动停止它们：")
+        for process in unmanaged_processes:
+            lines.append(f"- PID {process.pid} | 端口 {process.port} | {process.command}")
+    return "\n".join(lines)
 
 
 def find_unmanaged_web_processes(inspections: list[WebStackInspection] | None = None) -> list[UnmanagedWebProcess]:
@@ -584,7 +632,7 @@ def _ensure_not_running() -> None:
     if status in {"running", "degraded"} and state is not None:
         raise WebStackError(
             "当前工作区已有 Web 开发栈实例正在运行或处于异常残留状态。"
-            "请先执行 `my-agent web status` 查看详情；若怀疑存在跨工作区残留，执行 `my-agent web prune` 统一清理异常实例。"
+            "请先执行 `codepilot web status` 查看详情；若怀疑存在跨工作区残留，执行 `codepilot web prune` 统一清理异常实例。"
         )
     if status in {"stopped", "stale"}:
         _remove_state_file()

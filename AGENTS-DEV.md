@@ -29,7 +29,7 @@
 
 - `src/main.py`：CLI 兼容入口，内部转调 `agent.cli`
 - `src/web_main.py`：FastAPI 启动入口
-- `src/agent/cli.py`：正式 CLI 入口，支持 `my-agent` 与 `my-agent web`
+- `src/agent/cli.py`：正式 CLI 入口，支持 `codepilot` 与 `codepilot web`
 
 ### 2.2 运行时核心
 
@@ -42,7 +42,7 @@
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要拼装
 - `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度
 - `src/agent/runtime/agents.py`：Agent 元信息唯一来源
-- `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与 `MY_AGENT_HOME` 解析
+- `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与 `CODEPILOT_HOME` 解析
 - `src/agent/runtime/web_dev_server.py`：Web 开发栈的启动、停止、状态与清理
 
 ### 2.3 协议与配置
@@ -171,7 +171,7 @@ LSP 查询请求
 
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定。
 - 禁止继续散落使用 `Path.cwd()` 推导边界。
-- 默认运行态目录位于 `~/.my-agent/`，可通过 `MY_AGENT_HOME` 覆盖。
+- 默认运行态目录位于 `~/.codepilot/`，可通过 `CODEPILOT_HOME` 覆盖。
 - 常见运行态目录包括：
   - `workspaces/sessions/`
   - `workspaces/todo/`
@@ -182,7 +182,7 @@ LSP 查询请求
 
 ### 5.2 AGENTS 加载规则
 
-- system prompt 组装时必须先尝试加载 `~/.my-agent/AGENTS.md`
+- system prompt 组装时必须先尝试加载 `~/.codepilot/AGENTS.md`
 - 再尝试加载当前工作区 `AGENTS.md`
 - 任一文件不存在、为空或读取失败时都应自动忽略
 
@@ -206,11 +206,12 @@ LSP 查询请求
 
 ### 5.5 Web 开发栈
 
-- `my-agent web` 支持按工作区并行启动多套实例。
+- `codepilot web` 支持按工作区并行启动多套实例。
 - 端口冲突时必须自动分配空闲端口，并把实际前后端地址写入当前工作区对应状态文件。
-- Web 前端默认必须走同源 `/api` 代理，由当前 Vite 实例转发到本工作区后端；禁止在 `my-agent web` 启动链路中把前端固定到某个后端端口。
-- `my-agent web prune` 必须扫描全部工作区状态，只清理 `degraded/stale` 异常残留，并同时尝试停止登记的前后端 PID，保留健康实例。
-- `my-agent web prune` 对未登记的疑似 Web 后端监听进程只做报告提示，禁止默认 kill，避免误伤用户手动启动的服务。
+- Web 前端默认必须走同源 `/api` 代理，由当前 Vite 实例转发到本工作区后端；禁止在 `codepilot web` 启动链路中把前端固定到某个后端端口。
+- `codepilot web prune` 必须扫描全部工作区状态，只清理 `degraded/stale` 异常残留，并同时尝试停止登记的前后端 PID，保留健康实例。
+- `codepilot web prune` 对未登记的疑似 Web 后端监听进程只做报告提示，禁止默认 kill，避免误伤用户手动启动的服务。
+- `codepilot web stop --all` 必须扫描全部工作区状态，停止所有已登记实例并移除状态文件；未登记疑似进程只做报告提示，禁止默认 kill。
 - Web 前端必须校验后端返回的 `workspace_root` 是否与当前实例预期工作区一致；若不一致，必须阻断继续聊天。
 
 ### 5.6 路径补全
@@ -363,12 +364,13 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 
 ```bash
 pip install -e .
-my-agent
-my-agent --help
-my-agent web start --host 127.0.0.1 --port 8000
-my-agent web status
-my-agent web stop
-my-agent web prune
+codepilot
+codepilot --help
+codepilot web start --host 127.0.0.1 --port 8000
+codepilot web status
+codepilot web stop
+codepilot web stop --all
+codepilot web prune
 pytest -q
 PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 ```

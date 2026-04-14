@@ -18,17 +18,19 @@ def test_main_should_print_help_and_skip_workspace_configuration(monkeypatch, ca
     output = capsys.readouterr().out
     assert exc_info.value.code == 0
     assert called == {"configured": False}
-    assert "my-agent 命令总览" in output
+    assert "codepilot 命令总览" in output
     assert "-h, --help" in output
-    assert "my-agent web prune" in output
+    assert "codepilot web prune" in output
+    assert "codepilot web stop --all" in output
     assert "--workdir WORKDIR" in output
     assert "--session SESSION" in output
     assert "--mode {build,plan}" in output
     assert "--host HOST" in output
     assert "--port PORT" in output
     assert "--share-frontend" in output
+    assert "--all" in output
     assert "--verbose" in output
-    assert "顶层参数用于 my-agent ...；Web 参数用于 my-agent web ..." in output
+    assert "顶层参数用于 codepilot ...；Web 参数用于 codepilot web ..." in output
 
 
 def test_main_should_print_web_help(monkeypatch, capsys):
@@ -39,7 +41,7 @@ def test_main_should_print_web_help(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert exc_info.value.code == 0
-    assert "usage: my-agent web" in output
+    assert "usage: codepilot web" in output
     assert "--host HOST" in output
     assert "--port PORT" in output
     assert "--share-frontend" in output
@@ -62,16 +64,18 @@ def test_help_text_should_cover_parser_arguments():
     output = cli_module._format_help_text()
 
     assert "-h, --help" in output
-    assert "my-agent --help" in output
+    assert "codepilot --help" in output
     assert "--workdir WORKDIR" in output
     assert "--session SESSION" in output
     assert "--mode {build,plan}" in output
-    assert "my-agent web status" in output
-    assert "my-agent web stop" in output
-    assert "my-agent web prune" in output
+    assert "codepilot web status" in output
+    assert "codepilot web stop" in output
+    assert "codepilot web stop --all" in output
+    assert "codepilot web prune" in output
     assert "--host HOST" in output
     assert "--port PORT" in output
     assert "--share-frontend" in output
+    assert "--all" in output
     assert "--verbose" in output
     assert "  web" in output
 
@@ -163,6 +167,27 @@ def test_main_should_route_web_stop(monkeypatch, tmp_path):
     cli_module.main(["--workdir", str(tmp_path), "web", "stop"])
 
     assert captured == {"stop": True}
+
+
+def test_main_should_route_web_stop_all(monkeypatch, tmp_path):
+    captured: dict[str, bool] = {}
+
+    monkeypatch.setattr(cli_module, "configure_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_module, "run_web_stop_all", lambda: captured.update({"stop_all": True}))
+
+    cli_module.main(["--workdir", str(tmp_path), "web", "stop", "--all"])
+
+    assert captured == {"stop_all": True}
+
+
+def test_main_should_reject_web_all_for_non_stop_action(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli_module, "configure_workspace", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.main(["--workdir", str(tmp_path), "web", "status", "--all"])
+
+    assert exc_info.value.code == 2
+    assert "--all 仅支持" in capsys.readouterr().err
 
 
 def test_main_should_route_web_prune(monkeypatch, tmp_path):

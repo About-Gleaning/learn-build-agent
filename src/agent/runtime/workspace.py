@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_RUNTIME_HOME = Path(os.getenv("MY_AGENT_HOME", str(Path.home() / ".my-agent"))).expanduser().resolve()
+DEFAULT_RUNTIME_HOME = Path(os.getenv("CODEPILOT_HOME", str(Path.home() / ".codepilot"))).expanduser().resolve()
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ def _build_workspace_id(root: Path) -> str:
 
 
 def _resolve_runtime_home() -> Path:
-    runtime_home = os.getenv("MY_AGENT_HOME")
+    runtime_home = os.getenv("CODEPILOT_HOME")
     if runtime_home:
         return Path(runtime_home).expanduser().resolve()
     return DEFAULT_RUNTIME_HOME.resolve()

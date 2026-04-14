@@ -169,7 +169,7 @@ def test_start_frontend_dev_server_should_force_same_origin_api_proxy(monkeypatc
     env = captured["env"]
     assert env == {
         "VITE_API_BASE_URL": "",
-        "MY_AGENT_VITE_BACKEND_URL": "http://127.0.0.1:8001",
+        "CODEPILOT_VITE_BACKEND_URL": "http://127.0.0.1:8001",
         "VITE_EXPECTED_WORKSPACE_ROOT": str(tmp_path.resolve()),
     }
 
@@ -517,6 +517,154 @@ def test_prune_web_dev_stacks_should_stop_backend_when_frontend_is_down(monkeypa
     assert removed_paths == [str(state_path)]
 
 
+def test_stop_all_web_dev_stacks_should_stop_every_registered_instance(monkeypatch, tmp_path):
+    running_state = web_dev_server_module.WebStackState(
+        workspace_root="/tmp/running",
+        host="0.0.0.0",
+        port=8000,
+        backend_pid=101,
+        frontend_pid=201,
+        backend_url="http://127.0.0.1:8000",
+        frontend_url="http://127.0.0.1:5173",
+        backend_log_path="/tmp/running-backend.log",
+        frontend_log_path="/tmp/running-frontend.log",
+        started_at=123.0,
+        status="running",
+        frontend_port=5173,
+    )
+    degraded_state = web_dev_server_module.WebStackState(
+        workspace_root="/tmp/degraded",
+        host="0.0.0.0",
+        port=8001,
+        backend_pid=102,
+        frontend_pid=202,
+        backend_url="http://127.0.0.1:8001",
+        frontend_url="http://127.0.0.1:5174",
+        backend_log_path="/tmp/degraded-backend.log",
+        frontend_log_path="/tmp/degraded-frontend.log",
+        started_at=123.0,
+        status="running",
+        frontend_port=5174,
+    )
+    stale_state = web_dev_server_module.WebStackState(
+        workspace_root="/tmp/stale",
+        host="0.0.0.0",
+        port=8002,
+        backend_pid=103,
+        frontend_pid=203,
+        backend_url="http://127.0.0.1:8002",
+        frontend_url="http://127.0.0.1:5175",
+        backend_log_path="/tmp/stale-backend.log",
+        frontend_log_path="/tmp/stale-frontend.log",
+        started_at=123.0,
+        status="running",
+        frontend_port=5175,
+    )
+    running_path = tmp_path / "running" / web_dev_server_module.STATE_FILENAME
+    degraded_path = tmp_path / "degraded" / web_dev_server_module.STATE_FILENAME
+    stale_path = tmp_path / "stale" / web_dev_server_module.STATE_FILENAME
+    states = {running_path: running_state, degraded_path: degraded_state, stale_path: stale_state}
+    status_map = {"/tmp/running": "running", "/tmp/degraded": "degraded", "/tmp/stale": "stale"}
+    stop_calls: list[int] = []
+    removed_paths: list[str] = []
+
+    monkeypatch.setattr(web_dev_server_module, "iter_web_dev_state_paths", lambda: list(states.keys()))
+    monkeypatch.setattr(web_dev_server_module, "_load_state_from_path", lambda path: states[path])
+
+    def fake_inspect(state, *, state_path=None):
+        return web_dev_server_module.WebStackInspection(
+            state_path=state_path,
+            state=state,
+            status=status_map[state.workspace_root],
+            backend_alive=status_map[state.workspace_root] == "running",
+            frontend_alive=status_map[state.workspace_root] == "running",
+            backend_ready=status_map[state.workspace_root] == "running",
+            frontend_ready=status_map[state.workspace_root] == "running",
+        )
+
+    monkeypatch.setattr(web_dev_server_module, "inspect_web_stack_state", fake_inspect)
+    monkeypatch.setattr(web_dev_server_module, "_stop_pid", lambda pid: stop_calls.append(pid))
+    monkeypatch.setattr(web_dev_server_module, "_remove_state_file", lambda state_path=None: removed_paths.append(str(state_path)))
+
+    results = web_dev_server_module.stop_all_web_dev_stacks()
+
+    assert [(item.inspection.state.workspace_root, item.action) for item in results] == [
+        ("/tmp/running", "removed"),
+        ("/tmp/degraded", "removed"),
+        ("/tmp/stale", "removed"),
+    ]
+    assert stop_calls == [201, 101, 202, 102, 203, 103]
+    assert removed_paths == [str(running_path), str(degraded_path), str(stale_path)]
+
+
+def test_stop_all_web_dev_stacks_should_continue_after_single_failure(monkeypatch, tmp_path):
+    first_state = web_dev_server_module.WebStackState(
+        workspace_root="/tmp/first",
+        host="0.0.0.0",
+        port=8000,
+        backend_pid=101,
+        frontend_pid=201,
+        backend_url="http://127.0.0.1:8000",
+        frontend_url="http://127.0.0.1:5173",
+        backend_log_path="/tmp/first-backend.log",
+        frontend_log_path="/tmp/first-frontend.log",
+        started_at=123.0,
+        status="running",
+        frontend_port=5173,
+    )
+    second_state = web_dev_server_module.WebStackState(
+        workspace_root="/tmp/second",
+        host="0.0.0.0",
+        port=8001,
+        backend_pid=102,
+        frontend_pid=202,
+        backend_url="http://127.0.0.1:8001",
+        frontend_url="http://127.0.0.1:5174",
+        backend_log_path="/tmp/second-backend.log",
+        frontend_log_path="/tmp/second-frontend.log",
+        started_at=123.0,
+        status="running",
+        frontend_port=5174,
+    )
+    first_path = tmp_path / "first" / web_dev_server_module.STATE_FILENAME
+    second_path = tmp_path / "second" / web_dev_server_module.STATE_FILENAME
+    states = {first_path: first_state, second_path: second_state}
+    removed_paths: list[str] = []
+
+    monkeypatch.setattr(web_dev_server_module, "iter_web_dev_state_paths", lambda: list(states.keys()))
+    monkeypatch.setattr(web_dev_server_module, "_load_state_from_path", lambda path: states[path])
+    monkeypatch.setattr(
+        web_dev_server_module,
+        "inspect_web_stack_state",
+        lambda state, *, state_path=None: web_dev_server_module.WebStackInspection(
+            state_path=state_path,
+            state=state,
+            status="running",
+            backend_alive=True,
+            frontend_alive=True,
+            backend_ready=True,
+            frontend_ready=True,
+        ),
+    )
+
+    def fake_remove_state_file(state_path=None):
+        if state_path == first_path:
+            raise OSError("remove failed")
+        removed_paths.append(str(state_path))
+
+    monkeypatch.setattr(web_dev_server_module, "_stop_pid", lambda pid: None)
+    monkeypatch.setattr(web_dev_server_module, "_remove_state_file", fake_remove_state_file)
+
+    results = web_dev_server_module.stop_all_web_dev_stacks()
+
+    assert [(item.inspection.state.workspace_root, item.action) for item in results] == [
+        ("/tmp/first", "failed"),
+        ("/tmp/second", "removed"),
+    ]
+    assert "remove failed" in results[0].error
+    assert removed_paths == [str(second_path)]
+
+
 def test_format_web_stack_prune_report_should_include_summary_and_health(monkeypatch, tmp_path):
     inspection = web_dev_server_module.WebStackInspection(
         state_path=tmp_path / "state.json",
@@ -563,9 +711,50 @@ def test_format_web_stack_prune_report_should_include_unmanaged_processes():
         ],
     )
 
-    assert "未登记的疑似 my-agent Web 后端监听进程" in output
+    assert "未登记的疑似 codepilot Web 后端监听进程" in output
     assert "PID 301" in output
     assert "端口 8000" in output
+
+
+def test_format_web_stack_stop_all_report_should_include_unmanaged_processes(tmp_path):
+    inspection = web_dev_server_module.WebStackInspection(
+        state_path=tmp_path / "state.json",
+        state=web_dev_server_module.WebStackState(
+            workspace_root="/tmp/running",
+            host="0.0.0.0",
+            port=8000,
+            backend_pid=101,
+            frontend_pid=201,
+            backend_url="http://127.0.0.1:8000",
+            frontend_url="http://127.0.0.1:5173",
+            backend_log_path="/tmp/running-backend.log",
+            frontend_log_path="/tmp/running-frontend.log",
+            started_at=123.0,
+            status="running",
+            frontend_port=5173,
+        ),
+        status="running",
+        backend_alive=True,
+        frontend_alive=True,
+        backend_ready=True,
+        frontend_ready=True,
+    )
+
+    output = web_dev_server_module.format_web_stack_stop_all_report(
+        [web_dev_server_module.WebStackPruneResult(inspection=inspection, action="removed")],
+        unmanaged_processes=[
+            web_dev_server_module.UnmanagedWebProcess(
+                pid=301,
+                port=8000,
+                command="python -m uvicorn agent.web.app:app --port 8000",
+            )
+        ],
+    )
+
+    assert "停止完成：共 1 个已登记实例，已停止 1 个，失败 0 个。" in output
+    assert "已停止 | running | 工作区: /tmp/running" in output
+    assert "stop --all 不会自动停止它们" in output
+    assert "PID 301" in output
 
 
 def test_format_web_stack_status_should_include_runtime_file_paths(monkeypatch, tmp_path):

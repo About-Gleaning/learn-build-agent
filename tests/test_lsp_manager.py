@@ -10,7 +10,7 @@ import agent.lsp.manager as manager_module
 from agent.lsp.manager import LspManager
 from agent.lsp.servers.jdtls import JdtlsServerAdapter
 from agent.lsp.servers.typescript import TypeScriptLspServerAdapter
-from agent.runtime.workspace import configure_workspace
+from agent.runtime.workspace import configure_workspace, get_workspace
 
 
 def _build_lsp_settings(*, ttl_seconds: int = 60) -> LspSettings:
@@ -1452,5 +1452,9 @@ def test_jdtls_build_command_should_append_writable_configuration_dir(monkeypatc
     assert "-configuration" in command
     configuration_index = command.index("-configuration") + 1
     configuration_dir = Path(command[configuration_index])
+    expected_data_dir = adapter.build_data_dir(tmp_path)
+    workspace_home = get_workspace().workspace_home
+
     assert configuration_dir.exists()
-    assert str(configuration_dir).startswith("/private/tmp/my-main-agent-test-home/workspaces/")
+    assert configuration_dir == expected_data_dir.parent / f"{expected_data_dir.name}-configuration"
+    assert configuration_dir.is_relative_to(workspace_home)

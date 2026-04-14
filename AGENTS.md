@@ -36,9 +36,9 @@
 ## Build, Test, and Development Commands
 
 - `pip install -e .`：以可编辑模式安装项目，适合本地开发与调试 CLI。
-- `my-agent` / `my-agent --help`：启动 CLI 或查看顶层命令与参数说明。
-- `my-agent web start --host 127.0.0.1 --port 8000`：启动当前工作区的 Web 开发栈。
-- `my-agent web status` / `my-agent web stop` / `my-agent web prune`：查看、停止或清理 Web 实例状态。
+- `codepilot` / `codepilot --help`：启动 CLI 或查看顶层命令与参数说明。
+- `codepilot web start --host 127.0.0.1 --port 8000`：启动当前工作区的 Web 开发栈。
+- `codepilot web status` / `codepilot web stop` / `codepilot web stop --all` / `codepilot web prune`：查看、停止或清理 Web 实例状态。
 - `pytest -q`：运行 Python 测试主入口。
 - `PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')`：做一次低成本语法编译检查，适合提交前快速自检。
 - Web 模式首次启动前，先在 `frontend/` 下执行 `pnpm install`。

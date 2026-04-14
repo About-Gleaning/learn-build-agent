@@ -486,7 +486,7 @@ def test_tool_logging_hook_should_log_java_project_issue_fields(caplog):
                     "diagnostics_truncated": False,
                     "lsp_language": "java",
                     "lsp_server": "jdtls",
-                    "lsp_data_dir": "/tmp/.my-agent/lsp/java/server-key-hash",
+                    "lsp_data_dir": "/tmp/.codepilot/lsp/java/server-key-hash",
                     "java_project_issue_code": "maven_profile_conflict",
                     "java_project_state": "profile_conflict",
                     "java_maven_profiles": ["hna"],
@@ -516,7 +516,7 @@ def test_tool_logging_hook_should_log_java_project_issue_fields(caplog):
     assert "java_maven_profiles=hna" in caplog.text
     assert "java_maven_profiles_source=auto_detected" in caplog.text
     assert "java_maven_local_repository=/custom/maven/repository" in caplog.text
-    assert "lsp_data_dir=/tmp/.my-agent/lsp/java/server-key-hash" in caplog.text
+    assert "lsp_data_dir=/tmp/.codepilot/lsp/java/server-key-hash" in caplog.text
 
 
 def test_tool_logging_hook_should_skip_lsp_summary_for_non_lsp_tools(caplog):

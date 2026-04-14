@@ -49,16 +49,16 @@ GITHUB_TOKEN=
 ### 3. 启动 CLI
 
 ```bash
-my-agent
-my-agent --help
+codepilot
+codepilot --help
 ```
 
 常见参数：
 
 ```bash
-my-agent --workdir /path/to/project
-my-agent --session demo_001
-my-agent --mode plan
+codepilot --workdir /path/to/project
+codepilot --session demo_001
+codepilot --mode plan
 python3 src/main.py
 ```
 
@@ -75,18 +75,19 @@ pnpm install
 启动当前工作区的 Web 开发栈：
 
 ```bash
-my-agent web start --host 127.0.0.1 --port 8000
+codepilot web start --host 127.0.0.1 --port 8000
 ```
 
 常用命令：
 
 ```bash
-my-agent web --help
-my-agent web status
-my-agent web stop
-my-agent web prune
-my-agent web --share-frontend
-my-agent web --verbose
+codepilot web --help
+codepilot web status
+codepilot web stop
+codepilot web stop --all
+codepilot web prune
+codepilot web --share-frontend
+codepilot web --verbose
 ```
 
 ### 5. 运行测试
@@ -110,9 +111,9 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 
 ## 常见问题
 
-- `my-agent web` 报错缺少 `pnpm`：先安装 `pnpm`
-- `my-agent web` 报错缺少 `frontend/node_modules`：先在 `frontend/` 下执行 `pnpm install`
-- 页面命中了旧 backend：先确认访问的是 `my-agent web start` 输出的“前端本机访问地址”；多工作区并行时不要把 `VITE_API_BASE_URL` 固定到某个后端端口，前端应走同源 `/api` 代理
-- Web 异常残留：执行 `my-agent web prune` 清理已登记的 degraded/stale 实例；健康实例会被保留，未登记的疑似后端监听进程只会在报告中提示，需人工确认后处理
+- `codepilot web` 报错缺少 `pnpm`：先安装 `pnpm`
+- `codepilot web` 报错缺少 `frontend/node_modules`：先在 `frontend/` 下执行 `pnpm install`
+- 页面命中了旧 backend：先确认访问的是 `codepilot web start` 输出的“前端本机访问地址”；多工作区并行时不要把 `VITE_API_BASE_URL` 固定到某个后端端口，前端应走同源 `/api` 代理
+- Web 异常残留：执行 `codepilot web prune` 清理已登记的 degraded/stale 实例；需要一次关闭所有已登记实例时执行 `codepilot web stop --all`；未登记的疑似后端监听进程只会在报告中提示，需人工确认后处理
 - 模型调用失败：检查对应 provider 的 API Key 是否已配置
 - `websearch` 不可用：检查 `EXA_API_KEY`
