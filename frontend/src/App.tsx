@@ -338,6 +338,7 @@ const AUTO_SCROLL_THRESHOLD = 56;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const EXPECTED_WORKSPACE_ROOT = (import.meta.env.VITE_EXPECTED_WORKSPACE_ROOT as string | undefined)?.trim() || "";
 const SESSION_STORAGE_KEY_PREFIX = "codepilot:last-session-id:";
+const RUNTIME_SELECTION_STORAGE_KEY_PREFIX = "codepilot:runtime-selection:";
 const PATH_SUGGESTION_LIMIT = 50;
 const PATH_SUGGESTION_DEBOUNCE_MS = 150;
 const PATH_SUGGESTION_CACHE_TTL_MS = 30_000;
@@ -362,6 +363,11 @@ function buildSessionStorageKey(): string {
   return `${SESSION_STORAGE_KEY_PREFIX}${workspaceKey}`;
 }
 
+function buildRuntimeSelectionStorageKey(): string {
+  const workspaceKey = EXPECTED_WORKSPACE_ROOT || window.location.origin;
+  return `${RUNTIME_SELECTION_STORAGE_KEY_PREFIX}${workspaceKey}`;
+}
+
 function loadPersistedSessionId(): string {
   try {
     const storedSessionId = window.localStorage.getItem(buildSessionStorageKey())?.trim() || "";
@@ -382,6 +388,39 @@ function persistSessionId(sessionId: string): void {
     window.localStorage.setItem(buildSessionStorageKey(), sessionId);
   } catch {
     // 持久化只是刷新恢复兜底，失败不能影响当前会话交互。
+  }
+}
+
+function readPersistedRuntimeSelection(): { mode: AgentName | null; providerModelKey: string } {
+  try {
+    const rawValue = window.localStorage.getItem(buildRuntimeSelectionStorageKey())?.trim() || "";
+    if (!rawValue) {
+      return { mode: null, providerModelKey: "" };
+    }
+    const parsedValue = JSON.parse(rawValue) as Record<string, unknown>;
+    const modeValue = typeof parsedValue.mode === "string" ? parsedValue.mode.trim() : "";
+    const providerModelKey = typeof parsedValue.providerModelKey === "string" ? parsedValue.providerModelKey.trim() : "";
+    return {
+      mode: modeValue === "build" || modeValue === "plan" ? modeValue : null,
+      providerModelKey,
+    };
+  } catch {
+    // 运行参数恢复只是刷新体验增强，失败时继续走运行配置默认值。
+    return { mode: null, providerModelKey: "" };
+  }
+}
+
+function persistRuntimeSelection(mode: AgentName, providerModelKey: string): void {
+  try {
+    window.localStorage.setItem(
+      buildRuntimeSelectionStorageKey(),
+      JSON.stringify({
+        mode,
+        providerModelKey: providerModelKey.trim(),
+      }),
+    );
+  } catch {
+    // localStorage 写入失败不应阻断发送消息、切换 agent 等核心交互。
   }
 }
 
@@ -2132,6 +2171,7 @@ function renderQuestionPrompt(params: { message: UiMessage; isLatest: boolean })
 }
 
 export function App() {
+  const persistedRuntimeSelectionRef = useRef(readPersistedRuntimeSelection());
   const [sessionId, setSessionId] = useState(() => loadPersistedSessionId());
   const [sessionLoadDraft, setSessionLoadDraft] = useState("");
   const [isSessionLoadOpen, setIsSessionLoadOpen] = useState(false);
@@ -2146,8 +2186,8 @@ export function App() {
   const [isApplyingModeSwitch, setIsApplyingModeSwitch] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [shouldFollow, setShouldFollow] = useState(true);
-  const [mode, setMode] = useState<AgentName>("build");
-  const [providerModelKey, setProviderModelKey] = useState("");
+  const [mode, setMode] = useState<AgentName>(() => persistedRuntimeSelectionRef.current.mode || "build");
+  const [providerModelKey, setProviderModelKey] = useState(() => persistedRuntimeSelectionRef.current.providerModelKey);
   const [activeProvider, setActiveProvider] = useState("");
   const [activeModel, setActiveModel] = useState("");
   const [reasoningDefaultCollapsed, setReasoningDefaultCollapsed] = useState(false);
@@ -2176,6 +2216,7 @@ export function App() {
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const pathSuggestionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const pathSuggestionCacheRef = useRef<Map<string, PathSuggestionCacheEntry>>(new Map());
+  const shouldApplyInitialHistoryProviderRef = useRef(!persistedRuntimeSelectionRef.current.providerModelKey);
 
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
@@ -2391,6 +2432,16 @@ export function App() {
     return providerModelOptions[0]?.key || "";
   }, [mode, modeDefaults, providerDefaults, providerModelOptions]);
 
+  const updateModeSelection = (nextMode: AgentName, nextProviderModelKey = providerModelKey) => {
+    setMode(nextMode);
+    persistRuntimeSelection(nextMode, nextProviderModelKey);
+  };
+
+  const updateProviderModelSelection = (nextProviderModelKey: string, nextMode = mode) => {
+    setProviderModelKey(nextProviderModelKey);
+    persistRuntimeSelection(nextMode, nextProviderModelKey);
+  };
+
   useEffect(() => {
     if (!shouldFollow) {
       return;
@@ -2405,8 +2456,14 @@ export function App() {
     if (!runtimeOptions) {
       return;
     }
-    setMode((prev) => (agentOptions.includes(prev) ? prev : runtimeOptions.default_agent));
-  }, [runtimeOptions, agentOptions]);
+    setMode((prev) => {
+      const nextMode = agentOptions.includes(prev) ? prev : runtimeOptions.default_agent;
+      if (nextMode !== prev) {
+        persistRuntimeSelection(nextMode, providerModelKey);
+      }
+      return nextMode;
+    });
+  }, [runtimeOptions, agentOptions, providerModelKey]);
 
   useEffect(() => {
     if (!runtimeOptions) {
@@ -2414,7 +2471,7 @@ export function App() {
     }
     const hasSelection = providerModelKeys.includes(providerModelKey);
     if (!providerModelKey || !hasSelection) {
-      setProviderModelKey(defaultProviderModelKey);
+      updateProviderModelSelection(defaultProviderModelKey);
     }
   }, [runtimeOptions, mode, providerModelKey, providerModelKeys, defaultProviderModelKey]);
 
@@ -2425,9 +2482,20 @@ export function App() {
     }
     const activeKey = buildProviderModelKey(activeProvider, activeModel);
     if (providerModelKeys.includes(activeKey) && activeKey !== providerModelKey) {
-      setProviderModelKey(activeKey);
+      updateProviderModelSelection(activeKey);
     }
   }, [activeProvider, activeModel, isRuntimeBusy, providerModelKey, providerModelKeys]);
+
+  useEffect(() => {
+    if (!shouldApplyInitialHistoryProviderRef.current || providerModelKeys.length === 0 || messages.length === 0) {
+      return;
+    }
+    const derivedRuntime = deriveSessionRuntime(messages);
+    if (derivedRuntime.providerModelKey && providerModelKeys.includes(derivedRuntime.providerModelKey)) {
+      updateProviderModelSelection(derivedRuntime.providerModelKey);
+      shouldApplyInitialHistoryProviderRef.current = false;
+    }
+  }, [messages, providerModelKeys]);
 
   useEffect(() => {
     if (!activeQuestion) {
@@ -2496,11 +2564,17 @@ export function App() {
 
   const applySessionRuntimeFromHistory = (history: UiMessage[]) => {
     const derivedRuntime = deriveSessionRuntime(history);
+    const nextMode = derivedRuntime.mode || mode;
+    let nextProviderModelKey = providerModelKey;
     if (derivedRuntime.mode) {
       setMode(derivedRuntime.mode);
     }
     if (derivedRuntime.providerModelKey && providerModelKeys.includes(derivedRuntime.providerModelKey)) {
+      nextProviderModelKey = derivedRuntime.providerModelKey;
       setProviderModelKey(derivedRuntime.providerModelKey);
+    }
+    if (derivedRuntime.mode || nextProviderModelKey !== providerModelKey) {
+      persistRuntimeSelection(nextMode, nextProviderModelKey);
     }
   };
 
@@ -3171,7 +3245,7 @@ export function App() {
 
           const switchedMode = finalPayload ? readString(finalPayload, "agent") : "";
           if (switchedMode === "build" || switchedMode === "plan") {
-            setMode(switchedMode);
+            updateModeSelection(switchedMode);
           }
           await refreshHistory();
           return;
@@ -3192,7 +3266,7 @@ export function App() {
       }
 
       const payload = await applyModeSwitchAction({ sessionId, action });
-      setMode(payload.current_mode);
+      updateModeSelection(payload.current_mode);
       await refreshHistory();
     } catch (err) {
       setError((err as Error).message || "模式切换失败");
@@ -3485,7 +3559,11 @@ export function App() {
     if (isStreaming || isApplyingModeSwitch) {
       return;
     }
-    setMode((prev) => getNextAgent(prev, agentOptions));
+    setMode((prev) => {
+      const nextMode = getNextAgent(prev, agentOptions);
+      persistRuntimeSelection(nextMode, providerModelKey);
+      return nextMode;
+    });
   };
 
   const closeSlashMenu = () => {
@@ -3929,7 +4007,7 @@ export function App() {
                 <select
                   id="agent-mode"
                   value={mode}
-                  onChange={(e) => setMode(e.target.value as AgentName)}
+                  onChange={(e) => updateModeSelection(e.target.value as AgentName)}
                   disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
                   className="terminal-select"
                 >
@@ -3946,7 +4024,7 @@ export function App() {
                 <select
                   id="provider-name"
                   value={providerModelKey}
-                  onChange={(e) => setProviderModelKey(e.target.value)}
+                  onChange={(e) => updateProviderModelSelection(e.target.value)}
                   disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
                   className="terminal-select"
                 >
