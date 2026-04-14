@@ -2557,6 +2557,21 @@ export function App() {
     setSessionLoadDraft("");
   };
 
+  const handleNewSession = () => {
+    if (isSessionInteractionLocked || isQuestionMode) {
+      return;
+    }
+    const nextSessionId = buildSessionId();
+    setShouldFollow(true);
+    resetTransientUiState();
+    setIsSessionLoadOpen(false);
+    setSessionLoadDraft("");
+    startTransition(() => {
+      setSessionId(nextSessionId);
+      setMessages([]);
+    });
+  };
+
   const handleSessionLoad = async () => {
     if (isSessionInteractionLocked || isQuestionMode) {
       return;
@@ -3760,6 +3775,14 @@ export function App() {
                 disabled={isSessionInteractionLocked || isQuestionMode}
               >
                 {isLoadingSession ? "加载中..." : isSessionLoadOpen ? "取消加载" : "加载session"}
+              </button>
+              <button
+                type="button"
+                className="plain-btn terminal-inline-btn"
+                onClick={handleNewSession}
+                disabled={isSessionInteractionLocked || isQuestionMode}
+              >
+                新对话
               </button>
             </div>
           </header>
