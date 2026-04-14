@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-my-agent = "agent.cli:main"
+codepilot = "agent.cli:main"
 
 [tool.setuptools]
 include-package-data = true

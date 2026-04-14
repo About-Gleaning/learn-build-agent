@@ -4,6 +4,7 @@ import pytest
 
 import agent.runtime.session as session_module
 import agent.runtime.compaction as compaction_module
+import agent.runtime.workspace as workspace_module
 from agent.config.settings import (
     ResolvedLLMConfig,
     clear_runtime_settings_cache,
@@ -1721,7 +1722,7 @@ def test_load_skill_tool_description_should_show_empty_message_when_no_skills():
 
 
 def test_get_skill_registry_should_read_runtime_home_skills_only(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     runtime_skill = get_workspace().skills_dir / "runtime-skill" / "SKILL.md"
     runtime_skill.parent.mkdir(parents=True, exist_ok=True)
@@ -1736,7 +1737,7 @@ def test_get_skill_registry_should_read_runtime_home_skills_only(tmp_path, monke
 
 
 def test_run_session_load_skill_tool_should_return_structured_result(tmp_path, monkeypatch):
-    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
+    monkeypatch.setenv("CODEPILOT_HOME", str(tmp_path / ".codepilot"))
     configure_workspace(tmp_path / "workspace")
     skill_dir = get_workspace().skills_dir / "runtime-skill"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -2629,6 +2630,30 @@ def test_workspace_should_store_session_history_in_global_sessions_dir(tmp_path)
     assert get_workspace().sessions_dir == get_workspace().workspaces_root / "sessions"
 
 
+def test_workspace_should_use_codepilot_home_env(monkeypatch, tmp_path):
+    runtime_home = tmp_path / ".codepilot-custom"
+    monkeypatch.setenv("CODEPILOT_HOME", str(runtime_home))
+    workspace_module.reset_workspace()
+
+    configure_workspace(tmp_path / "project-a")
+
+    assert get_workspace().runtime_home == runtime_home.resolve()
+
+
+def test_workspace_should_ignore_legacy_my_agent_home_env(monkeypatch, tmp_path):
+    legacy_home = tmp_path / ".legacy-my-agent"
+    default_home = tmp_path / ".codepilot-default"
+    monkeypatch.delenv("CODEPILOT_HOME", raising=False)
+    monkeypatch.setenv("MY_AGENT_HOME", str(legacy_home))
+    monkeypatch.setattr(workspace_module, "DEFAULT_RUNTIME_HOME", default_home)
+    workspace_module.reset_workspace()
+
+    configure_workspace(tmp_path / "project-a")
+
+    assert get_workspace().runtime_home == default_home.resolve()
+    assert get_workspace().runtime_home != legacy_home.resolve()
+
+
 def test_file_session_memory_store_should_share_session_file_across_workspaces(tmp_path):
     first_workspace = tmp_path / "project-a"
     second_workspace = tmp_path / "project-b"
@@ -3423,7 +3448,7 @@ def test_build_system_prompt_should_append_global_agents_md(monkeypatch, tmp_pat
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
     home_dir = tmp_path / "home"
-    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path = home_dir / ".codepilot" / "AGENTS.md"
     global_agents_path.parent.mkdir(parents=True)
     global_agents_path.write_text("请优先保证全局风格一致。", encoding="utf-8")
     monkeypatch.setattr(session_module.Path, "home", lambda: home_dir)
@@ -3438,14 +3463,14 @@ def test_build_system_prompt_should_append_global_agents_md(monkeypatch, tmp_pat
     )
 
     assert "请优先保证全局风格一致。" in prompt
-    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" in prompt
+    assert "以下是全局 ~/.codepilot/AGENTS.md 内容" in prompt
 
 
 def test_build_system_prompt_should_append_global_agents_md_before_local(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
     home_dir = tmp_path / "home"
-    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path = home_dir / ".codepilot" / "AGENTS.md"
     global_agents_path.parent.mkdir(parents=True)
     global_agents_path.write_text("全局规范。", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("工作区规范。", encoding="utf-8")
@@ -3478,9 +3503,9 @@ def test_build_system_prompt_should_ignore_missing_or_empty_global_agents_md(mon
         session_id="s_global_missing_prompt",
     )
 
-    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" not in prompt_without_file
+    assert "以下是全局 ~/.codepilot/AGENTS.md 内容" not in prompt_without_file
 
-    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path = home_dir / ".codepilot" / "AGENTS.md"
     global_agents_path.parent.mkdir(parents=True)
     global_agents_path.write_text("   \n", encoding="utf-8")
 
@@ -3492,14 +3517,14 @@ def test_build_system_prompt_should_ignore_missing_or_empty_global_agents_md(mon
         session_id="s_global_empty_prompt",
     )
 
-    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" not in prompt_with_empty_file
+    assert "以下是全局 ~/.codepilot/AGENTS.md 内容" not in prompt_with_empty_file
 
 
 def test_build_system_prompt_should_ignore_global_agents_md_read_error(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(session_module, "_detect_git_repository", lambda _workdir: (False, ""))
     home_dir = tmp_path / "home"
-    global_agents_path = home_dir / ".my-agent" / "AGENTS.md"
+    global_agents_path = home_dir / ".codepilot" / "AGENTS.md"
     global_agents_path.parent.mkdir(parents=True)
     global_agents_path.write_text("全局规范。", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("工作区规范。", encoding="utf-8")
@@ -3523,7 +3548,7 @@ def test_build_system_prompt_should_ignore_global_agents_md_read_error(monkeypat
         session_id="s_global_error_prompt",
     )
 
-    assert "以下是全局 ~/.my-agent/AGENTS.md 内容" not in prompt
+    assert "以下是全局 ~/.codepilot/AGENTS.md 内容" not in prompt
     assert "工作区规范。" in prompt
 
 

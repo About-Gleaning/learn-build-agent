@@ -2,7 +2,7 @@
  * @file App.tsx
  * @author codex
  * @date 2026-04-02
- * @description my-agent Web 前端主组件，提供 Agent 对话交互工作台。支持流式对话、会话管理、Agent 模式切换（build/plan）、
+ * @description codepilot Web 前端主组件，提供 Agent 对话交互工作台。支持流式对话、会话管理、Agent 模式切换（build/plan）、
  * 工具调用过程展示、时间线渲染、question 工具交互、停止会话等功能。作为前端核心入口组件，管理消息状态、运行时配置及 UI 交互。
  */
 
@@ -337,7 +337,7 @@ const API_BASE = resolveApiBase();
 const AUTO_SCROLL_THRESHOLD = 56;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const EXPECTED_WORKSPACE_ROOT = (import.meta.env.VITE_EXPECTED_WORKSPACE_ROOT as string | undefined)?.trim() || "";
-const SESSION_STORAGE_KEY_PREFIX = "my-agent:last-session-id:";
+const SESSION_STORAGE_KEY_PREFIX = "codepilot:last-session-id:";
 const PATH_SUGGESTION_LIMIT = 50;
 const PATH_SUGGESTION_DEBOUNCE_MS = 150;
 const PATH_SUGGESTION_CACHE_TTL_MS = 30_000;
@@ -2195,7 +2195,7 @@ export function App() {
     if (!EXPECTED_WORKSPACE_ROOT || !actualWorkspaceRoot || EXPECTED_WORKSPACE_ROOT === actualWorkspaceRoot) {
       return "";
     }
-    return `当前前端预期连接工作区 ${EXPECTED_WORKSPACE_ROOT}，但后端返回的工作区是 ${actualWorkspaceRoot}。请先停止异常残留实例，再重新执行 my-agent web。`;
+    return `当前前端预期连接工作区 ${EXPECTED_WORKSPACE_ROOT}，但后端返回的工作区是 ${actualWorkspaceRoot}。请先停止异常残留实例，再重新执行 codepilot web。`;
   }, [runtimeOptions]);
   const composerWorkspaceTip = useMemo(() => {
     if (isLoadingPathSuggestions) {

@@ -372,7 +372,7 @@ def _read_prompt_file(path: Path) -> str:
 
 
 def _read_global_agent_appendix() -> str:
-    agent_md_path = Path.home() / ".my-agent" / "AGENTS.md"
+    agent_md_path = Path.home() / ".codepilot" / "AGENTS.md"
     if not agent_md_path.exists():
         return ""
     try:
@@ -382,7 +382,7 @@ def _read_global_agent_appendix() -> str:
         return ""
     if not content:
         return ""
-    return f"以下是全局 ~/.my-agent/AGENTS.md 内容，请一并遵守：\n\n{content}"
+    return f"以下是全局 ~/.codepilot/AGENTS.md 内容，请一并遵守：\n\n{content}"
 
 
 def _read_local_agent_appendix() -> str:

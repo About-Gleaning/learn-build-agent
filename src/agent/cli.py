@@ -11,16 +11,18 @@ from .runtime.web_dev_server import (
     WebStackError,
     find_unmanaged_web_processes,
     format_web_stack_prune_report,
+    format_web_stack_stop_all_report,
     format_web_stack_status,
     get_web_stack_status,
     prune_web_dev_stacks,
     start_web_dev_stack,
+    stop_all_web_dev_stacks,
     stop_web_dev_stack,
 )
 from .runtime.workspace import configure_workspace, get_workspace
 
 
-class MyAgentArgumentParser(argparse.ArgumentParser):
+class CodePilotArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, custom_help_text: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self._custom_help_text = custom_help_text
@@ -33,8 +35,8 @@ class MyAgentArgumentParser(argparse.ArgumentParser):
 
 
 def _build_parser(*, include_custom_help: bool = True) -> argparse.ArgumentParser:
-    parser = MyAgentArgumentParser(
-        prog="my-agent",
+    parser = CodePilotArgumentParser(
+        prog="codepilot",
         description="在当前目录启动编码代理。",
         custom_help_text=_format_help_text() if include_custom_help else None,
     )
@@ -51,6 +53,7 @@ def _build_parser(*, include_custom_help: bool = True) -> argparse.ArgumentParse
         default="start",
         help="Web 管理动作，默认 start。",
     )
+    web_parser.add_argument("--all", action="store_true", help="仅用于 stop：停止所有已登记的 Web 开发栈实例。")
     web_parser.add_argument("--host", default="0.0.0.0", help="监听地址。")
     web_parser.add_argument("--port", type=int, default=8000, help="监听端口。")
     web_parser.add_argument(
@@ -123,16 +126,18 @@ def _format_subcommand_block(subparsers_action: argparse._SubParsersAction) -> l
 
 def _format_web_action_examples() -> list[str]:
     return [
-        "  my-agent web",
+        "  codepilot web",
         "    启动当前工作区的 Web 开发栈。",
-        "  my-agent web start --host 127.0.0.1 --port 8000",
+        "  codepilot web start --host 127.0.0.1 --port 8000",
         "    显式指定监听地址和后端起始端口。",
-        "  my-agent web status",
+        "  codepilot web status",
         "    查看当前工作区 Web 实例状态与实际访问地址。",
-        "  my-agent web stop",
+        "  codepilot web stop",
         "    停止当前工作区 Web 实例。",
-        "  my-agent web prune",
-        "    清理 ~/.my-agent/workspaces/web-dev/ 下 degraded/stale 的异常残留实例。",
+        "  codepilot web stop --all",
+        "    停止 ~/.codepilot/workspaces/web-dev/ 下所有已登记的 Web 实例。",
+        "  codepilot web prune",
+        "    清理 ~/.codepilot/workspaces/web-dev/ 下 degraded/stale 的异常残留实例。",
     ]
 
 
@@ -142,14 +147,14 @@ def _format_help_text() -> str:
     web_parser = subparsers_action.choices["web"]
     return "\n".join(
         [
-            "my-agent 命令总览",
+            "codepilot 命令总览",
             "",
             "基础用法：",
-            "  my-agent",
+            "  codepilot",
             "    在当前目录进入持续对话式 CLI。",
-            "  my-agent -h",
+            "  codepilot -h",
             "    查看这份命令总览。",
-            "  my-agent --help",
+            "  codepilot --help",
             "    查看这份命令总览。",
             "",
             "顶层参数：",
@@ -165,21 +170,22 @@ def _format_help_text() -> str:
             *_format_action_block(web_parser),
             "",
             "典型示例：",
-            "  my-agent",
-            "  my-agent --help",
-            "  my-agent --workdir /path/to/project",
-            "  my-agent --session demo_001",
-            "  my-agent --mode plan",
-            "  my-agent web start --host 127.0.0.1 --port 8000",
-            "  my-agent web --share-frontend",
-            "  my-agent web --verbose",
-            "  my-agent web status",
-            "  my-agent web stop",
-            "  my-agent web prune",
+            "  codepilot",
+            "  codepilot --help",
+            "  codepilot --workdir /path/to/project",
+            "  codepilot --session demo_001",
+            "  codepilot --mode plan",
+            "  codepilot web start --host 127.0.0.1 --port 8000",
+            "  codepilot web --share-frontend",
+            "  codepilot web --verbose",
+            "  codepilot web status",
+            "  codepilot web stop",
+            "  codepilot web stop --all",
+            "  codepilot web prune",
             "",
             "说明：",
-            "  不带子命令时，my-agent 会直接进入持续对话模式。",
-            "  顶层参数用于 my-agent ...；Web 参数用于 my-agent web ...。",
+            "  不带子命令时，codepilot 会直接进入持续对话模式。",
+            "  顶层参数用于 codepilot ...；Web 参数用于 codepilot web ...。",
             "  --port 是后端端口的起始候选值；若被占用，会自动尝试后续空闲端口。",
         ]
     )
@@ -248,6 +254,12 @@ def run_web_stop() -> None:
     print(format_web_stack_status(status, state))
 
 
+def run_web_stop_all() -> None:
+    init_logging(get_workspace().logs_dir, console_enabled=False)
+    results = stop_all_web_dev_stacks()
+    print(format_web_stack_stop_all_report(results, unmanaged_processes=find_unmanaged_web_processes()))
+
+
 def run_web_prune() -> None:
     init_logging(get_workspace().logs_dir, console_enabled=False)
     results = prune_web_dev_stacks()
@@ -260,11 +272,17 @@ def main(argv: list[str] | None = None) -> None:
     configure_workspace(Path(args.workdir), launch_mode="web" if args.command == "web" else "cli")
     if args.command == "web":
         web_action = getattr(args, "web_action", "start") or "start"
+        stop_all = bool(getattr(args, "all", False))
+        if stop_all and web_action != "stop":
+            parser.error("--all 仅支持与 `codepilot web stop` 一起使用。")
         if web_action == "status":
             run_web_status()
             return
         if web_action == "stop":
-            run_web_stop()
+            if stop_all:
+                run_web_stop_all()
+            else:
+                run_web_stop()
             return
         if web_action == "prune":
             run_web_prune()

@@ -169,7 +169,7 @@ def test_lsp_client_should_passthrough_diagnostics_wait_metadata(monkeypatch, tm
                 diagnostics_wait_ms=860,
                 diagnostics_settled=True,
                 lsp_workspace_root=str(tmp_path),
-                lsp_data_dir=str(tmp_path / ".my-agent-lsp" / "java" / "abc123"),
+                lsp_data_dir=str(tmp_path / ".codepilot-lsp" / "java" / "abc123"),
                 lsp_workspace_selection_reason="maven_aggregator_root",
                 lsp_server_key=f"java:{tmp_path}:direct_lsp",
                 lsp_snapshot_uri=(tmp_path / "Foo.java").resolve().as_uri(),
@@ -192,7 +192,7 @@ def test_lsp_client_should_passthrough_diagnostics_wait_metadata(monkeypatch, tm
     assert result.diagnostics_wait_ms == 860
     assert result.diagnostics_settled is True
     assert result.lsp_workspace_root == str(tmp_path)
-    assert result.lsp_data_dir == str(tmp_path / ".my-agent-lsp" / "java" / "abc123")
+    assert result.lsp_data_dir == str(tmp_path / ".codepilot-lsp" / "java" / "abc123")
     assert result.lsp_workspace_selection_reason == "maven_aggregator_root"
     assert "Foo.java" in (result.lsp_snapshot_uri or "")
     assert result.recent_status_summary == "Starting:Init..."
