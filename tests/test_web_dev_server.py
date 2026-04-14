@@ -142,6 +142,38 @@ def test_start_web_dev_stack_should_write_state_and_keep_silent_by_default(monke
     }
 
 
+def test_start_frontend_dev_server_should_force_same_origin_api_proxy(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        web_dev_server_module,
+        "_spawn_logged_process",
+        lambda command, *, cwd, log_path, env=None: captured.update(
+            {"command": command, "cwd": cwd, "log_path": log_path, "env": env}
+        )
+        or _FakeProcess(pid=202),
+    )
+
+    process = web_dev_server_module.start_frontend_dev_server(
+        frontend_dir=tmp_path / "frontend",
+        pnpm_binary="pnpm",
+        host="127.0.0.1",
+        port=5180,
+        backend_url="http://127.0.0.1:8001",
+        workspace_root=tmp_path,
+        log_path=tmp_path / "frontend.log",
+    )
+
+    assert process.pid == 202
+    assert captured["command"] == ["pnpm", "dev", "--host", "127.0.0.1", "--port", "5180"]
+    env = captured["env"]
+    assert env == {
+        "VITE_API_BASE_URL": "",
+        "MY_AGENT_VITE_BACKEND_URL": "http://127.0.0.1:8001",
+        "VITE_EXPECTED_WORKSPACE_ROOT": str(tmp_path.resolve()),
+    }
+
+
 def test_start_web_dev_stack_should_cleanup_processes_and_append_log_excerpt_on_failure(monkeypatch, tmp_path):
     backend_process = _FakeProcess(pid=101)
     frontend_process = _FakeProcess(pid=202)
@@ -441,6 +473,50 @@ def test_prune_web_dev_stacks_should_remove_only_degraded_and_stale_instances(mo
     assert removed_paths == [str(degraded_path), str(stale_path)]
 
 
+def test_prune_web_dev_stacks_should_stop_backend_when_frontend_is_down(monkeypatch, tmp_path):
+    state = web_dev_server_module.WebStackState(
+        workspace_root="/tmp/backend-only",
+        host="0.0.0.0",
+        port=8001,
+        backend_pid=102,
+        frontend_pid=202,
+        backend_url="http://127.0.0.1:8001",
+        frontend_url="http://127.0.0.1:5174",
+        backend_log_path="/tmp/backend-only-backend.log",
+        frontend_log_path="/tmp/backend-only-frontend.log",
+        started_at=123.0,
+        status="running",
+        frontend_port=5174,
+    )
+    state_path = tmp_path / "backend-only" / web_dev_server_module.STATE_FILENAME
+    stop_calls: list[int] = []
+    removed_paths: list[str] = []
+
+    monkeypatch.setattr(web_dev_server_module, "iter_web_dev_state_paths", lambda: [state_path])
+    monkeypatch.setattr(web_dev_server_module, "_load_state_from_path", lambda path: state)
+    monkeypatch.setattr(
+        web_dev_server_module,
+        "inspect_web_stack_state",
+        lambda current_state, *, state_path=None: web_dev_server_module.WebStackInspection(
+            state_path=state_path,
+            state=current_state,
+            status="degraded",
+            backend_alive=True,
+            frontend_alive=False,
+            backend_ready=True,
+            frontend_ready=False,
+        ),
+    )
+    monkeypatch.setattr(web_dev_server_module, "_stop_pid", lambda pid: stop_calls.append(pid))
+    monkeypatch.setattr(web_dev_server_module, "_remove_state_file", lambda state_path=None: removed_paths.append(str(state_path)))
+
+    results = web_dev_server_module.prune_web_dev_stacks()
+
+    assert [(item.inspection.status, item.action) for item in results] == [("degraded", "removed")]
+    assert stop_calls == [202, 102]
+    assert removed_paths == [str(state_path)]
+
+
 def test_format_web_stack_prune_report_should_include_summary_and_health(monkeypatch, tmp_path):
     inspection = web_dev_server_module.WebStackInspection(
         state_path=tmp_path / "state.json",
@@ -473,6 +549,23 @@ def test_format_web_stack_prune_report_should_include_summary_and_health(monkeyp
     assert "已清理 | degraded | 工作区: /tmp/degraded" in output
     assert "backend_pid=up" in output
     assert "frontend_port=closed" in output
+
+
+def test_format_web_stack_prune_report_should_include_unmanaged_processes():
+    output = web_dev_server_module.format_web_stack_prune_report(
+        [],
+        unmanaged_processes=[
+            web_dev_server_module.UnmanagedWebProcess(
+                pid=301,
+                port=8000,
+                command="python -m uvicorn agent.web.app:app --port 8000",
+            )
+        ],
+    )
+
+    assert "未登记的疑似 my-agent Web 后端监听进程" in output
+    assert "PID 301" in output
+    assert "端口 8000" in output
 
 
 def test_format_web_stack_status_should_include_runtime_file_paths(monkeypatch, tmp_path):

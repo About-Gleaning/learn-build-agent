@@ -81,6 +81,13 @@ class WebStackPruneResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class UnmanagedWebProcess:
+    pid: int
+    port: int
+    command: str
+
+
 def resolve_project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
@@ -230,6 +237,8 @@ def start_frontend_dev_server(
         cwd=frontend_dir,
         log_path=log_path,
         env={
+            # my-agent web 必须走当前 Vite 实例的同源代理，避免本地 .env 固定到旧后端端口。
+            "VITE_API_BASE_URL": "",
             "MY_AGENT_VITE_BACKEND_URL": backend_url,
             "VITE_EXPECTED_WORKSPACE_ROOT": str(workspace_root.resolve()),
         },
@@ -442,8 +451,13 @@ def _format_stack_health(inspection: WebStackInspection) -> str:
     return ", ".join(flags)
 
 
-def format_web_stack_prune_report(results: list[WebStackPruneResult]) -> str:
-    if not results:
+def format_web_stack_prune_report(
+    results: list[WebStackPruneResult],
+    *,
+    unmanaged_processes: list[UnmanagedWebProcess] | None = None,
+) -> str:
+    unmanaged_processes = unmanaged_processes or []
+    if not results and not unmanaged_processes:
         return "未发现任何 Web 开发栈状态文件。"
 
     action_label = {
@@ -471,6 +485,10 @@ def format_web_stack_prune_report(results: list[WebStackPruneResult]) -> str:
         )
         if item.error:
             lines.append(f"  错误: {item.error}")
+    if unmanaged_processes:
+        lines.append("发现未登记的疑似 my-agent Web 后端监听进程，prune 不会自动停止它们：")
+        for process in unmanaged_processes:
+            lines.append(f"- PID {process.pid} | 端口 {process.port} | {process.command}")
     return "\n".join(lines)
 
 
@@ -489,6 +507,68 @@ def prune_web_dev_stacks() -> list[WebStackPruneResult]:
             continue
         results.append(WebStackPruneResult(inspection=inspection, action="removed"))
     return results
+
+
+def find_unmanaged_web_processes(inspections: list[WebStackInspection] | None = None) -> list[UnmanagedWebProcess]:
+    managed_pids: set[int] = set()
+    source_inspections = inspect_all_web_dev_stacks() if inspections is None else inspections
+    for inspection in source_inspections:
+        managed_pids.add(inspection.state.backend_pid)
+        managed_pids.add(inspection.state.frontend_pid)
+
+    try:
+        completed = subprocess.run(
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return []
+    if completed.returncode not in {0, 1}:
+        return []
+
+    processes: list[UnmanagedWebProcess] = []
+    for line in completed.stdout.splitlines()[1:]:
+        parts = line.split(None, 8)
+        if len(parts) < 9:
+            continue
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        if pid in managed_pids:
+            continue
+        address = parts[8]
+        port_text = address.rsplit(":", 1)[-1].split()[0]
+        try:
+            port = int(port_text)
+        except ValueError:
+            continue
+        command = _read_process_command(pid)
+        if not command:
+            continue
+        if "python" not in command.lower():
+            continue
+        if "agent.web.app:app" not in command and "src.web_main:app" not in command:
+            continue
+        processes.append(UnmanagedWebProcess(pid=pid, port=port, command=command))
+    return processes
+
+
+def _read_process_command(pid: int) -> str:
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
 
 
 def get_web_stack_status() -> tuple[str, WebStackState | None]:

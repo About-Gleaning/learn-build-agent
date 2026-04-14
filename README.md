@@ -112,6 +112,7 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 
 - `my-agent web` 报错缺少 `pnpm`：先安装 `pnpm`
 - `my-agent web` 报错缺少 `frontend/node_modules`：先在 `frontend/` 下执行 `pnpm install`
-- 页面命中了旧 backend：先执行 `my-agent web prune` 清理异常残留；若目标工作区实例仍健康运行，再切到对应工作区执行 `my-agent web stop`
+- 页面命中了旧 backend：先确认访问的是 `my-agent web start` 输出的“前端本机访问地址”；多工作区并行时不要把 `VITE_API_BASE_URL` 固定到某个后端端口，前端应走同源 `/api` 代理
+- Web 异常残留：执行 `my-agent web prune` 清理已登记的 degraded/stale 实例；健康实例会被保留，未登记的疑似后端监听进程只会在报告中提示，需人工确认后处理
 - 模型调用失败：检查对应 provider 的 API Key 是否已配置
 - `websearch` 不可用：检查 `EXA_API_KEY`

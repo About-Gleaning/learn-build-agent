@@ -9,6 +9,7 @@ from .core.message import get_message_text
 from .runtime.session import clear_session_memory, generate_session_id, run_session
 from .runtime.web_dev_server import (
     WebStackError,
+    find_unmanaged_web_processes,
     format_web_stack_prune_report,
     format_web_stack_status,
     get_web_stack_status,
@@ -250,7 +251,7 @@ def run_web_stop() -> None:
 def run_web_prune() -> None:
     init_logging(get_workspace().logs_dir, console_enabled=False)
     results = prune_web_dev_stacks()
-    print(format_web_stack_prune_report(results))
+    print(format_web_stack_prune_report(results, unmanaged_processes=find_unmanaged_web_processes()))
 
 
 def main(argv: list[str] | None = None) -> None:
