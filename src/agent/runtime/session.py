@@ -23,6 +23,7 @@ from ..config.settings import (
     resolve_subagent_loop_settings,
 )
 from ..core.context import set_session_id
+from ..core.hooks import HookExecutionError
 from ..core.message import (
     DisplayPart,
     Message,
@@ -97,7 +98,7 @@ from .session_hooks import (
     register_global_session_hook,
     resolve_effective_session_hooks,
 )
-from .tool_executor import ToolExecutor, ToolHook, ToolResult, get_global_tool_hooks
+from .tool_executor import ToolExecutor, ToolHook, ToolHookInterruption, ToolResult, get_global_tool_hooks
 from .workspace import get_workspace
 
 logger = logging.getLogger(__name__)
@@ -1986,6 +1987,46 @@ def _build_tool_message(
     return message
 
 
+def _build_tool_execution_failure_result(exc: Exception, *, error_code: str = "tool_execution_error") -> ToolResult:
+    """将会话层捕获到的工具异常降级为标准失败结果，避免打断主循环。"""
+    return {
+        "output": f"Error: Tool execution failed: {type(exc).__name__}: {exc}",
+        "metadata": {
+            "status": "failed",
+            "error_code": error_code,
+            "error_type": type(exc).__name__,
+        },
+    }
+
+
+def _run_delegation_hooks_safely(
+    hooks: list[DelegationHook],
+    stage: str,
+    *,
+    ctx: DelegationHookContext,
+    error: Exception | None = None,
+    normalized_error: dict[str, str] | None = None,
+) -> None:
+    try:
+        run_delegation_hooks(
+            hooks,
+            stage,
+            ctx=ctx,
+            error=error,
+            normalized_error=normalized_error,
+        )
+    except Exception as exc:
+        # run_delegation_hooks 内部已经隔离非 fail_fast Hook 异常；
+        # 能传播到这里的异常代表 fail_fast 契约要求中断委派主流程。
+        logger.warning(
+            "delegation.hook_fail_fast_interrupted stage=%s error=%s",
+            stage,
+            f"{type(exc).__name__}: {exc}",
+            exc_info=True,
+        )
+        raise
+
+
 def _pending_question_result_from_message(message: Message) -> ToolResult:
     info = message.get("info", {})
     question_info = info.get("question") if isinstance(info.get("question"), dict) else {}
@@ -3331,9 +3372,9 @@ def _run_session_stream(
                             model=current_runtime.model,
                             prompt=task_request.prompt,
                         )
-                        run_delegation_hooks(effective_delegation_hooks, "requested", ctx=delegation_ctx)
+                        _run_delegation_hooks_safely(effective_delegation_hooks, "requested", ctx=delegation_ctx)
                         try:
-                            run_delegation_hooks(effective_delegation_hooks, "started", ctx=delegation_ctx)
+                            _run_delegation_hooks_safely(effective_delegation_hooks, "started", ctx=delegation_ctx)
                             try:
                                 delegated_message = yield from _run_session_stream(
                                     task_request.prompt,
@@ -3357,18 +3398,22 @@ def _run_session_stream(
                                     session_hooks=session_hooks,
                                     delegation_hooks=delegation_hooks,
                                 )
+                            except (ToolHookInterruption, HookExecutionError):
+                                raise
                             except Exception as exc:
                                 delegation_ctx["status"] = "failed"
                                 delegation_ctx["finish_reason"] = "error"
                                 delegation_ctx["output_preview"] = _sanitize_preview(str(exc))
-                                run_delegation_hooks(
+                                _run_delegation_hooks_safely(
                                     effective_delegation_hooks,
                                     "error",
                                     ctx=delegation_ctx,
                                     error=exc,
                                     normalized_error=normalize_delegation_error(exc),
                                 )
-                                raise
+                                result = _build_tool_execution_failure_result(exc, error_code="task_execution_error")
+                                result["metadata"]["delegation_id"] = delegation_instance_id
+                                result["metadata"]["parent_tool_call_id"] = tool_call["id"]
                             else:
                                 _complete_delegation_hook_context_from_message(delegation_ctx, delegated_message)
                                 delegated_finish_reason = str(delegated_message["info"].get("finish_reason", "")).strip().lower()
@@ -3380,38 +3425,44 @@ def _run_session_stream(
                                     result["metadata"]["delegation_id"] = delegation_instance_id
                                     result["metadata"]["parent_tool_call_id"] = tool_call["id"]
                                     _complete_delegation_hook_context_from_result(delegation_ctx, result)
-                                    run_delegation_hooks(effective_delegation_hooks, "interrupted", ctx=delegation_ctx)
+                                    _run_delegation_hooks_safely(effective_delegation_hooks, "interrupted", ctx=delegation_ctx)
                                 else:
                                     result["output"] = get_message_text(delegated_message)
-                                    run_delegation_hooks(effective_delegation_hooks, "after", ctx=delegation_ctx)
+                                    _run_delegation_hooks_safely(effective_delegation_hooks, "after", ctx=delegation_ctx)
                         finally:
-                            run_delegation_hooks(effective_delegation_hooks, "finally", ctx=delegation_ctx)
+                            _run_delegation_hooks_safely(effective_delegation_hooks, "finally", ctx=delegation_ctx)
                 else:
-                    result = tool_executor.execute(
-                        tool_call["name"],
-                        tool_call["arguments"],
-                        session_id=active_session_id,
-                        tool_call_id=tool_call["id"],
-                        round_no=round_no,
-                        hooks=effective_tool_hooks,
-                        agent=active_agent,
-                        model=current_runtime.model,
-                        vendor=current_runtime.vendor,
-                        task_available=task_available,
-                        workdir=str(_get_workdir()),
-                        turn_started_at=turn_started_at,
-                        persistence_enabled=mode_enabled,
-                        append_callback=_append_message,
-                        message_factory=lambda ctx, tool_result: _build_tool_message(
-                            str(ctx.get("session_id", active_session_id)),
-                            tool_call_id=str(ctx.get("tool_call_id", "")),
-                            tool_name=str(ctx.get("tool_name", "")),
-                            arguments=str(ctx.get("arguments", "{}")),
-                            result=tool_result,
-                            agent=str(ctx.get("agent", active_agent)),
-                            turn_started_at=str(ctx.get("turn_started_at", turn_started_at)),
-                        ),
-                    )
+                    try:
+                        result = tool_executor.execute(
+                            tool_call["name"],
+                            tool_call["arguments"],
+                            session_id=active_session_id,
+                            tool_call_id=tool_call["id"],
+                            round_no=round_no,
+                            hooks=effective_tool_hooks,
+                            agent=active_agent,
+                            model=current_runtime.model,
+                            vendor=current_runtime.vendor,
+                            task_available=task_available,
+                            workdir=str(_get_workdir()),
+                            turn_started_at=turn_started_at,
+                            persistence_enabled=mode_enabled,
+                            append_callback=_append_message,
+                            message_factory=lambda ctx, tool_result: _build_tool_message(
+                                str(ctx.get("session_id", active_session_id)),
+                                tool_call_id=str(ctx.get("tool_call_id", "")),
+                                tool_name=str(ctx.get("tool_name", "")),
+                                arguments=str(ctx.get("arguments", "{}")),
+                                result=tool_result,
+                                agent=str(ctx.get("agent", active_agent)),
+                                turn_started_at=str(ctx.get("turn_started_at", turn_started_at)),
+                            ),
+                        )
+                    except ToolHookInterruption:
+                        raise
+                    except Exception as exc:
+                        logger.exception("tool.session_execute_isolated tool=%s", tool_call["name"])
+                        result = _build_tool_execution_failure_result(exc)
 
                 messages.append(
                     _build_tool_message(
@@ -4219,9 +4270,9 @@ def run_session(
                             model=current_runtime.model,
                             prompt=task_request.prompt,
                         )
-                        run_delegation_hooks(effective_delegation_hooks, "requested", ctx=delegation_ctx)
+                        _run_delegation_hooks_safely(effective_delegation_hooks, "requested", ctx=delegation_ctx)
                         try:
-                            run_delegation_hooks(effective_delegation_hooks, "started", ctx=delegation_ctx)
+                            _run_delegation_hooks_safely(effective_delegation_hooks, "started", ctx=delegation_ctx)
                             try:
                                 result["output"] = subagent_loop(
                                     task_request.prompt,
@@ -4234,49 +4285,59 @@ def run_session(
                                     parent_tool_call_id=tool_call["id"],
                                     depth=depth + 1,
                                 )
+                            except (ToolHookInterruption, HookExecutionError):
+                                raise
                             except Exception as exc:
                                 delegation_ctx["status"] = "failed"
                                 delegation_ctx["finish_reason"] = "error"
                                 delegation_ctx["output_preview"] = _sanitize_preview(str(exc))
-                                run_delegation_hooks(
+                                _run_delegation_hooks_safely(
                                     effective_delegation_hooks,
                                     "error",
                                     ctx=delegation_ctx,
                                     error=exc,
                                     normalized_error=normalize_delegation_error(exc),
                                 )
-                                raise
+                                result = _build_tool_execution_failure_result(exc, error_code="task_execution_error")
+                                result["metadata"]["delegation_id"] = delegation_instance_id
+                                result["metadata"]["parent_tool_call_id"] = tool_call["id"]
                             else:
                                 _complete_delegation_hook_context_from_result(delegation_ctx, result)
-                                run_delegation_hooks(effective_delegation_hooks, "after", ctx=delegation_ctx)
+                                _run_delegation_hooks_safely(effective_delegation_hooks, "after", ctx=delegation_ctx)
                         finally:
-                            run_delegation_hooks(effective_delegation_hooks, "finally", ctx=delegation_ctx)
+                            _run_delegation_hooks_safely(effective_delegation_hooks, "finally", ctx=delegation_ctx)
                 else:
-                    result = tool_executor.execute(
-                        tool_call["name"],
-                        tool_call["arguments"],
-                        session_id=active_session_id,
-                        tool_call_id=tool_call["id"],
-                        round_no=round_no,
-                        hooks=effective_tool_hooks,
-                        agent=active_agent,
-                        model=current_runtime.model,
-                        vendor=current_runtime.vendor,
-                        task_available=task_available,
-                        workdir=str(_get_workdir()),
-                        turn_started_at=turn_started_at,
-                        persistence_enabled=mode_enabled,
-                        append_callback=_append_message,
-                        message_factory=lambda ctx, tool_result: _build_tool_message(
-                            str(ctx.get("session_id", active_session_id)),
-                            tool_call_id=str(ctx.get("tool_call_id", "")),
-                            tool_name=str(ctx.get("tool_name", "")),
-                            arguments=str(ctx.get("arguments", "{}")),
-                            result=tool_result,
-                            agent=str(ctx.get("agent", active_agent)),
-                            turn_started_at=str(ctx.get("turn_started_at", turn_started_at)),
-                        ),
-                    )
+                    try:
+                        result = tool_executor.execute(
+                            tool_call["name"],
+                            tool_call["arguments"],
+                            session_id=active_session_id,
+                            tool_call_id=tool_call["id"],
+                            round_no=round_no,
+                            hooks=effective_tool_hooks,
+                            agent=active_agent,
+                            model=current_runtime.model,
+                            vendor=current_runtime.vendor,
+                            task_available=task_available,
+                            workdir=str(_get_workdir()),
+                            turn_started_at=turn_started_at,
+                            persistence_enabled=mode_enabled,
+                            append_callback=_append_message,
+                            message_factory=lambda ctx, tool_result: _build_tool_message(
+                                str(ctx.get("session_id", active_session_id)),
+                                tool_call_id=str(ctx.get("tool_call_id", "")),
+                                tool_name=str(ctx.get("tool_name", "")),
+                                arguments=str(ctx.get("arguments", "{}")),
+                                result=tool_result,
+                                agent=str(ctx.get("agent", active_agent)),
+                                turn_started_at=str(ctx.get("turn_started_at", turn_started_at)),
+                            ),
+                        )
+                    except ToolHookInterruption:
+                        raise
+                    except Exception as exc:
+                        logger.exception("tool.session_execute_isolated tool=%s", tool_call["name"])
+                        result = _build_tool_execution_failure_result(exc)
                 messages.append(
                     _build_tool_message(
                         active_session_id,

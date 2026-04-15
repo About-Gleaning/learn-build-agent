@@ -5,6 +5,7 @@ import pytest
 import agent.runtime.session as session_module
 import agent.runtime.compaction as compaction_module
 import agent.runtime.workspace as workspace_module
+from agent.core.hooks import HookExecutionError
 from agent.config.settings import (
     ResolvedLLMConfig,
     clear_runtime_settings_cache,
@@ -15,6 +16,7 @@ from agent.config.settings import (
     resolve_llm_config,
 )
 from agent.runtime.workspace import build_plan_storage_path, configure_workspace, get_workspace
+from agent.runtime.tool_executor import ToolHookInterruption
 from agent.tools.file_edit_state import clear_file_edit_states
 from agent.tools.handlers import build_plan_placeholder_path
 from agent.mcp.runtime import _shutdown_asyncio_thread_runner
@@ -132,6 +134,33 @@ class RecorderDelegationHook(DelegationHook):
 
     def on_delegation_finally(self, ctx: DelegationHookContext) -> None:
         self.records.append(f"finally:{ctx.get('agent')}:{ctx.get('status')}")
+
+
+class BrokenStageDelegationHook(DelegationHook):
+    def __init__(self, stage: str, *, fail_fast: bool) -> None:
+        super().__init__("broken_stage_delegation", fail_fast=fail_fast)
+        self.stage = stage
+
+    def _raise_if_stage(self, stage: str) -> None:
+        if self.stage == stage:
+            raise RuntimeError(f"{stage} delegation boom")
+
+    def on_delegation_requested(self, ctx: DelegationHookContext) -> None:
+        self._raise_if_stage("requested")
+
+    def on_delegation_started(self, ctx: DelegationHookContext) -> None:
+        self._raise_if_stage("started")
+
+    def on_delegation_failed(
+        self,
+        ctx: DelegationHookContext,
+        error: Exception,
+        normalized_error: dict[str, str],
+    ) -> None:
+        self._raise_if_stage("error")
+
+    def on_delegation_finally(self, ctx: DelegationHookContext) -> None:
+        self._raise_if_stage("finally")
 
 
 def _tool_names(tools):
@@ -1645,15 +1674,21 @@ def test_run_session_should_return_error_when_followup_llm_times_out_after_task(
 
 
 def test_delegation_hook_should_run_failed_and_finally_when_task_raises(monkeypatch):
+    call_state = {"count": 0}
+
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
         assistant = create_message("assistant", session_id, status="completed")
-        append_tool_call_part(
-            assistant,
-            tool_call_id="call_task_boom",
-            name="task",
-            arguments='{"prompt":"检查异常","agent":"explore"}',
-        )
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_task_boom",
+                name="task",
+                arguments='{"prompt":"检查异常","agent":"explore"}',
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
         return assistant
 
     def broken_subagent(*args, **kwargs):
@@ -1663,13 +1698,13 @@ def test_delegation_hook_should_run_failed_and_finally_when_task_raises(monkeypa
     monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
     monkeypatch.setattr(session_module, "subagent_loop", broken_subagent)
 
-    with pytest.raises(RuntimeError, match="subagent boom"):
-        run_session(
-            "触发异常",
-            session_id="s_task_delegation_failed",
-            delegation_hooks=[RecorderDelegationHook(records)],
-        )
+    result = run_session(
+        "触发异常",
+        session_id="s_task_delegation_failed",
+        delegation_hooks=[RecorderDelegationHook(records)],
+    )
 
+    assert "subagent boom" in get_message_text(result)
     assert records == [
         "requested:explore:call_task_boom",
         "started:explore:running",
@@ -3060,6 +3095,208 @@ def test_run_session_stream_events_should_stop_after_tool_result(monkeypatch):
     assert "tool_result" in event_names
     assert done_event["status"] == "interrupted"
     assert done_event["finish_reason"] == "cancelled"
+
+
+def test_run_session_should_continue_when_tool_executor_raises(monkeypatch):
+    call_state = {"count": 0}
+    captured: dict[str, str] = {}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(assistant, tool_call_id="call_isolated", name="todo_read", arguments="{}")
+        else:
+            captured["tool_output"] = _last_tool_result_content(messages)
+            append_text_part(assistant, "final after isolated tool error")
+        return assistant
+
+    def broken_execute(self, tool_name, arguments, **kwargs):
+        del self, tool_name, arguments, kwargs
+        raise RuntimeError("executor boom")
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module.ToolExecutor, "execute", broken_execute)
+
+    result = run_session("工具执行器异常隔离", session_id="s_tool_executor_isolated")
+
+    assert get_message_text(result) == "final after isolated tool error"
+    assert "executor boom" in captured["tool_output"]
+
+
+def test_run_session_stream_events_should_continue_when_tool_executor_raises(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(assistant, tool_call_id="call_stream_isolated", name="todo_read", arguments="{}")
+        else:
+            append_text_part(assistant, "stream final after isolated tool error")
+        return assistant
+        yield  # pragma: no cover
+
+    def broken_execute(self, tool_name, arguments, **kwargs):
+        del self, tool_name, arguments, kwargs
+        raise RuntimeError("stream executor boom")
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+    monkeypatch.setattr(session_module.ToolExecutor, "execute", broken_execute)
+
+    events = list(run_session_stream_events("流式工具执行器异常隔离", session_id="s_stream_tool_executor_isolated"))
+
+    tool_result = next(event for event in events if event["type"] == "tool_result")
+    done_event = next(event for event in events if event["type"] == "done")
+    assert tool_result["status"] == "failed"
+    assert "stream executor boom" in tool_result["output_preview"]
+    assert done_event["status"] == "completed"
+
+
+def test_run_session_should_continue_when_task_subagent_raises(monkeypatch):
+    call_state = {"count": 0}
+    captured: dict[str, str] = {}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_task_isolated",
+                name="task",
+                arguments='{"prompt":"执行子任务","agent":"explore"}',
+            )
+        else:
+            captured["tool_output"] = _last_tool_result_content(messages)
+            append_text_part(assistant, "final after task error")
+        return assistant
+
+    def broken_subagent(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("subagent boom")
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "subagent_loop", broken_subagent)
+
+    result = run_session("task 子代理异常隔离", session_id="s_task_subagent_isolated")
+
+    assert get_message_text(result) == "final after task error"
+    assert "subagent boom" in captured["tool_output"]
+
+
+@pytest.mark.parametrize(
+    "hook_error",
+    [
+        ToolHookInterruption("Hook 'inner_tool' failed at stage 'before': blocked"),
+        HookExecutionError("Hook 'inner_session' failed at stage 'before': blocked"),
+    ],
+)
+def test_run_session_should_preserve_subagent_fail_fast_hook_interruptions(monkeypatch, hook_error):
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id="call_task_inner_fail_fast",
+            name="task",
+            arguments='{"prompt":"执行子任务","agent":"explore"}',
+        )
+        return assistant
+
+    def broken_subagent(*args, **kwargs):
+        del args, kwargs
+        raise hook_error
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "subagent_loop", broken_subagent)
+
+    with pytest.raises(type(hook_error), match="Hook 'inner_"):
+        run_session("task 子代理强拦截透传", session_id="s_task_subagent_fail_fast")
+
+
+@pytest.mark.parametrize(
+    "hook_error",
+    [
+        ToolHookInterruption("Hook 'inner_tool' failed at stage 'before': blocked"),
+        HookExecutionError("Hook 'inner_loop' failed at stage 'before': blocked"),
+    ],
+)
+def test_run_session_stream_events_should_preserve_subagent_fail_fast_hook_interruptions(monkeypatch, hook_error):
+    original_run_session_stream = session_module._run_session_stream
+    call_state = {"count": 0}
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id="call_stream_task_inner_fail_fast",
+            name="task",
+            arguments='{"prompt":"执行流式子任务","agent":"explore"}',
+        )
+        return assistant
+        yield  # pragma: no cover
+
+    def fake_run_session_stream(*args, **kwargs):
+        if int(kwargs.get("depth", 0)) > 0:
+            raise hook_error
+        yield from original_run_session_stream(*args, **kwargs)
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+    monkeypatch.setattr(session_module, "_run_session_stream", fake_run_session_stream)
+
+    with pytest.raises(type(hook_error), match="Hook 'inner_"):
+        list(run_session_stream_events("流式 task 子代理强拦截透传", session_id="s_stream_task_subagent_fail_fast"))
+
+
+@pytest.mark.parametrize("stage", ["requested", "started", "error", "finally"])
+def test_run_session_should_preserve_fail_fast_delegation_hook_failures(monkeypatch, stage):
+    call_state = {"chat_count": 0, "subagent_count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["chat_count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        append_tool_call_part(
+            assistant,
+            tool_call_id=f"call_task_fail_fast_{stage}",
+            name="task",
+            arguments='{"prompt":"执行需要拦截的子任务","agent":"explore"}',
+        )
+        return assistant
+
+    def fake_subagent(*args, **kwargs):
+        del args, kwargs
+        call_state["subagent_count"] += 1
+        if stage == "error":
+            raise RuntimeError("subagent boom before error hook")
+        return "subagent ok"
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr(session_module, "subagent_loop", fake_subagent)
+
+    with pytest.raises(RuntimeError, match="Hook 'broken_stage_delegation' failed"):
+        run_session(
+            "触发 fail_fast 委派 hook",
+            session_id=f"s_task_fail_fast_{stage}",
+            delegation_hooks=[BrokenStageDelegationHook(stage, fail_fast=True)],
+        )
+
+    if stage in {"requested", "started"}:
+        assert call_state["subagent_count"] == 0
+    else:
+        assert call_state["subagent_count"] == 1
 
 
 def test_run_session_stream_events_should_stop_after_subagent(monkeypatch):

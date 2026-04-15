@@ -136,6 +136,10 @@ class ToolExecutionOptions(TypedDict, total=False):
 ToolOutputProcessor = Callable[[ToolResult, ToolHookContext, ToolExecutionOptions], ToolResult]
 
 
+class ToolHookInterruption(RuntimeError):
+    """fail_fast 工具 Hook 触发的强拦截异常，用于中断 agent loop。"""
+
+
 class ToolHook:
     """工具调用 Hook 基类，支持调用前后与异常阶段扩展。"""
 
@@ -362,7 +366,10 @@ def normalize_tool_text(result: object) -> str:
     try:
         return json.dumps(result, ensure_ascii=False)
     except Exception:
-        return str(result)
+        try:
+            return str(result)
+        except Exception as exc:
+            return f"<unserializable tool output: {type(exc).__name__}>"
 
 
 def normalize_tool_result(result: object) -> ToolResult:
@@ -438,14 +445,37 @@ class ToolExecutor:
     ) -> None:
         normalized = normalize_tool_error(error, code=error_code) if error is not None else None
         for hook in ordered_hooks(hooks):
-            invoke_tool_hook(
-                hook,
-                stage,
-                ctx=ctx,
-                result=result,
-                error=error,
-                normalized_error=normalized,
-            )
+            try:
+                invoke_tool_hook(
+                    hook,
+                    stage,
+                    ctx=ctx,
+                    result=result,
+                    error=error,
+                    normalized_error=normalized,
+                )
+            except Exception as exc:
+                if bool(getattr(hook, "fail_fast", False)):
+                    # fail_fast Hook 通常承载安全闸门或强校验，失败时必须保留中断语义。
+                    raise ToolHookInterruption(str(exc)) from exc
+                # 非 fail_fast Hook 属于观测/扩展链路，失败不能影响 agent loop 继续运行。
+                logger.warning(
+                    "tool.hook_isolated hook=%s stage=%s error=%s",
+                    getattr(hook, "name", "unknown"),
+                    stage,
+                    f"{type(exc).__name__}: {exc}",
+                    exc_info=True,
+                )
+
+    def _build_failure_result(self, message: str, *, error_code: str, exc: Exception) -> ToolResult:
+        return {
+            "output": message,
+            "metadata": {
+                "status": "failed",
+                "error_code": error_code,
+                "error_type": type(exc).__name__,
+            },
+        }
 
     def execute(
         self,
@@ -492,14 +522,7 @@ class ToolExecutor:
             ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
             err = ValueError("Unknown tool")
             self._run_tool_hooks(hooks, "error", ctx=ctx, error=err, error_code="unknown_tool")
-            return {
-                "output": "Error: Unknown tool",
-                "metadata": {
-                    "status": "failed",
-                    "error_code": "unknown_tool",
-                    "error_type": type(err).__name__,
-                },
-            }
+            return self._build_failure_result("Error: Unknown tool", error_code="unknown_tool", exc=err)
 
         try:
             args = json.loads(arguments)
@@ -509,14 +532,11 @@ class ToolExecutor:
         except Exception as exc:
             ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
             self._run_tool_hooks(hooks, "error", ctx=ctx, error=exc, error_code="invalid_arguments")
-            return {
-                "output": f"Error: Invalid tool arguments: {type(exc).__name__}: {exc}",
-                "metadata": {
-                    "status": "failed",
-                    "error_code": "invalid_arguments",
-                    "error_type": type(exc).__name__,
-                },
-            }
+            return self._build_failure_result(
+                f"Error: Invalid tool arguments: {type(exc).__name__}: {exc}",
+                error_code="invalid_arguments",
+                exc=exc,
+            )
 
         try:
             # 工具层仍有部分逻辑通过 contextvar 读取 session_id，这里在调用前显式同步。
@@ -525,28 +545,36 @@ class ToolExecutor:
         except Exception as exc:
             ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
             self._run_tool_hooks(hooks, "error", ctx=ctx, error=exc, error_code="execution_error")
-            return {
-                "output": f"Error: Tool execution failed: {type(exc).__name__}: {exc}",
-                "metadata": {
-                    "status": "failed",
-                    "error_code": "execution_error",
-                    "error_type": type(exc).__name__,
-                },
-            }
+            return self._build_failure_result(
+                f"Error: Tool execution failed: {type(exc).__name__}: {exc}",
+                error_code="execution_error",
+                exc=exc,
+            )
 
-        result["metadata"] = dict(result.get("metadata", {}))
-        result["metadata"].setdefault("status", "completed")
-        processor = self.output_processors.get(tool_name, self.default_output_processor)
-        options: ToolExecutionOptions = {
-            "task_available": task_available,
-            "workdir": workdir or str(Path.cwd()),
-            "vendor": vendor,
-        }
-        result = processor(result, ctx, options)
-        ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
-        ctx["result_size"] = len(result.get("output", ""))
-        self._run_tool_hooks(hooks, "after", ctx=ctx, result=result)
-        return result
+        try:
+            result["metadata"] = dict(result.get("metadata", {}))
+            result["metadata"].setdefault("status", "completed")
+            processor = self.output_processors.get(tool_name, self.default_output_processor)
+            options: ToolExecutionOptions = {
+                "task_available": task_available,
+                "workdir": workdir or str(Path.cwd()),
+                "vendor": vendor,
+            }
+            result = normalize_tool_result(processor(result, ctx, options))
+            ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
+            ctx["result_size"] = len(result.get("output", ""))
+            self._run_tool_hooks(hooks, "after", ctx=ctx, result=result)
+            return result
+        except ToolHookInterruption:
+            raise
+        except Exception as exc:
+            ctx["duration_ms"] = int((time.perf_counter() - started) * 1000)
+            self._run_tool_hooks(hooks, "error", ctx=ctx, error=exc, error_code="output_processing_error")
+            return self._build_failure_result(
+                f"Error: Tool output processing failed: {type(exc).__name__}: {exc}",
+                error_code="output_processing_error",
+                exc=exc,
+            )
 
 
 def _default_tool_hooks() -> None:

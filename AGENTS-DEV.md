@@ -321,6 +321,7 @@ Tool Hook：
 - 继承 `src/agent/runtime/tool_executor.py` 中的 `ToolHook`
 - 按需实现 `before_call`、`after_call`、`on_error`
 - 支持 `order`、`enabled` 与 `HookFilter`；适合工具执行前后审计、权限控制、结果处理和指标统计
+- 默认 `fail_fast=False` 时 Hook 异常只记录告警并继续；若作为权限控制或安全闸门，必须显式设置 `fail_fast=True`，异常将中断整个 agent loop
 
 LLM Hook：
 

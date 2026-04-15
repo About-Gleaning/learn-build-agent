@@ -244,7 +244,7 @@ class HookDispatcher(Generic[HookT, ContextT, ErrorT]):
                 exc_info=True,
             )
             if fail_fast:
-                raise RuntimeError(
+                raise HookExecutionError(
                     f"Hook '{hook_name}' failed at stage '{stage}': {hook_exc}"
                 ) from hook_exc
 

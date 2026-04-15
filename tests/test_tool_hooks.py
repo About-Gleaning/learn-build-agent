@@ -27,6 +27,14 @@ def reset_global_tool_hooks():
     register_global_tool_hook(ToolLoggingHook())
 
 
+@pytest.fixture(autouse=True)
+def disable_real_mcp_runtime(monkeypatch):
+    import agent.runtime.session as main_module
+
+    monkeypatch.setattr(main_module, "list_mcp_tools", lambda mode=None: ([], []))
+    monkeypatch.setattr(main_module, "describe_mcp_runtime_alerts_for_mode", lambda mode=None: [])
+
+
 class RecorderToolHook(ToolHook):
     def __init__(self, name: str, records: list[str], fail_fast: bool = False, order: int = 1000) -> None:
         super().__init__(name=name, fail_fast=fail_fast, order=order)
@@ -48,6 +56,22 @@ class BrokenBeforeHook(ToolHook):
 
     def before_call(self, ctx):
         raise RuntimeError("tool before failed")
+
+
+class BrokenAfterHook(ToolHook):
+    def __init__(self, fail_fast: bool):
+        super().__init__(name="broken_after", fail_fast=fail_fast)
+
+    def after_call(self, ctx, result):
+        raise RuntimeError("tool after failed")
+
+
+class BrokenErrorHook(ToolHook):
+    def __init__(self, fail_fast: bool):
+        super().__init__(name="broken_error", fail_fast=fail_fast)
+
+    def on_error(self, ctx, error, normalized_error):
+        raise RuntimeError("tool error hook failed")
 
 
 class ErrorCodeHook(ToolHook):
@@ -274,6 +298,105 @@ def test_tool_executor_should_allow_custom_output_processor_override(tmp_path):
     assert result["output"] == "custom-output"
     assert result["metadata"]["truncated"] == "custom"
     assert not (get_workspace().tool_output_root / get_workspace().workspace_id).exists()
+
+
+def test_tool_executor_should_convert_output_processor_error_to_failed_result(tmp_path):
+    configure_workspace(tmp_path)
+
+    def broken_processor(result, ctx, options):
+        del result, ctx, options
+        raise RuntimeError("processor failed")
+
+    executor = ToolExecutor(
+        {"demo_tool": lambda: "ok"},
+        output_processors={"demo_tool": broken_processor},
+    )
+
+    result = executor.execute(
+        "demo_tool",
+        "{}",
+        session_id="s_processor_error",
+        tool_call_id="call_processor_error",
+        round_no=1,
+        hooks=[],
+        task_available=False,
+        workdir=str(tmp_path),
+    )
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "output_processing_error"
+    assert "processor failed" in result["output"]
+
+
+def test_tool_executor_should_isolate_after_hook_error():
+    executor = ToolExecutor({"demo_tool": lambda: "ok"})
+
+    result = executor.execute(
+        "demo_tool",
+        "{}",
+        session_id="s_after_hook_error",
+        tool_call_id="call_after_hook_error",
+        round_no=1,
+        hooks=[BrokenAfterHook(fail_fast=False)],
+        task_available=False,
+    )
+
+    assert result["output"] == "ok"
+    assert result["metadata"]["status"] == "completed"
+
+
+def test_tool_executor_should_isolate_error_hook_error():
+    def broken_handler():
+        raise RuntimeError("handler failed")
+
+    executor = ToolExecutor({"demo_tool": broken_handler})
+
+    result = executor.execute(
+        "demo_tool",
+        "{}",
+        session_id="s_error_hook_error",
+        tool_call_id="call_error_hook_error",
+        round_no=1,
+        hooks=[BrokenErrorHook(fail_fast=False)],
+        task_available=False,
+    )
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "execution_error"
+    assert "handler failed" in result["output"]
+
+
+def test_tool_executor_should_interrupt_after_hook_error_when_fail_fast():
+    executor = ToolExecutor({"demo_tool": lambda: "ok"})
+
+    with pytest.raises(RuntimeError, match="Hook 'broken_after' failed"):
+        executor.execute(
+            "demo_tool",
+            "{}",
+            session_id="s_after_hook_fast",
+            tool_call_id="call_after_hook_fast",
+            round_no=1,
+            hooks=[BrokenAfterHook(fail_fast=True)],
+            task_available=False,
+        )
+
+
+def test_tool_executor_should_interrupt_error_hook_error_when_fail_fast():
+    def broken_handler():
+        raise RuntimeError("handler failed")
+
+    executor = ToolExecutor({"demo_tool": broken_handler})
+
+    with pytest.raises(RuntimeError, match="Hook 'broken_error' failed"):
+        executor.execute(
+            "demo_tool",
+            "{}",
+            session_id="s_error_hook_fast",
+            tool_call_id="call_error_hook_fast",
+            round_no=1,
+            hooks=[BrokenErrorHook(fail_fast=True)],
+            task_available=False,
+        )
 
 
 def test_tool_logging_hook_should_log_agent_model_args_and_result(caplog):
