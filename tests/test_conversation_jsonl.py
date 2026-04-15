@@ -5,6 +5,8 @@ import pytest
 import agent.runtime.session as session_module
 from agent.core.message import append_text_part, append_tool_call_part, create_message, get_message_text
 from agent.runtime.conversation import ConversationMessage, ConversationPersistenceError, Session
+from agent.runtime.conversation_hooks import LoopJsonlPersistenceHook
+from agent.runtime.loop_hooks import LoopPersistenceHook
 from agent.runtime.session import configure_session_memory_store, run_session
 from agent.runtime.session_memory import FileSessionMemoryStore
 from agent.runtime.workspace import configure_workspace, get_workspace
@@ -142,6 +144,63 @@ def test_missing_message_fields_should_raise_clear_error(tmp_path):
         Session.load_from_path(path)
 
     assert "message.blocks" in str(exc.value)
+
+
+def test_loop_jsonl_hook_should_not_append_assistant_after_snapshot_save(tmp_path):
+    session_id = "s_no_duplicate_assistant"
+    store = FileSessionMemoryStore(base_dir=tmp_path, max_messages=24)
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "你好")
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="stop")
+    append_text_part(assistant_message, "完成")
+    messages = [user_message, assistant_message]
+
+    def save_messages():
+        store.save(session_id, messages)
+
+    def append_message(message):
+        store.append(session_id, message)
+
+    ctx = {
+        "session_id": session_id,
+        "assistant_message": assistant_message,
+        "process_items": [],
+        "display_parts": [],
+        "turn_started_at": "",
+        "turn_completed_at": "",
+        "save_enabled": True,
+        "save_callback": save_messages,
+        "append_callback": append_message,
+        "messages_ref": messages,
+    }
+
+    LoopPersistenceHook().after_loop(ctx)
+    LoopJsonlPersistenceHook().after_loop(ctx)
+
+    records = _jsonl_records(tmp_path / "s_no_duplicate_assistant.jsonl")
+    message_records = [record for record in records if record["type"] == "message"]
+    assert [record["message"]["role"] for record in message_records] == ["user", "assistant"]
+    assert [record["message"]["meta"]["message_id"] for record in message_records].count(assistant_message["info"]["message_id"]) == 1
+
+
+def test_persisted_meta_should_normalize_completed_message_status(tmp_path):
+    session_id = "s_status_normalized"
+    store = FileSessionMemoryStore(base_dir=tmp_path, max_messages=24)
+
+    user_message = create_message("user", session_id)
+    append_text_part(user_message, "用户消息")
+    assistant_message = create_message("assistant", session_id, status="running")
+    append_text_part(assistant_message, "助手回复")
+    tool_message = create_message("tool", session_id)
+    append_text_part(tool_message, "工具结果")
+    failed_message = create_message("assistant", session_id, status="failed")
+    append_text_part(failed_message, "失败回复")
+
+    store.save(session_id, [user_message, assistant_message, tool_message, failed_message])
+
+    records = _jsonl_records(tmp_path / "s_status_normalized.jsonl")
+    statuses = [record["message"]["meta"]["status"] for record in records if record["type"] == "message"]
+    assert statuses == ["completed", "completed", "completed", "failed"]
 
 
 def test_run_session_should_persist_message_level_jsonl(monkeypatch, tmp_path):

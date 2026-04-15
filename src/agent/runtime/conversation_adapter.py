@@ -197,6 +197,7 @@ def _build_persisted_meta(message: Message, blocks: list[dict[str, Any]]) -> dic
         for key, value in raw_info.items()
         if key not in {"response_meta", "process_items", "display_parts"}
     }
+    persisted["status"] = _normalize_persisted_status(message, blocks, raw_status=persisted.get("status"))
     persisted["round_count"] = _first_int(persisted.get("round_count"), response_meta.get("round_count"), process_summary["round_count"])
     persisted["tool_call_count"] = _first_int(
         persisted.get("tool_call_count"),
@@ -221,6 +222,38 @@ def _build_persisted_meta(message: Message, blocks: list[dict[str, Any]]) -> dic
         process_summary["delegated_agents"],
     )
     return _sanitize_value(persisted)
+
+
+def _normalize_persisted_status(message: Message, blocks: list[dict[str, Any]], *, raw_status: Any) -> str:
+    """仅归一化落库状态，避免已完成历史在 Web 展示中仍被标成 pending。"""
+
+    status = str(raw_status or "").strip().lower()
+    if status in {"completed", "failed", "interrupted"}:
+        return status
+    if status not in {"", "pending", "running"}:
+        return status
+
+    role = get_role(message)
+    info = message.get("info", {})
+    if str(info.get("finish_reason", "")).strip():
+        return "completed"
+    if role in {"user", "tool"}:
+        return "completed"
+    if role == "system" and bool(info.get("summary")):
+        return "completed"
+    if role == "assistant" and _has_completed_assistant_evidence(blocks):
+        return "completed"
+    return status or "pending"
+
+
+def _has_completed_assistant_evidence(blocks: list[dict[str, Any]]) -> bool:
+    for block in blocks:
+        block_type = str(block.get("type", "")).strip()
+        if block_type in {"tool_use", "tool_result"}:
+            return True
+        if block_type == "text" and str(block.get("text", "")).strip():
+            return True
+    return False
 
 
 def _summarize_blocks(blocks: list[dict[str, Any]]) -> dict[str, Any]:

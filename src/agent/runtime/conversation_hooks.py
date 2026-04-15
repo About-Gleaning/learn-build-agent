@@ -47,6 +47,9 @@ class LoopJsonlPersistenceHook(LoopHook):
     def after_loop(self, ctx: LoopHookContext) -> None:
         if not bool(ctx.get("save_enabled", False)):
             return
+        # 旧的 LoopPersistenceHook 已经在更早顺序执行快照保存；此处再追加会制造短暂重复记录。
+        if bool(ctx.get("snapshot_saved", False)):
+            return
         assistant_message = ctx.get("assistant_message")
         append_callback = ctx.get("append_callback")
         if callable(append_callback) and isinstance(assistant_message, dict):
