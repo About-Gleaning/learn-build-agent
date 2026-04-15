@@ -2261,6 +2261,10 @@ function shouldRenderEntryHeadline(entry: ProgressEntry): boolean {
   return !entry.isFinal && entry.kind !== "assistant_text";
 }
 
+function isCliToolEntry(entry: ProgressEntry): boolean {
+  return entry.kind === "tool_call" || entry.kind === "tool_result";
+}
+
 function renderAssistantTimeline(params: {
   message: UiMessage;
   reasoningDefaultCollapsed: boolean;
@@ -2290,6 +2294,7 @@ function renderAssistantTimeline(params: {
     <div className="assistant-timeline">
       {entries.map((entry) => {
         const showHeadline = shouldRenderEntryHeadline(entry);
+        const isCliTool = isCliToolEntry(entry);
         const reasoningEntryKey = entry.reasoningKey ? `${message.id}:${entry.reasoningKey}` : "";
         const isReasoningCollapsed = entry.isReasoning
           ? reasoningCollapsedState[reasoningEntryKey] ?? reasoningDefaultCollapsed
@@ -2316,7 +2321,7 @@ function renderAssistantTimeline(params: {
             key={entry.id}
             className={`assistant-timeline-entry kind-${entry.kind} status-${entry.status || "pending"} ${entry.agentKind} ${
               entry.isFinal ? "is-final" : ""
-            } ${entry.request && entry.result && !entry.isFinal ? "has-result" : ""}`}
+            } ${entry.request && entry.result && !entry.isFinal ? "has-result" : ""} ${isCliTool ? "is-cli-tool" : ""}`}
           >
             {showHeadline ? (
               <div className="assistant-timeline-entry-head">
@@ -2345,7 +2350,7 @@ function renderAssistantTimeline(params: {
                 }`}
               >
                 <div className="assistant-timeline-entry-content">
-                  <div className="assistant-timeline-entry-label">参数</div>
+                  <div className="assistant-timeline-entry-label">{isCliTool ? "args" : "参数"}</div>
                   {entry.toolName === "todo_write" ? (
                     <TodoListRenderer content={entry.requestFull || ""} />
                   ) : entry.toolName === "question" ? (
@@ -2369,7 +2374,7 @@ function renderAssistantTimeline(params: {
             ) : fileChangePreviewModel ? (
               <div className="assistant-timeline-entry-block is-result is-file-change-result">
                 <div className="assistant-timeline-entry-content">
-                  <div className="assistant-timeline-entry-label">变更</div>
+                  <div className="assistant-timeline-entry-label">{isCliTool ? "diff" : "变更"}</div>
                   <FileChangePreviewRenderer model={fileChangePreviewModel} />
                 </div>
               </div>
@@ -2380,7 +2385,7 @@ function renderAssistantTimeline(params: {
                 }`}
               >
                 <div className="assistant-timeline-entry-content">
-                  <div className="assistant-timeline-entry-label">结果</div>
+                  <div className="assistant-timeline-entry-label">{isCliTool ? "result" : "结果"}</div>
                   {shouldShowResultPanel && !isResultCollapsed ? (
                     <div className="assistant-timeline-entry-panel">
                       <pre className="assistant-timeline-entry-text assistant-timeline-entry-code">{resultText}</pre>

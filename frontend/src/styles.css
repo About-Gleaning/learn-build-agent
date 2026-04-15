@@ -409,6 +409,19 @@ button:disabled {
   padding-left: 12px;
 }
 
+.assistant-timeline-entry.is-cli-tool {
+  gap: 5px;
+  padding-top: 4px;
+  padding-bottom: 6px;
+  font-family: var(--mono);
+}
+
+.assistant-timeline-entry.is-cli-tool + .assistant-timeline-entry.is-cli-tool {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(48, 80, 111, 0.42);
+}
+
 .assistant-timeline-entry-head {
   display: flex;
   flex-wrap: nowrap;
@@ -441,6 +454,11 @@ button:disabled {
   font-weight: 700;
 }
 
+.assistant-timeline-entry.is-cli-tool .assistant-timeline-entry-head strong::before {
+  content: "$ ";
+  color: var(--success);
+}
+
 .assistant-timeline-entry-agent {
   flex: 0 0 auto;
   color: var(--ink-subtle);
@@ -469,6 +487,10 @@ button:disabled {
   min-width: 0;
 }
 
+.assistant-timeline-entry.is-cli-tool .assistant-timeline-entry-block {
+  padding-left: 16px;
+}
+
 .assistant-timeline-entry-content {
   display: grid;
   gap: 6px;
@@ -481,6 +503,11 @@ button:disabled {
   font-size: 11px;
   line-height: 1.4;
   letter-spacing: 0;
+}
+
+.assistant-timeline-entry.is-cli-tool .assistant-timeline-entry-label {
+  color: #7f95aa;
+  font-family: var(--mono);
 }
 
 .assistant-timeline-entry-block.final-body {
@@ -505,6 +532,13 @@ button:disabled {
   border-radius: 8px;
   background: rgba(6, 16, 26, 0.9);
   font-family: "SFMono-Regular", "Fira Code", "JetBrains Mono", monospace;
+}
+
+.assistant-timeline-entry.is-cli-tool .assistant-timeline-entry-code {
+  padding: 8px 10px;
+  border-color: rgba(48, 80, 111, 0.72);
+  border-radius: 4px;
+  background: rgba(3, 10, 16, 0.62);
 }
 
 .assistant-timeline-entry-panel {
