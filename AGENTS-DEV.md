@@ -189,10 +189,17 @@ LSP 查询请求
 ### 5.3 Session Memory
 
 - 会话历史统一通过 `src/agent/runtime/session_memory.py` 中的 `SessionMemoryStore` 抽象读写，业务流程不得绕过该抽象直接操作存储文件。
-- 默认实现是 `FileSessionMemoryStore`，按当前工作区落盘到 `get_workspace().sessions_dir`，也就是运行态目录中的 `workspaces/sessions/`。
+- 默认实现是 `FileSessionMemoryStore`，按当前工作区落盘到 `get_workspace().sessions_dir`，也就是运行态目录中的 `workspaces/sessions/`，文件格式统一为 JSONL。
 - `InMemorySessionMemoryStore` 仅适合测试或单进程临时替换；运行时默认不应退回纯内存存储，否则 CLI/Web 重启后无法恢复历史。
 - `project_runtime.json -> session_memory.trim_enabled/max_messages` 是历史裁剪配置来源；保存前必须统一复用存储层裁剪逻辑，避免不同入口保存出不一致历史。
-- 存储层只保存非 system 消息，并继续遵守 compaction checkpoint 裁剪；读取历史时必须经过 `normalize_history_prefix` 规范化，避免非法 tool 链片段直接作为会话起点。
+- 会话落库粒度必须是消息，不是流式事件；`text_delta`、进度事件、权限检查过程和 Hook 过程事件只用于运行时展示或汇总，不逐条落库。
+- JSONL 记录顺序为 `session_meta`、可选 `compaction`、多条 `message`；`message.blocks` 只使用 `text`、`tool_use`、`tool_result` 三类核心块。
+- JSONL 中 assistant `meta` 禁止持久化 `response_meta`、`process_items`、`display_parts` 三个展示投影大字段；只保留 `round_count`、`tool_call_count`、`tool_names`、`delegation_count`、`delegated_agents` 等摘要字段，Web 历史展示统一由 `blocks + meta` 动态重建。
+- JSONL `message.meta.status` 必须表示可恢复历史的稳定状态；保存时应把已有内容或终止原因的 `pending/running` 消息归一化为 `completed`，但不得覆盖 `failed/interrupted` 等真实终态。
+- JSONL 追加单条消息是 O(1)，turn 结束和 compact 后的 `save_to_path` 是 O(n) 原子快照重写；文件写入必须使用临时文件加 rename/replace，避免半写损坏主文件。
+- 存储层默认不保存普通 system prompt；compact 后必须以第一条 `role=system` 摘要消息恢复上下文，并继续遵守 compaction checkpoint 裁剪；读取历史时必须经过 `normalize_history_prefix` 规范化，避免非法 tool 链片段直接作为会话起点。
+- 会话持久化应通过四类内置 Hook 的具体实现接入：`SessionHook` 处理 user 与 turn 快照，`LoopHook` 处理完整 assistant 消息，`ToolHook` 处理工具结果，`LLMHook` 只保留 provider 调用观测，不直接做消息落库。
+- 同一轮 assistant 已由 `LoopPersistenceHook` 触发快照保存时，JSONL 增量追加 Hook 不得再次追加该 assistant，避免进程异常或中途读取时出现重复历史。
 - 清理会话必须走 `clear_session_memory` 或 `SessionMemoryStore.clear`，同时清理与该 session 绑定的待确认模式切换和待答问题状态。
 
 ### 5.4 模式切换与问题恢复
@@ -201,7 +208,7 @@ LSP 查询请求
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
 - `SessionHook` 必须覆盖同步/流式会话的所有合法返回路径，包括 slash command 的即时完成与即时错误分支；Hook 上下文中的 `mode` 必须始终表示当前有效模式，而不是仅表示入口参数。
-- assistant 级 `process_items`、`display_parts` 与 `response_meta` 必须按单条 assistant 消息分别落库，禁止重新退回到整轮 turn 只汇总到最后一条 assistant 的旧语义。
+- assistant 级 `process_items`、`display_parts` 与 `response_meta` 只作为运行时/SSE 展示投影，不再作为 Session JSONL 长期落库字段；需要历史展示时必须按单条 assistant 消息由 `blocks + meta` 重建，禁止重新退回到整轮 turn 只汇总到最后一条 assistant 的旧语义。
 - 若需要把展示投影、摘要汇总、落库等非业务能力下沉，优先使用 `loop_hooks.py` 的 Loop Hook；`session_hooks.py` 只负责整次 session 生命周期，不承担 loop 内归属判定。
 
 ### 5.5 Web 开发栈

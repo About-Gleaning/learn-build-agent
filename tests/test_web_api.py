@@ -3,7 +3,7 @@ import re
 
 from fastapi.testclient import TestClient
 
-from agent.core.message import append_reasoning_part, append_text_part, create_message
+from agent.core.message import append_text_part, append_tool_call_part, append_tool_result_part, append_reasoning_part, create_message
 from agent.runtime import session as session_runtime
 from agent.runtime.session import clear_session_memory, configure_session_memory_store, generate_session_id
 from agent.runtime.session_memory import InMemorySessionMemoryStore
@@ -347,9 +347,61 @@ def test_message_to_vo_should_normalize_missing_optional_fields():
     assert message_vo.text == "hello"
     assert message_vo.response_meta.duration_ms == 0
     assert message_vo.process_items == []
-    assert message_vo.display_parts == []
+    assert message_vo.display_parts[0].kind == "assistant_text"
+    assert message_vo.display_parts[0].text == "hello"
     assert message_vo.confirmation is None
     assert message_vo.question is None
+
+
+def test_message_to_vo_should_rebuild_response_meta_from_compact_meta():
+    assistant = create_message("assistant", "s_compact_meta", status="completed")
+    append_text_part(assistant, "完成")
+    assistant["info"]["turn_started_at"] = "2026-03-14T00:00:00+00:00"
+    assistant["info"]["turn_completed_at"] = "2026-03-14T00:00:02+00:00"
+    assistant["info"]["round_count"] = 1
+    assistant["info"]["tool_call_count"] = 1
+    assistant["info"]["tool_names"] = ["write_file"]
+
+    message_vo = message_to_vo(assistant)
+
+    assert message_vo.response_meta.round_count == 1
+    assert message_vo.response_meta.tool_call_count == 1
+    assert message_vo.response_meta.tool_names == ["write_file"]
+    assert message_vo.response_meta.duration_ms == 2000
+
+
+def test_get_session_messages_should_rebuild_tool_display_parts_from_blocks():
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_hist_compact_projection")
+
+    user_msg = create_message("user", "s_hist_compact_projection", status="completed")
+    append_text_part(user_msg, "创建文件")
+    assistant_msg = create_message("assistant", "s_hist_compact_projection", status="completed")
+    append_text_part(assistant_msg, "我来创建文件。")
+    append_tool_call_part(
+        assistant_msg,
+        tool_call_id="call_write_1",
+        name="write_file",
+        arguments='{"filePath":"hello.py","content":"print(1)"}',
+    )
+    assistant_msg["info"]["agent"] = "build"
+    assistant_msg["info"]["round_count"] = 1
+    assistant_msg["info"]["tool_call_count"] = 1
+    assistant_msg["info"]["tool_names"] = ["write_file"]
+    tool_msg = create_message("tool", "s_hist_compact_projection", status="completed")
+    append_tool_result_part(tool_msg, tool_call_id="call_write_1", name="write_file", content="创建成功: hello.py")
+    session_runtime.SESSION_MEMORY_STORE.save("s_hist_compact_projection", [user_msg, assistant_msg, tool_msg])
+
+    app = create_app()
+    client = TestClient(app)
+    resp = client.get("/api/sessions/s_hist_compact_projection/messages?limit=20")
+
+    assert resp.status_code == 200
+    assistant_payload = next(item for item in resp.json()["messages"] if item["role"] == "assistant")
+    display_kinds = [item["kind"] for item in assistant_payload["display_parts"]]
+    assert display_kinds == ["assistant_text", "tool_call", "tool_result"]
+    assert assistant_payload["display_parts"][1]["detail"] == '{"filePath":"hello.py","content":"print(1)"}'
+    assert "创建成功: hello.py" in assistant_payload["display_parts"][2]["detail"]
 
 
 def test_message_to_vo_should_keep_reasoning_display_part_kind():

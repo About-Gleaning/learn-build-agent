@@ -2667,10 +2667,10 @@ def test_file_session_memory_store_should_share_session_file_across_workspaces(t
     assistant_message = create_message("assistant", "shared_session", status="completed")
     append_text_part(assistant_message, "第一条回答")
     store.save("shared_session", [user_message, assistant_message])
-    first_session_file = get_workspace().sessions_dir / "shared_session.json"
+    first_session_file = get_workspace().sessions_dir / "shared_session.jsonl"
 
     configure_workspace(second_workspace)
-    second_session_file = get_workspace().sessions_dir / "shared_session.json"
+    second_session_file = get_workspace().sessions_dir / "shared_session.jsonl"
     loaded_messages = store.load("shared_session")
 
     assert first_session_file == second_session_file

@@ -27,7 +27,10 @@ class LoopHookContext(TypedDict, total=False):
     display_parts: list[DisplayPart]
     response_meta: ResponseMeta
     save_enabled: bool
+    snapshot_saved: bool
     save_callback: Callable[[], None]
+    append_callback: Callable[[Message], None]
+    messages_ref: list[Message]
 
 
 class LoopNormalizedError(TypedDict, total=False):
@@ -78,6 +81,7 @@ class LoopPersistenceHook(LoopHook):
         save_callback = ctx.get("save_callback")
         if callable(save_callback) and bool(ctx.get("save_enabled", False)):
             save_callback()
+            ctx["snapshot_saved"] = True
 
 
 class LoopLoggingHook(LoopHook):

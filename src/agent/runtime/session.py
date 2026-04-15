@@ -62,6 +62,7 @@ from ..tools.webfetch import webfetch
 from ..tools.websearch import websearch
 from ..tools.write_file_tool import run_write
 from .compaction import compact
+from .conversation_hooks import LoopJsonlPersistenceHook, SessionJsonlPersistenceHook, ToolJsonlPersistenceHook
 from .delegation_hooks import (
     DelegationHook,
     DelegationHookContext,
@@ -74,6 +75,7 @@ from .loop_hooks import (
     LoopHook,
     LoopHookContext,
     invoke_loop_hook,
+    register_global_loop_hook,
     resolve_effective_loop_hooks,
 )
 from .stream_display import (
@@ -92,6 +94,7 @@ from .session_hooks import (
     SessionHook,
     SessionHookContext,
     invoke_session_hook,
+    register_global_session_hook,
     resolve_effective_session_hooks,
 )
 from .tool_executor import ToolExecutor, ToolHook, ToolResult, get_global_tool_hooks
@@ -132,6 +135,9 @@ def _build_default_session_memory_store() -> SessionMemoryStore:
 
 SESSION_MEMORY_STORE: SessionMemoryStore = _build_default_session_memory_store()
 ModeSwitchAction = Literal["confirm", "cancel"]
+
+register_global_session_hook(SessionJsonlPersistenceHook())
+register_global_loop_hook(LoopJsonlPersistenceHook())
 
 
 class PendingModeSwitch(TypedDict):
@@ -1808,6 +1814,8 @@ def _build_loop_hook_context(
     projection: AssistantProjection,
     save_enabled: bool,
     save_callback: Callable[[], None],
+    append_callback: Callable[[Message], None],
+    messages_ref: list[Message],
 ) -> LoopHookContext:
     assistant_message = projection.assistant_message
     turn_completed_at = ""
@@ -1831,6 +1839,8 @@ def _build_loop_hook_context(
         "display_parts": list(projection.display_parts or []),
         "save_enabled": save_enabled,
         "save_callback": save_callback,
+        "append_callback": append_callback,
+        "messages_ref": messages_ref,
     }
 
 
@@ -2724,11 +2734,21 @@ def _run_session_stream(
     turn_started_at = bootstrap.turn_started_at
     mode_enabled = bootstrap.mode_enabled
 
-    effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
+    effective_tool_hooks = get_global_tool_hooks() + [ToolJsonlPersistenceHook()] + (tool_hooks or [])
     effective_delegation_hooks = resolve_effective_delegation_hooks(delegation_hooks)
     effective_max_rounds = max_rounds if max_rounds is not None else resolve_agent_loop_settings().max_rounds
     active_loop_agent = bootstrap.initial_agent
     effective_session_hooks = resolve_effective_session_hooks(session_hooks)
+    messages = list(bootstrap.messages)
+
+    def _append_message(message: Message) -> None:
+        if mode_enabled:
+            SESSION_MEMORY_STORE.append(active_session_id, message)
+
+    def _save_messages() -> None:
+        if mode_enabled:
+            SESSION_MEMORY_STORE.save(active_session_id, messages)
+
     session_hook_ctx = _build_session_hook_context(
         active_session_id=active_session_id,
         active_agent=active_loop_agent,
@@ -2741,6 +2761,11 @@ def _run_session_stream(
         user_input=prepared_input.user_input,
         mode=bootstrap.initial_mode,
     )
+    session_hook_ctx["persistence_enabled"] = mode_enabled
+    session_hook_ctx["user_message"] = messages[-1] if messages else {}
+    session_hook_ctx["messages_ref"] = messages
+    session_hook_ctx["append_callback"] = _append_message
+    session_hook_ctx["save_callback"] = _save_messages
     session_hook_started_at = time.perf_counter()
     _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
     effective_loop_hooks = resolve_effective_loop_hooks()
@@ -2756,7 +2781,6 @@ def _run_session_stream(
     display_reasoning_merge_open = False
     tool_call_owner_map: dict[str, str] = {}
     projection_by_message_id: dict[str, AssistantProjection] = {}
-    messages = list(bootstrap.messages)
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
     current_provider_explicit = bootstrap.current_provider_explicit
@@ -2777,10 +2801,6 @@ def _run_session_stream(
             **payload,
         )
         return event
-
-    def _save_messages() -> None:
-        if mode_enabled:
-            SESSION_MEMORY_STORE.save(active_session_id, messages)
 
     def _persist_projection(
         projection: AssistantProjection,
@@ -2805,6 +2825,8 @@ def _run_session_stream(
             projection=projection,
             save_enabled=mode_enabled,
             save_callback=_save_messages,
+            append_callback=_append_message,
+            messages_ref=messages,
         )
         _run_loop_hooks(effective_loop_hooks, "after", ctx=loop_ctx)
         return loop_ctx.get("response_meta", projection.assistant_message["info"].get("response_meta", {}))  # type: ignore[index]
@@ -3050,6 +3072,8 @@ def _run_session_stream(
                 projection=current_projection,
                 save_enabled=mode_enabled,
                 save_callback=_save_messages,
+                append_callback=_append_message,
+                messages_ref=messages,
             )
             _run_loop_hooks(effective_loop_hooks, "before", ctx=loop_hook_ctx)
 
@@ -3375,6 +3399,18 @@ def _run_session_stream(
                         vendor=current_runtime.vendor,
                         task_available=task_available,
                         workdir=str(_get_workdir()),
+                        turn_started_at=turn_started_at,
+                        persistence_enabled=mode_enabled,
+                        append_callback=_append_message,
+                        message_factory=lambda ctx, tool_result: _build_tool_message(
+                            str(ctx.get("session_id", active_session_id)),
+                            tool_call_id=str(ctx.get("tool_call_id", "")),
+                            tool_name=str(ctx.get("tool_name", "")),
+                            arguments=str(ctx.get("arguments", "{}")),
+                            result=tool_result,
+                            agent=str(ctx.get("agent", active_agent)),
+                            turn_started_at=str(ctx.get("turn_started_at", turn_started_at)),
+                        ),
                     )
 
                 messages.append(
@@ -3954,8 +3990,18 @@ def run_session(
     active_session_id = bootstrap.session_id
     turn_started_at = bootstrap.turn_started_at
     mode_enabled = bootstrap.mode_enabled
-    effective_tool_hooks = get_global_tool_hooks() + (tool_hooks or [])
+    effective_tool_hooks = get_global_tool_hooks() + [ToolJsonlPersistenceHook()] + (tool_hooks or [])
     active_loop_agent = bootstrap.initial_agent
+    messages = list(bootstrap.messages)
+
+    def _append_message(message: Message) -> None:
+        if mode_enabled:
+            SESSION_MEMORY_STORE.append(active_session_id, message)
+
+    def _save_messages() -> None:
+        if mode_enabled:
+            SESSION_MEMORY_STORE.save(active_session_id, messages)
+
     session_hook_ctx = _build_session_hook_context(
         active_session_id=active_session_id,
         active_agent=active_loop_agent,
@@ -3968,10 +4014,14 @@ def run_session(
         user_input=prepared_input.user_input,
         mode=bootstrap.initial_mode,
     )
+    session_hook_ctx["persistence_enabled"] = mode_enabled
+    session_hook_ctx["user_message"] = messages[-1] if messages else {}
+    session_hook_ctx["messages_ref"] = messages
+    session_hook_ctx["append_callback"] = _append_message
+    session_hook_ctx["save_callback"] = _save_messages
     session_hook_started_at = time.perf_counter()
     _run_session_hooks(effective_session_hooks, "before", ctx=session_hook_ctx)
     effective_loop_hooks = resolve_effective_loop_hooks()
-    messages = list(bootstrap.messages)
     current_mode: MainAgentMode = bootstrap.current_mode
     current_runtime = bootstrap.current_runtime
     current_provider_explicit = bootstrap.current_provider_explicit
@@ -4068,7 +4118,9 @@ def run_session(
                 tool_call_owner_map=tool_call_owner_map,
                 projection=current_projection,
                 save_enabled=mode_enabled,
-                save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                save_callback=_save_messages,
+                append_callback=_append_message,
+                messages_ref=messages,
             )
             _run_loop_hooks(effective_loop_hooks, "before", ctx=loop_hook_ctx)
 
@@ -4112,7 +4164,9 @@ def run_session(
                         tool_call_owner_map=tool_call_owner_map,
                         projection=current_projection,
                         save_enabled=mode_enabled,
-                        save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                        save_callback=_save_messages,
+                        append_callback=_append_message,
+                        messages_ref=messages,
                     ),
                 )
                 return _handle_session_hook_success(
@@ -4210,6 +4264,18 @@ def run_session(
                         vendor=current_runtime.vendor,
                         task_available=task_available,
                         workdir=str(_get_workdir()),
+                        turn_started_at=turn_started_at,
+                        persistence_enabled=mode_enabled,
+                        append_callback=_append_message,
+                        message_factory=lambda ctx, tool_result: _build_tool_message(
+                            str(ctx.get("session_id", active_session_id)),
+                            tool_call_id=str(ctx.get("tool_call_id", "")),
+                            tool_name=str(ctx.get("tool_name", "")),
+                            arguments=str(ctx.get("arguments", "{}")),
+                            result=tool_result,
+                            agent=str(ctx.get("agent", active_agent)),
+                            turn_started_at=str(ctx.get("turn_started_at", turn_started_at)),
+                        ),
                     )
                 messages.append(
                     _build_tool_message(
@@ -4273,7 +4339,9 @@ def run_session(
                                     display_parts=current_projection.display_parts,
                                 ),
                                 save_enabled=mode_enabled,
-                                save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                                save_callback=_save_messages,
+                                append_callback=_append_message,
+                                messages_ref=messages,
                             ),
                         )
                         return _handle_session_hook_success(
@@ -4321,7 +4389,9 @@ def run_session(
                                 display_parts=current_projection.display_parts,
                             ),
                             save_enabled=mode_enabled,
-                            save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                            save_callback=_save_messages,
+                            append_callback=_append_message,
+                            messages_ref=messages,
                         ),
                     )
                     return _handle_session_hook_success(
@@ -4361,7 +4431,9 @@ def run_session(
                             display_parts=current_projection.display_parts,
                         ),
                         save_enabled=mode_enabled,
-                        save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                        save_callback=_save_messages,
+                        append_callback=_append_message,
+                        messages_ref=messages,
                     ),
                 )
                 return _handle_session_hook_success(
@@ -4388,7 +4460,9 @@ def run_session(
                     tool_call_owner_map=tool_call_owner_map,
                     projection=current_projection,
                     save_enabled=mode_enabled,
-                    save_callback=lambda: SESSION_MEMORY_STORE.save(active_session_id, messages),
+                    save_callback=_save_messages,
+                    append_callback=_append_message,
+                    messages_ref=messages,
                 ),
             )
     except Exception as exc:

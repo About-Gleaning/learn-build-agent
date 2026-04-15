@@ -389,6 +389,19 @@ button:disabled {
   border-left: 1px solid rgba(48, 80, 111, 0.52);
 }
 
+.assistant-loop-segment {
+  display: grid;
+  gap: 8px;
+}
+
+.assistant-loop-separator {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 0 2px 12px;
+}
+
 .assistant-timeline-entry {
   position: relative;
   display: grid;
@@ -396,34 +409,28 @@ button:disabled {
   padding-left: 12px;
 }
 
-.assistant-timeline-entry::before {
-  content: "";
-  position: absolute;
-  top: 8px;
-  left: -4px;
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--brand);
-}
-
-.assistant-timeline-entry.subagent::before,
-.assistant-timeline-entry.is-final::before {
-  background: var(--success);
-}
-
-.assistant-timeline-entry.status-failed::before,
-.assistant-timeline-entry.kind-error::before {
-  background: var(--danger);
-}
-
 .assistant-timeline-entry-head {
   display: flex;
   flex-wrap: nowrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: flex-start;
   gap: 8px;
   min-width: 0;
+}
+
+.assistant-timeline-status-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 143, 133, 0.72);
+  border-radius: 999px;
+  background: rgba(255, 143, 133, 0.14);
+  color: #ffd0ca;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .assistant-timeline-entry-head strong {
@@ -473,7 +480,7 @@ button:disabled {
   color: var(--ink-subtle);
   font-size: 11px;
   line-height: 1.4;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 .assistant-timeline-entry-block.final-body {
@@ -514,6 +521,103 @@ button:disabled {
   min-width: 100%;
   border: 0;
   border-radius: 0;
+}
+
+.file-change-preview {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(124, 194, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(3, 14, 22, 0.96);
+}
+
+.file-change-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px 0;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.file-change-preview-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-change-preview-stat {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+.file-change-preview-stat.is-add {
+  color: #9fdb8a;
+}
+
+.file-change-preview-stat.is-delete {
+  color: #ff8f85;
+}
+
+.file-change-preview-body {
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  font-family: "SFMono-Regular", "Fira Code", "JetBrains Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.file-change-preview-line {
+  display: grid;
+  grid-template-columns: 48px 20px minmax(max-content, 1fr);
+  min-width: max-content;
+  color: #c9d7e4;
+}
+
+.file-change-preview-line.is-add {
+  background: rgba(61, 132, 78, 0.32);
+}
+
+.file-change-preview-line.is-delete {
+  background: rgba(132, 56, 50, 0.36);
+}
+
+.file-change-preview-line-no,
+.file-change-preview-marker {
+  user-select: none;
+}
+
+.file-change-preview-line-no {
+  padding: 0 10px;
+  color: rgba(216, 231, 245, 0.48);
+  text-align: right;
+}
+
+.file-change-preview-marker {
+  color: rgba(216, 231, 245, 0.68);
+  text-align: center;
+}
+
+.file-change-preview-line code {
+  padding-right: 12px;
+  color: inherit;
+  white-space: pre;
+}
+
+.assistant-timeline-entry-block.is-failed-request,
+.assistant-timeline-entry-block.is-failed-result {
+  padding: 8px 10px;
+  border-left: 2px solid var(--danger);
+  background: rgba(255, 143, 133, 0.06);
+}
+
+.assistant-timeline-entry-block.is-failed-result .assistant-timeline-entry-label {
+  color: #ffd0ca;
 }
 
 .assistant-timeline-entry-block.is-collapsed {
@@ -1019,12 +1123,8 @@ button:disabled {
   }
 
   .assistant-timeline-entry-head {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .assistant-timeline-entry-meta,
-  .assistant-timeline-entry-tail {
-    grid-column: 1 / -1;
+    flex-wrap: wrap;
+    align-items: center;
   }
 
   .primary-btn,

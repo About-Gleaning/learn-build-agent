@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 
 from ..config.logging_setup import build_log_extra, sanitize_log_text
 from ..core.hooks import HookDispatcher
@@ -25,6 +25,11 @@ class SessionHookContext(TypedDict, total=False):
     latency_ms: int
     user_input: str
     mode: str
+    persistence_enabled: bool
+    user_message: dict[str, Any]
+    messages_ref: list[dict[str, Any]]
+    append_callback: Callable[[dict[str, Any]], None]
+    save_callback: Callable[[], None]
 
 
 class SessionNormalizedError(TypedDict, total=False):

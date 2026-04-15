@@ -26,7 +26,7 @@ from .schemas import (
     SessionMessagesVO,
     StopSessionVO,
 )
-from .serializers import message_to_vo, split_stream_event, sse_event
+from .serializers import message_to_vo, messages_to_vos, split_stream_event, sse_event
 
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -242,7 +242,7 @@ def create_app() -> FastAPI:
         selected = messages[-limit:]
         return SessionMessagesVO(
             session_id=normalized_id,
-            messages=[message_to_vo(msg) for msg in selected],
+            messages=messages_to_vos(selected),
         )
 
     @app.post("/api/sessions/{session_id}/mode-switch", response_model=ModeSwitchActionVO)
