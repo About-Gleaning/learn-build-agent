@@ -105,32 +105,6 @@ type QuestionInfo = {
   questions: QuestionItem[];
 };
 
-type EditFileArgs = {
-  filePath: string;
-  oldString: string;
-  newString: string;
-};
-
-type WriteFileArgs = {
-  filePath: string;
-  content: string;
-};
-
-type FileChangePreviewLine = {
-  kind: "add" | "delete" | "context";
-  marker: "+" | "-" | " ";
-  text: string;
-};
-
-type FileChangePreviewModel = {
-  action: "Edited" | "Created";
-  filePath: string;
-  displayPath: string;
-  additions: number;
-  deletions: number;
-  lines: FileChangePreviewLine[];
-};
-
 type ProgressEntry = {
   id: string;
   kind: string;
@@ -325,18 +299,6 @@ type StreamCompletion = {
   finalPayload: Record<string, unknown> | null;
   closedWithoutTerminalDone: boolean;
 };
-
-type ConversationRecord =
-  | {
-      kind: "message";
-      id: string;
-      message: UiMessage;
-    }
-  | {
-      kind: "assistant_group";
-      id: string;
-      messages: UiMessage[];
-    };
 
 type QuestionDraft = {
   answers: string[];
@@ -668,136 +630,6 @@ function normalizeToolContent(text: string): string {
   return text.trim();
 }
 
-function stripToolResultStatusPrefix(text?: string, status?: string): string {
-  const normalized = normalizeToolContent(text || "");
-  if (!normalized) {
-    return "";
-  }
-  const statusPrefix = normalizeToolContent(status || "");
-  if (statusPrefix && normalized.startsWith(`${statusPrefix} `)) {
-    return normalized.slice(statusPrefix.length).trimStart();
-  }
-  return normalized.replace(/^(completed|failed)\s+/, "");
-}
-
-function splitDiffLines(text: string): string[] {
-  if (!text) {
-    return [];
-  }
-  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") {
-    return lines.slice(0, -1);
-  }
-  return lines;
-}
-
-function compactFilePath(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, "/").trim();
-  if (!normalized) {
-    return "unknown";
-  }
-  const knownRoots = ["/frontend/", "/src/", "/tests/", "/docs/"];
-  for (const root of knownRoots) {
-    const index = normalized.lastIndexOf(root);
-    if (index >= 0) {
-      return normalized.slice(index + 1);
-    }
-  }
-  const parts = normalized.split("/").filter(Boolean);
-  return parts.length > 2 ? parts.slice(-2).join("/") : normalized;
-}
-
-function parseEditFileArgs(content?: string): EditFileArgs | null {
-  const normalized = normalizeToolContent(content || "");
-  if (!normalized) {
-    return null;
-  }
-  try {
-    const payload = JSON.parse(normalized) as Record<string, unknown>;
-    const filePath = readString(payload, "filePath") || readString(payload, "file_path");
-    const oldString = readString(payload, "oldString") || readString(payload, "old_string");
-    const newString = readString(payload, "newString") || readString(payload, "new_string");
-    if (!filePath || oldString === newString) {
-      return null;
-    }
-    return { filePath, oldString, newString };
-  } catch {
-    return null;
-  }
-}
-
-function parseWriteFileArgs(content?: string): WriteFileArgs | null {
-  const normalized = normalizeToolContent(content || "");
-  if (!normalized) {
-    return null;
-  }
-  try {
-    const payload = JSON.parse(normalized) as Record<string, unknown>;
-    const filePath = readString(payload, "filePath") || readString(payload, "file_path");
-    const fileContent = readString(payload, "content");
-    if (!filePath) {
-      return null;
-    }
-    return { filePath, content: fileContent };
-  } catch {
-    return null;
-  }
-}
-
-function buildEditFilePreviewModel(content?: string): FileChangePreviewModel | null {
-  const args = parseEditFileArgs(content);
-  if (!args) {
-    return null;
-  }
-  const oldLines = splitDiffLines(args.oldString);
-  const newLines = splitDiffLines(args.newString);
-  const lines: FileChangePreviewLine[] = [
-    ...oldLines.map((line) => ({ kind: "delete" as const, marker: "-" as const, text: line })),
-    ...newLines.map((line) => ({ kind: "add" as const, marker: "+" as const, text: line })),
-  ];
-  if (lines.length === 0) {
-    return null;
-  }
-  return {
-    action: "Edited",
-    filePath: args.filePath,
-    displayPath: compactFilePath(args.filePath),
-    additions: newLines.length,
-    deletions: oldLines.length,
-    lines,
-  };
-}
-
-function buildWriteFilePreviewModel(content?: string): FileChangePreviewModel | null {
-  const args = parseWriteFileArgs(content);
-  if (!args) {
-    return null;
-  }
-  const newLines = splitDiffLines(args.content);
-  const lines: FileChangePreviewLine[] =
-    newLines.length > 0
-      ? newLines.map((line) => ({ kind: "add" as const, marker: "+" as const, text: line }))
-      : [{ kind: "context", marker: " ", text: "空文件" }];
-  return {
-    action: "Created",
-    filePath: args.filePath,
-    displayPath: compactFilePath(args.filePath),
-    additions: newLines.length,
-    deletions: 0,
-    lines,
-  };
-}
-
-function buildFileChangePreviewModel(toolName?: string, content?: string): FileChangePreviewModel | null {
-  if (toolName === "edit_file") {
-    return buildEditFilePreviewModel(content);
-  }
-  if (toolName === "write_file") {
-    return buildWriteFilePreviewModel(content);
-  }
-  return null;
-}
-
 function shouldEnableContentToggle(preview?: string, full?: string): boolean {
   const normalizedPreview = normalizeToolContent(preview || "");
   const normalizedFull = normalizeToolContent(full || "");
@@ -998,29 +830,6 @@ function QuestionRenderer({ content }: { content: string }) {
   );
 }
 
-function FileChangePreviewRenderer({ model }: { model: FileChangePreviewModel }) {
-  return (
-    <div className="file-change-preview">
-      <div className="file-change-preview-head">
-        <strong>
-          {model.action} {model.displayPath}
-        </strong>
-        <span className="file-change-preview-stat is-add">+{model.additions}</span>
-        {model.deletions > 0 ? <span className="file-change-preview-stat is-delete">-{model.deletions}</span> : null}
-      </div>
-      <div className="file-change-preview-body" aria-label={`${model.action} ${model.displayPath}`}>
-        {model.lines.map((line, index) => (
-          <div key={`${line.kind}-${index}`} className={`file-change-preview-line is-${line.kind}`}>
-            <span className="file-change-preview-line-no">{index + 1}</span>
-            <span className="file-change-preview-marker">{line.marker}</span>
-            <code>{line.text || " "}</code>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function formatToolRequestContent(text?: string): string {
   const normalized = normalizeToolContent(text || "");
   if (!normalized) {
@@ -1058,7 +867,10 @@ function getTimelineEntryTitle(entry: ProgressEntry): string {
   if (entry.kind === "tool_call" || entry.kind === "tool_result") {
     const title = entry.title.replace(/^调用工具\s*·\s*/, "").trim();
     if (entry.status === "failed") {
-      return title ? `调用失败 · ${title}` : "调用失败";
+      return title ? `调用工具失败 · ${title}` : "调用工具失败";
+    }
+    if (entry.status === "completed") {
+      return title ? `调用工具完成 · ${title}` : "调用工具完成";
     }
   }
   return entry.title;
@@ -1066,9 +878,6 @@ function getTimelineEntryTitle(entry: ProgressEntry): string {
 
 function getCompactTimelineEntryTitle(entry: ProgressEntry): string {
   if (entry.kind === "tool_call" || entry.kind === "tool_result") {
-    if (entry.status === "failed") {
-      return getTimelineEntryTitle(entry);
-    }
     return entry.title.replace(/^调用工具\s*·\s*/, "").trim() || "工具调用";
   }
   return getTimelineEntryTitle(entry);
@@ -1339,12 +1148,6 @@ function appendDisplayReasoningDelta(message: UiMessage, delta: string, payload?
 
 function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, finalPayload: Record<string, unknown>): UiMessage {
   const normalizedStatus = finalStatus || "completed";
-  const finalProcessItems = Array.isArray(finalPayload.process_items)
-    ? filterVisibleProcessItems((finalPayload.process_items as Array<Record<string, unknown>>).map((item) => mapProcessItemPayload(item)))
-    : [];
-  const finalDisplayParts = Array.isArray(finalPayload.display_parts)
-    ? (finalPayload.display_parts as Array<Record<string, unknown>>).map((item) => mapDisplayPartPayload(item))
-    : [];
   return {
     ...message,
     status: normalizedStatus,
@@ -1367,9 +1170,12 @@ function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, f
         : message.responseMeta.delegatedAgents,
       durationMs: readNumber((finalPayload.response_meta as Record<string, unknown>) || {}, "duration_ms", message.responseMeta.durationMs),
     },
-    // 终态 done 只补空，不覆盖流式阶段已经累计的工具过程，避免完成瞬间把中间步骤抹掉。
-    processItems: message.processItems.length > 0 ? message.processItems : finalProcessItems,
-    displayParts: message.displayParts.length > 0 ? message.displayParts : finalDisplayParts,
+    processItems: Array.isArray(finalPayload.process_items)
+      ? filterVisibleProcessItems((finalPayload.process_items as Array<Record<string, unknown>>).map((item) => mapProcessItemPayload(item)))
+      : message.processItems,
+    displayParts: Array.isArray(finalPayload.display_parts)
+      ? ((finalPayload.display_parts as Array<Record<string, unknown>>).map((item) => mapDisplayPartPayload(item)))
+      : message.displayParts,
     displayTextMergeOpen: false,
     confirmation:
       finalPayload.confirmation && typeof finalPayload.confirmation === "object"
@@ -1490,93 +1296,6 @@ function deriveSessionRuntime(history: UiMessage[]): {
     mode: latestAssistant && (latestAssistant.agent === "build" || latestAssistant.agent === "plan") ? latestAssistant.agent : null,
     providerModelKey: latestRuntimeMessage ? buildProviderModelKey(latestRuntimeMessage.provider, latestRuntimeMessage.model) : "",
   };
-}
-
-function buildConversationRecords(messages: UiMessage[]): ConversationRecord[] {
-  const records: ConversationRecord[] = [];
-  let pendingAssistantGroup: UiMessage[] = [];
-
-  const flushAssistantGroup = () => {
-    if (pendingAssistantGroup.length === 0) {
-      return;
-    }
-    const firstMessage = pendingAssistantGroup[0];
-    records.push({
-      kind: "assistant_group",
-      id: `assistant_group_${firstMessage.id}`,
-      messages: pendingAssistantGroup,
-    });
-    pendingAssistantGroup = [];
-  };
-
-  for (const message of messages) {
-    if (message.role === "assistant") {
-      pendingAssistantGroup.push(message);
-      continue;
-    }
-
-    flushAssistantGroup();
-    records.push({
-      kind: "message",
-      id: message.id,
-      message,
-    });
-  }
-
-  flushAssistantGroup();
-  return records;
-}
-
-function uniqueStrings(items: string[]): string[] {
-  const seen = new Set<string>();
-  const values: string[] = [];
-  for (const item of items) {
-    const normalized = item.trim();
-    if (!normalized || seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-    values.push(normalized);
-  }
-  return values;
-}
-
-function mergeAssistantGroupResponseMeta(messages: UiMessage[]): ResponseMeta {
-  return messages.reduce<ResponseMeta>(
-    (meta, message) => ({
-      roundCount: meta.roundCount + message.responseMeta.roundCount,
-      toolCallCount: meta.toolCallCount + message.responseMeta.toolCallCount,
-      toolNames: uniqueStrings([...meta.toolNames, ...message.responseMeta.toolNames]),
-      delegationCount: meta.delegationCount + message.responseMeta.delegationCount,
-      delegatedAgents: uniqueStrings([...meta.delegatedAgents, ...message.responseMeta.delegatedAgents]),
-      durationMs: meta.durationMs + message.responseMeta.durationMs,
-    }),
-    emptyResponseMeta(),
-  );
-}
-
-function getAssistantGroupLatestMessage(messages: UiMessage[]): UiMessage {
-  return messages[messages.length - 1];
-}
-
-function getAssistantGroupCompletedAt(messages: UiMessage[]): string {
-  for (const message of [...messages].reverse()) {
-    if (message.turnCompletedAt) {
-      return message.turnCompletedAt;
-    }
-  }
-  return "";
-}
-
-function buildAssistantGroupCopyText(messages: UiMessage[]): string {
-  return messages
-    .map((message) => message.text.trim())
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function assistantGroupContainsMessage(messages: UiMessage[], messageId: string): boolean {
-  return Boolean(messageId) && messages.some((message) => message.id === messageId);
 }
 
 async function applyModeSwitchAction(params: {
@@ -1879,7 +1598,11 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
   if (eventName === "tool_result") {
     const toolName = readString(payload, "name", "unknown");
     const title = toolName === "task" ? `${agent} 委派结果` : `${agent} 工具结果: ${toolName}`;
-    return createItem("tool_result", title, readString(payload, "output_preview"));
+    return createItem(
+      "tool_result",
+      title,
+      `${readString(payload, "status", "completed")} ${readString(payload, "output_preview")}`.trim(),
+    );
   }
 
   if (eventName === "round_end") {
@@ -1983,9 +1706,7 @@ function getProcessToolName(item: ProcessItem): string {
 
 function summarizeProcessItem(item: ProcessItem): { title: string; request?: string; result?: string } {
   const toolName = getProcessToolName(item);
-  const previewSource =
-    item.kind === "tool_result" ? stripToolResultStatusPrefix(item.detail, item.status) : item.detail;
-  const preview = toSingleLine(previewSource, 120);
+  const preview = toSingleLine(item.detail, 120);
 
   if (item.kind === "tool_call") {
     if (toolName === "task") {
@@ -2133,8 +1854,6 @@ function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: str
     toolCallId: part.toolCallId,
   };
   const summary = summarizeProcessItem(item);
-  const toolResultText =
-    part.kind === "tool_result" ? stripToolResultStatusPrefix(part.detail, part.status) : part.detail;
   return {
     id: `display_entry_${part.id}`,
     kind: part.kind,
@@ -2148,8 +1867,8 @@ function buildTimelineEntryFromDisplayPart(part: DisplayPart, messageStatus: str
     requestFull: part.kind === "tool_call" ? part.detail : undefined,
     requestFormatted: part.kind === "tool_call" ? formatToolRequestContent(part.detail) : undefined,
     result: summary.result,
-    resultFull: part.kind === "tool_result" ? toolResultText : undefined,
-    resultLineCount: part.kind === "tool_result" ? countLogicalLines(toolResultText) : 0,
+    resultFull: part.kind === "tool_result" ? part.detail : undefined,
+    resultLineCount: part.kind === "tool_result" ? countLogicalLines(part.detail) : 0,
     toolCallId: part.toolCallId,
     toolName: part.toolName,
     meta: buildProgressMeta(item),
@@ -2214,8 +1933,6 @@ function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
 
   for (const item of orderedItems) {
     const summary = summarizeProcessItem(item);
-    const toolResultText =
-      item.kind === "tool_result" ? stripToolResultStatusPrefix(item.detail, item.status) : item.detail;
     entries.push({
       id: `progress_entry_${item.id}`,
       kind: item.kind,
@@ -2229,8 +1946,8 @@ function buildAssistantTimelineEntries(message: UiMessage): ProgressEntry[] {
       requestFull: item.kind === "tool_call" ? item.detail : undefined,
       requestFormatted: item.kind === "tool_call" ? formatToolRequestContent(item.detail) : undefined,
       result: summary.result,
-      resultFull: item.kind === "tool_result" ? toolResultText : undefined,
-      resultLineCount: item.kind === "tool_result" ? countLogicalLines(toolResultText) : 0,
+      resultFull: item.kind === "tool_result" ? item.detail : undefined,
+      resultLineCount: item.kind === "tool_result" ? countLogicalLines(item.detail) : 0,
       toolCallId: item.toolCallId,
       toolName: item.toolName,
       meta: buildProgressMeta(item),
@@ -2304,12 +2021,6 @@ function renderAssistantTimeline(params: {
           full: entry.resultFull,
           collapsed: isResultCollapsed,
         });
-        const isFailedEntry = entry.status === "failed" || entry.kind === "error";
-        const fileChangePreviewModel =
-          !isFailedEntry && Boolean(entry.result)
-            ? buildFileChangePreviewModel(entry.toolName, entry.requestFull || entry.requestFormatted || entry.request)
-            : null;
-        const shouldRenderRequest = Boolean(entry.request && !fileChangePreviewModel);
 
         return (
           <section
@@ -2320,11 +2031,6 @@ function renderAssistantTimeline(params: {
           >
             {showHeadline ? (
               <div className="assistant-timeline-entry-head">
-                {isFailedEntry ? (
-                  <span className="assistant-timeline-status-icon" aria-label="失败">
-                    !
-                  </span>
-                ) : null}
                 <strong>{getCompactTimelineEntryTitle(entry)}</strong>
                 {getEntryAgentName(entry) ? <span className="assistant-timeline-entry-agent">{getEntryAgentName(entry)}</span> : null}
                 {entry.isReasoning && reasoningEntryKey ? (
@@ -2338,7 +2044,7 @@ function renderAssistantTimeline(params: {
                 ) : null}
               </div>
             ) : null}
-            {shouldRenderRequest ? (
+            {entry.request ? (
               <div
                 className={`assistant-timeline-entry-block assistant-timeline-entry-block-request ${
                   entry.status === "failed" ? "is-failed-request" : ""
@@ -2364,13 +2070,6 @@ function renderAssistantTimeline(params: {
               <div className={`assistant-timeline-entry-block reasoning-body ${isReasoningCollapsed ? "is-collapsed" : ""}`}>
                 <div className="assistant-timeline-entry-text reasoning-text">
                   {isReasoningCollapsed ? "已收起推理过程" : entry.result}
-                </div>
-              </div>
-            ) : fileChangePreviewModel ? (
-              <div className="assistant-timeline-entry-block is-result is-file-change-result">
-                <div className="assistant-timeline-entry-content">
-                  <div className="assistant-timeline-entry-label">变更</div>
-                  <FileChangePreviewRenderer model={fileChangePreviewModel} />
                 </div>
               </div>
             ) : entry.result ? (
@@ -2404,95 +2103,6 @@ function renderAssistantTimeline(params: {
         );
       })}
     </div>
-  );
-}
-
-function renderAssistantGroupRecord(params: {
-  record: Extract<ConversationRecord, { kind: "assistant_group" }>;
-  latestAssistantMessage: UiMessage | null;
-  copiedMessageId: string;
-  reasoningDefaultCollapsed: boolean;
-  reasoningCollapsedState: Record<string, boolean>;
-  onToggleReasoning: (entryKey: string) => void;
-  toolDefaultCollapsed: boolean;
-  toolCollapsedState: Record<string, boolean>;
-  onToggleToolContent: (entryKey: string) => void;
-  onCopyText: (copyId: string, content: string) => void;
-  disabledActions: boolean;
-  onModeSwitchAction: (action: "confirm" | "cancel") => void;
-}) {
-  const {
-    record,
-    latestAssistantMessage,
-    copiedMessageId,
-    reasoningDefaultCollapsed,
-    reasoningCollapsedState,
-    onToggleReasoning,
-    toolDefaultCollapsed,
-    toolCollapsedState,
-    onToggleToolContent,
-    onCopyText,
-    disabledActions,
-    onModeSwitchAction,
-  } = params;
-  const latestMessage = getAssistantGroupLatestMessage(record.messages);
-  const copyText = buildAssistantGroupCopyText(record.messages);
-  const copyId = `${record.id}:copy`;
-  const groupMeta = mergeAssistantGroupResponseMeta(record.messages);
-  const completedAt = getAssistantGroupCompletedAt(record.messages);
-  const isLatestGroup = latestAssistantMessage ? assistantGroupContainsMessage(record.messages, latestAssistantMessage.id) : false;
-
-  return (
-    <article key={record.id} className="terminal-record assistant">
-      <div className="terminal-record-head">
-        <div className="terminal-record-title">
-          <span className="terminal-prompt">ai&gt;</span>
-          <span className="message-role">助手</span>
-          <span className="message-time">{formatTime(record.messages[0]?.createdAt || latestMessage.createdAt)}</span>
-          <span className="assistant-runtime-main">{buildAssistantMetaLine(latestMessage)}</span>
-          <span className="assistant-runtime-sub">{buildProcessSummary(groupMeta)}</span>
-          {completedAt ? <span className="assistant-runtime-sub">完成于 {formatTime(completedAt)}</span> : null}
-        </div>
-        <div className="terminal-record-actions">
-          <button
-            type="button"
-            className="terminal-inline-btn message-copy-btn"
-            disabled={!copyText}
-            onClick={() => {
-              onCopyText(copyId, copyText);
-            }}
-          >
-            {copiedMessageId === copyId ? "已复制" : "复制"}
-          </button>
-        </div>
-      </div>
-      <div className="terminal-record-body">
-        {record.messages.map((message, index) => (
-          <section key={message.id} className="assistant-loop-segment">
-            {index > 0 ? <div className="assistant-loop-separator"></div> : null}
-            {renderAssistantTimeline({
-              message,
-              reasoningDefaultCollapsed,
-              reasoningCollapsedState,
-              onToggleReasoning,
-              toolDefaultCollapsed,
-              toolCollapsedState,
-              onToggleToolContent,
-            })}
-          </section>
-        ))}
-        {renderModeSwitchActions({
-          message: latestMessage,
-          isLatest: isLatestGroup,
-          disabled: disabledActions,
-          onAction: onModeSwitchAction,
-        })}
-        {renderQuestionPrompt({
-          message: latestMessage,
-          isLatest: isLatestGroup,
-        })}
-      </div>
-    </article>
   );
 }
 
@@ -2613,7 +2223,6 @@ export function App() {
     () => [...messages].reverse().find((message) => message.role === "assistant") || null,
     [messages],
   );
-  const conversationRecords = useMemo(() => buildConversationRecords(messages), [messages]);
   const latestPendingQuestionMessage =
     latestAssistantMessage &&
     latestAssistantMessage.finishReason === "question_required" &&
@@ -3073,27 +2682,24 @@ export function App() {
     }
   };
 
-  const handleCopyText = async (copyId: string, content: string) => {
+  const handleCopyMessage = async (message: UiMessage) => {
+    const content = message.text || "";
     if (!content) {
       return;
     }
     try {
       await copyTextToClipboard(content);
-      setCopiedMessageId(copyId);
+      setCopiedMessageId(message.id);
       if (copyFeedbackTimerRef.current !== null) {
         window.clearTimeout(copyFeedbackTimerRef.current);
       }
       copyFeedbackTimerRef.current = window.setTimeout(() => {
-        setCopiedMessageId((current) => (current === copyId ? "" : current));
+        setCopiedMessageId((current) => (current === message.id ? "" : current));
         copyFeedbackTimerRef.current = null;
       }, 1800);
     } catch (err) {
       setError((err as Error).message || "复制失败");
     }
-  };
-
-  const handleCopyMessage = async (message: UiMessage) => {
-    await handleCopyText(message.id, message.text || "");
   };
 
   const mergeStoppedTurnFromHistory = async (activeTurn: ActiveTurn): Promise<boolean> => {
@@ -4334,36 +3940,23 @@ export function App() {
                 </div>
               ) : null}
 
-              {conversationRecords.map((record) => {
-                if (record.kind === "assistant_group") {
-                  return renderAssistantGroupRecord({
-                    record,
-                    latestAssistantMessage,
-                    copiedMessageId,
-                    reasoningDefaultCollapsed,
-                    reasoningCollapsedState,
-                    onToggleReasoning: handleToggleReasoning,
-                    toolDefaultCollapsed,
-                    toolCollapsedState,
-                    onToggleToolContent: handleToggleToolContent,
-                    onCopyText: (copyId, content) => {
-                      void handleCopyText(copyId, content);
-                    },
-                    disabledActions: isStreaming || isApplyingModeSwitch,
-                    onModeSwitchAction: (action) => {
-                      void handleModeSwitchAction(action);
-                    },
-                  });
-                }
-
-                const msg = record.message;
+              {messages.map((msg) => {
                 return (
-                  <article key={record.id} className={`terminal-record ${msg.role}`}>
+                  <article key={msg.id} className={`terminal-record ${msg.role}`}>
                     <div className="terminal-record-head">
                       <div className="terminal-record-title">
                         <span className="terminal-prompt">{msg.role === "user" ? "you>" : msg.role === "assistant" ? "ai>" : "sys>"}</span>
                         <span className="message-role">{getRoleLabel(msg.role)}</span>
                         <span className="message-time">{formatTime(msg.createdAt)}</span>
+                        {msg.role === "assistant" ? (
+                          <span className="assistant-runtime-main">{buildAssistantMetaLine(msg)}</span>
+                        ) : null}
+                        {msg.role === "assistant" ? (
+                          <span className="assistant-runtime-sub">{buildProcessSummary(msg.responseMeta)}</span>
+                        ) : null}
+                        {msg.role === "assistant" && msg.turnCompletedAt ? (
+                          <span className="assistant-runtime-sub">完成于 {formatTime(msg.turnCompletedAt)}</span>
+                        ) : null}
                       </div>
                       <div className="terminal-record-actions">
                         <button
@@ -4378,7 +3971,31 @@ export function App() {
                         </button>
                       </div>
                     </div>
-                    <div className="terminal-record-body">{renderMessageBody(msg)}</div>
+                    <div className="terminal-record-body">
+                      {msg.role === "assistant"
+                        ? renderAssistantTimeline({
+                            message: msg,
+                            reasoningDefaultCollapsed,
+                            reasoningCollapsedState,
+                            onToggleReasoning: handleToggleReasoning,
+                            toolDefaultCollapsed,
+                            toolCollapsedState,
+                            onToggleToolContent: handleToggleToolContent,
+                          })
+                        : renderMessageBody(msg)}
+                      {renderModeSwitchActions({
+                        message: msg,
+                        isLatest: latestAssistantMessage?.id === msg.id,
+                        disabled: isStreaming || isApplyingModeSwitch,
+                        onAction: (action) => {
+                          void handleModeSwitchAction(action);
+                        },
+                      })}
+                      {renderQuestionPrompt({
+                        message: msg,
+                        isLatest: latestAssistantMessage?.id === msg.id,
+                      })}
+                    </div>
                   </article>
                 );
               })}
@@ -4419,19 +4036,19 @@ export function App() {
                 </select>
               </div>
               <button
-                type="button"
-                onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
-                disabled={isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
-                className="plain-btn terminal-inline-btn"
-              >
+                  type="button"
+                  onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
+                  disabled={isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
+                  className="plain-btn terminal-inline-btn"
+                >
                 {reasoningDefaultCollapsed ? "思考默认收起" : "思考默认展开"}
               </button>
-              <button
-                type="button"
-                onClick={() => void refreshRuntimeOptions()}
-                disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
-                className="plain-btn terminal-inline-btn"
-              >
+                <button
+                  type="button"
+                  onClick={() => void refreshRuntimeOptions()}
+                  disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
+                  className="plain-btn terminal-inline-btn"
+                >
                 {isLoadingOptions ? "刷新中..." : "刷新配置"}
               </button>
             </div>

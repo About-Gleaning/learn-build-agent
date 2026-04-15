@@ -100,10 +100,6 @@ class ToolHookContext(TypedDict, total=False):
     duration_ms: int
     result_size: int
     task_available: bool
-    turn_started_at: str
-    persistence_enabled: bool
-    append_callback: Callable[[dict[str, Any]], None]
-    message_factory: Callable[["ToolHookContext", "ToolResult"], dict[str, Any]]
 
 
 class ToolNormalizedError(TypedDict, total=False):
@@ -461,10 +457,6 @@ class ToolExecutor:
         vendor: str = "",
         task_available: bool = False,
         workdir: str | None = None,
-        turn_started_at: str = "",
-        persistence_enabled: bool = False,
-        append_callback: Callable[[dict[str, Any]], None] | None = None,
-        message_factory: Callable[[ToolHookContext, ToolResult], dict[str, Any]] | None = None,
     ) -> ToolResult:
         ctx: ToolHookContext = {
             "session_id": session_id,
@@ -475,13 +467,7 @@ class ToolExecutor:
             "arguments": arguments,
             "round_no": round_no,
             "task_available": task_available,
-            "turn_started_at": turn_started_at,
-            "persistence_enabled": persistence_enabled,
         }
-        if append_callback is not None:
-            ctx["append_callback"] = append_callback
-        if message_factory is not None:
-            ctx["message_factory"] = message_factory
 
         started = time.perf_counter()
         ctx["started_at"] = started

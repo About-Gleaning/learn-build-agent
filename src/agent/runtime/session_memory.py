@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from pathlib import Path
 
 from ..core.message import Message, append_text_part, create_message, extract_tool_calls, get_role, trim_messages_by_compaction_checkpoint
-from .conversation import ConversationMessage, Session
-from .conversation_adapter import conversation_message_to_runtime_message, detect_compaction_record, message_to_conversation_message, runtime_messages_to_conversation_messages
 from .workspace import get_workspace
 
 
@@ -20,10 +19,6 @@ class SessionMemoryStore(ABC):
     @abstractmethod
     def save(self, session_id: str, messages: list[Message]) -> None:
         """保存某个会话的历史消息。"""
-
-    def append(self, session_id: str, message: Message) -> None:
-        """追加保存单条消息；默认退化为 load + save，文件实现会使用 JSONL O(1) 追加。"""
-        self.save(session_id, [*self.load(session_id), message])
 
     @abstractmethod
     def clear(self, session_id: str | None = None) -> None:
@@ -75,10 +70,6 @@ class InMemorySessionMemoryStore(SessionMemoryStore):
         )
         self._store[session_id] = deepcopy(trimmed_messages)
 
-    def append(self, session_id: str, message: Message) -> None:
-        stored = self._store.get(session_id, [])
-        self.save(session_id, [*stored, message])
-
     def clear(self, session_id: str | None = None) -> None:
         normalized = (session_id or "").strip()
         if not normalized:
@@ -105,18 +96,19 @@ class FileSessionMemoryStore(SessionMemoryStore):
         normalized = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in normalized_session_id).strip("._")
         if not normalized:
             raise ValueError("session_id 缺少可用字符")
-        return self._storage_dir() / f"{normalized}.jsonl"
+        return self._storage_dir() / f"{normalized}.json"
 
     def load(self, session_id: str) -> list[Message]:
         file_path = self._session_file(session_id)
         if not file_path.exists():
             return []
         try:
-            session = Session.load_from_path(file_path)
-        except (OSError, ValueError):
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             return []
-        restored = [conversation_message_to_runtime_message(msg, session.session_id) for msg in session.messages]
-        trimmed = trim_messages_by_compaction_checkpoint([msg for msg in restored if isinstance(msg, dict)])
+        if not isinstance(payload, list):
+            return []
+        trimmed = trim_messages_by_compaction_checkpoint([msg for msg in payload if isinstance(msg, dict)])
         return deepcopy(normalize_history_prefix(trimmed))
 
     def save(self, session_id: str, messages: list[Message]) -> None:
@@ -126,22 +118,8 @@ class FileSessionMemoryStore(SessionMemoryStore):
             trim_enabled=self._trim_enabled,
         )
         file_path = self._session_file(session_id)
-        session = Session.new(session_id).with_persistence_path(file_path)
-        session.messages = runtime_messages_to_conversation_messages(trimmed_messages)
-        session.compaction = detect_compaction_record(trimmed_messages)
-        # save_to_path 是 O(n) 快照重写，用于 turn 结束和 compact 后保证主文件自洽。
-        session.save_to_path(file_path)
-
-    def append(self, session_id: str, message: Message) -> None:
-        file_path = self._session_file(session_id)
-        session = Session.new(session_id).with_persistence_path(file_path)
-        # push_message 是 JSONL O(1) 追加；失败时 Session 会回滚内存状态。
-        session.push_message(message_to_conversation_message(message))
-
-    def append_conversation_message(self, session_id: str, message: ConversationMessage) -> None:
-        file_path = self._session_file(session_id)
-        session = Session.new(session_id).with_persistence_path(file_path)
-        session.push_message(message)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(json.dumps(trimmed_messages, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def clear(self, session_id: str | None = None) -> None:
         normalized = (session_id or "").strip()
@@ -149,7 +127,7 @@ class FileSessionMemoryStore(SessionMemoryStore):
             storage_dir = self._storage_dir()
             if not storage_dir.exists():
                 return
-            for file_path in storage_dir.glob("*.jsonl"):
+            for file_path in storage_dir.glob("*.json"):
                 file_path.unlink(missing_ok=True)
             return
         self._session_file(normalized).unlink(missing_ok=True)
@@ -158,13 +136,8 @@ class FileSessionMemoryStore(SessionMemoryStore):
 def _prepare_messages_for_storage(messages: list[Message], *, max_messages: int, trim_enabled: bool) -> list[Message]:
     """统一收敛持久化前的历史裁剪，保证内存/文件存储行为一致。"""
 
-    # 普通 system prompt 不进入历史；compact 生成的 system summary 需要保留为恢复入口。
-    persistable_messages = [
-        msg
-        for msg in messages
-        if get_role(msg) != "system" or bool(msg.get("info", {}).get("summary"))
-    ]
-    trimmed_messages = trim_messages_by_compaction_checkpoint(persistable_messages)
+    non_system_messages = [msg for msg in messages if get_role(msg) != "system"]
+    trimmed_messages = trim_messages_by_compaction_checkpoint(non_system_messages)
     if trim_enabled:
         trimmed_messages = trimmed_messages[-max_messages:]
     return trimmed_messages
