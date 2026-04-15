@@ -49,7 +49,7 @@
   },
   "session_memory": {
     // 是否按消息条数裁剪会话历史。关闭后会保留全部非 system 消息，但仍保留 checkpoint 相关收口逻辑。
-    "trim_enabled": true,
+    "trim_enabled": false,
     // 开启裁剪时，最多保留最近多少条非 system 消息。
     "max_messages": 50
   },
