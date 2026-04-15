@@ -17,7 +17,8 @@
 - Web 层消息序列化统一收敛在 `src/agent/web/serializers.py`，不要在 `src/agent/web/app.py` 手工散落映射逻辑。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止继续散落使用 `Path.cwd()` 推导边界。
 - Session Memory 统一通过 `src/agent/runtime/session_memory.py` 的 `SessionMemoryStore` 抽象读写，默认按工作区落盘到运行态 `workspaces/sessions/`。
-- assistant 级 `process_items`、`display_parts`、`response_meta` 回填与落库统一走 `src/agent/runtime/loop_hooks.py`；`SessionHook` 只负责整次 session 生命周期观察，不承担 loop 内归属判断。
+- Session Memory 文件格式统一为 JSONL，按消息粒度落库；具体持久化能力应通过内置 Session/Loop/Tool Hook 的实现接入，详细规范以 `AGENTS-DEV.md` 为准。
+- assistant 级 `process_items`、`display_parts`、`response_meta` 只作为运行时/SSE 展示投影；Session JSONL 仅持久化精简摘要字段，Web 历史展示由 `blocks + meta` 重建。
 - LLM 调用观测归 `LLMHook`，工具执行观测归 `ToolHook`；不要把 provider 调用细节或工具审计逻辑重新塞回 `src/agent/runtime/session.py`。
 - `write_file` 仅用于创建新文件，禁止覆盖已有文件；已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。
 - 所有路径输入必须经过工作区边界校验；禁止硬编码密钥、Token、PAT 或其他凭证。

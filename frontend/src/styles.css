@@ -389,6 +389,19 @@ button:disabled {
   border-left: 1px solid rgba(48, 80, 111, 0.52);
 }
 
+.assistant-loop-segment {
+  display: grid;
+  gap: 8px;
+}
+
+.assistant-loop-separator {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 0 2px 12px;
+}
+
 .assistant-timeline-entry {
   position: relative;
   display: grid;
@@ -396,7 +409,9 @@ button:disabled {
   padding-left: 12px;
 }
 
-.assistant-timeline-entry::before {
+/* 状态圆点：只在失败或错误时显示红色 */
+.assistant-timeline-entry.status-failed::before,
+.assistant-timeline-entry.kind-error::before {
   content: "";
   position: absolute;
   top: 8px;
@@ -404,16 +419,6 @@ button:disabled {
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: var(--brand);
-}
-
-.assistant-timeline-entry.subagent::before,
-.assistant-timeline-entry.is-final::before {
-  background: var(--success);
-}
-
-.assistant-timeline-entry.status-failed::before,
-.assistant-timeline-entry.kind-error::before {
   background: var(--danger);
 }
 

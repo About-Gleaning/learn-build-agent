@@ -113,6 +113,11 @@ class MessageInfo(TypedDict, total=False):
     agent: str
     turn_started_at: str
     turn_completed_at: str
+    round_count: int
+    tool_call_count: int
+    tool_names: list[str]
+    delegation_count: int
+    delegated_agents: list[str]
     summary: bool
     response_meta: ResponseMeta
     process_items: list[ProcessItem]

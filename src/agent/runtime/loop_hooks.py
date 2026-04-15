@@ -28,6 +28,8 @@ class LoopHookContext(TypedDict, total=False):
     response_meta: ResponseMeta
     save_enabled: bool
     save_callback: Callable[[], None]
+    append_callback: Callable[[Message], None]
+    messages_ref: list[Message]
 
 
 class LoopNormalizedError(TypedDict, total=False):

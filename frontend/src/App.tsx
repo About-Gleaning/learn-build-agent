@@ -300,6 +300,18 @@ type StreamCompletion = {
   closedWithoutTerminalDone: boolean;
 };
 
+type ConversationRecord =
+  | {
+      kind: "message";
+      id: string;
+      message: UiMessage;
+    }
+  | {
+      kind: "assistant_group";
+      id: string;
+      messages: UiMessage[];
+    };
+
 type QuestionDraft = {
   answers: string[];
   notes: string;
@@ -1148,6 +1160,12 @@ function appendDisplayReasoningDelta(message: UiMessage, delta: string, payload?
 
 function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, finalPayload: Record<string, unknown>): UiMessage {
   const normalizedStatus = finalStatus || "completed";
+  const finalProcessItems = Array.isArray(finalPayload.process_items)
+    ? filterVisibleProcessItems((finalPayload.process_items as Array<Record<string, unknown>>).map((item) => mapProcessItemPayload(item)))
+    : [];
+  const finalDisplayParts = Array.isArray(finalPayload.display_parts)
+    ? (finalPayload.display_parts as Array<Record<string, unknown>>).map((item) => mapDisplayPartPayload(item))
+    : [];
   return {
     ...message,
     status: normalizedStatus,
@@ -1170,12 +1188,9 @@ function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, f
         : message.responseMeta.delegatedAgents,
       durationMs: readNumber((finalPayload.response_meta as Record<string, unknown>) || {}, "duration_ms", message.responseMeta.durationMs),
     },
-    processItems: Array.isArray(finalPayload.process_items)
-      ? filterVisibleProcessItems((finalPayload.process_items as Array<Record<string, unknown>>).map((item) => mapProcessItemPayload(item)))
-      : message.processItems,
-    displayParts: Array.isArray(finalPayload.display_parts)
-      ? ((finalPayload.display_parts as Array<Record<string, unknown>>).map((item) => mapDisplayPartPayload(item)))
-      : message.displayParts,
+    // 终态 done 只补空，不覆盖流式阶段已经累计的工具过程，避免完成瞬间把中间步骤抹掉。
+    processItems: message.processItems.length > 0 ? message.processItems : finalProcessItems,
+    displayParts: message.displayParts.length > 0 ? message.displayParts : finalDisplayParts,
     displayTextMergeOpen: false,
     confirmation:
       finalPayload.confirmation && typeof finalPayload.confirmation === "object"
@@ -1296,6 +1311,93 @@ function deriveSessionRuntime(history: UiMessage[]): {
     mode: latestAssistant && (latestAssistant.agent === "build" || latestAssistant.agent === "plan") ? latestAssistant.agent : null,
     providerModelKey: latestRuntimeMessage ? buildProviderModelKey(latestRuntimeMessage.provider, latestRuntimeMessage.model) : "",
   };
+}
+
+function buildConversationRecords(messages: UiMessage[]): ConversationRecord[] {
+  const records: ConversationRecord[] = [];
+  let pendingAssistantGroup: UiMessage[] = [];
+
+  const flushAssistantGroup = () => {
+    if (pendingAssistantGroup.length === 0) {
+      return;
+    }
+    const firstMessage = pendingAssistantGroup[0];
+    records.push({
+      kind: "assistant_group",
+      id: `assistant_group_${firstMessage.id}`,
+      messages: pendingAssistantGroup,
+    });
+    pendingAssistantGroup = [];
+  };
+
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      pendingAssistantGroup.push(message);
+      continue;
+    }
+
+    flushAssistantGroup();
+    records.push({
+      kind: "message",
+      id: message.id,
+      message,
+    });
+  }
+
+  flushAssistantGroup();
+  return records;
+}
+
+function uniqueStrings(items: string[]): string[] {
+  const seen = new Set<string>();
+  const values: string[] = [];
+  for (const item of items) {
+    const normalized = item.trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    values.push(normalized);
+  }
+  return values;
+}
+
+function mergeAssistantGroupResponseMeta(messages: UiMessage[]): ResponseMeta {
+  return messages.reduce<ResponseMeta>(
+    (meta, message) => ({
+      roundCount: meta.roundCount + message.responseMeta.roundCount,
+      toolCallCount: meta.toolCallCount + message.responseMeta.toolCallCount,
+      toolNames: uniqueStrings([...meta.toolNames, ...message.responseMeta.toolNames]),
+      delegationCount: meta.delegationCount + message.responseMeta.delegationCount,
+      delegatedAgents: uniqueStrings([...meta.delegatedAgents, ...message.responseMeta.delegatedAgents]),
+      durationMs: meta.durationMs + message.responseMeta.durationMs,
+    }),
+    emptyResponseMeta(),
+  );
+}
+
+function getAssistantGroupLatestMessage(messages: UiMessage[]): UiMessage {
+  return messages[messages.length - 1];
+}
+
+function getAssistantGroupCompletedAt(messages: UiMessage[]): string {
+  for (const message of [...messages].reverse()) {
+    if (message.turnCompletedAt) {
+      return message.turnCompletedAt;
+    }
+  }
+  return "";
+}
+
+function buildAssistantGroupCopyText(messages: UiMessage[]): string {
+  return messages
+    .map((message) => message.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function assistantGroupContainsMessage(messages: UiMessage[], messageId: string): boolean {
+  return Boolean(messageId) && messages.some((message) => message.id === messageId);
 }
 
 async function applyModeSwitchAction(params: {
@@ -2106,6 +2208,95 @@ function renderAssistantTimeline(params: {
   );
 }
 
+function renderAssistantGroupRecord(params: {
+  record: Extract<ConversationRecord, { kind: "assistant_group" }>;
+  latestAssistantMessage: UiMessage | null;
+  copiedMessageId: string;
+  reasoningDefaultCollapsed: boolean;
+  reasoningCollapsedState: Record<string, boolean>;
+  onToggleReasoning: (entryKey: string) => void;
+  toolDefaultCollapsed: boolean;
+  toolCollapsedState: Record<string, boolean>;
+  onToggleToolContent: (entryKey: string) => void;
+  onCopyText: (copyId: string, content: string) => void;
+  disabledActions: boolean;
+  onModeSwitchAction: (action: "confirm" | "cancel") => void;
+}) {
+  const {
+    record,
+    latestAssistantMessage,
+    copiedMessageId,
+    reasoningDefaultCollapsed,
+    reasoningCollapsedState,
+    onToggleReasoning,
+    toolDefaultCollapsed,
+    toolCollapsedState,
+    onToggleToolContent,
+    onCopyText,
+    disabledActions,
+    onModeSwitchAction,
+  } = params;
+  const latestMessage = getAssistantGroupLatestMessage(record.messages);
+  const copyText = buildAssistantGroupCopyText(record.messages);
+  const copyId = `${record.id}:copy`;
+  const groupMeta = mergeAssistantGroupResponseMeta(record.messages);
+  const completedAt = getAssistantGroupCompletedAt(record.messages);
+  const isLatestGroup = latestAssistantMessage ? assistantGroupContainsMessage(record.messages, latestAssistantMessage.id) : false;
+
+  return (
+    <article key={record.id} className="terminal-record assistant">
+      <div className="terminal-record-head">
+        <div className="terminal-record-title">
+          <span className="terminal-prompt">ai&gt;</span>
+          <span className="message-role">助手</span>
+          <span className="message-time">{formatTime(record.messages[0]?.createdAt || latestMessage.createdAt)}</span>
+          <span className="assistant-runtime-main">{buildAssistantMetaLine(latestMessage)}</span>
+          <span className="assistant-runtime-sub">{buildProcessSummary(groupMeta)}</span>
+          {completedAt ? <span className="assistant-runtime-sub">完成于 {formatTime(completedAt)}</span> : null}
+        </div>
+        <div className="terminal-record-actions">
+          <button
+            type="button"
+            className="terminal-inline-btn message-copy-btn"
+            disabled={!copyText}
+            onClick={() => {
+              onCopyText(copyId, copyText);
+            }}
+          >
+            {copiedMessageId === copyId ? "已复制" : "复制"}
+          </button>
+        </div>
+      </div>
+      <div className="terminal-record-body">
+        {record.messages.map((message, index) => (
+          <section key={message.id} className="assistant-loop-segment">
+            {index > 0 ? <div className="assistant-loop-separator"></div> : null}
+            {renderAssistantTimeline({
+              message,
+              reasoningDefaultCollapsed,
+              reasoningCollapsedState,
+              onToggleReasoning,
+              toolDefaultCollapsed,
+              toolCollapsedState,
+              onToggleToolContent,
+            })}
+          </section>
+        ))}
+        {renderModeSwitchActions({
+          message: latestMessage,
+          isLatest: isLatestGroup,
+          disabled: disabledActions,
+          onAction: onModeSwitchAction,
+        })}
+        {renderQuestionPrompt({
+          message: latestMessage,
+          isLatest: isLatestGroup,
+        })}
+      </div>
+    </article>
+  );
+}
+
 function renderModeSwitchActions(params: {
   message: UiMessage;
   isLatest: boolean;
@@ -2223,6 +2414,7 @@ export function App() {
     () => [...messages].reverse().find((message) => message.role === "assistant") || null,
     [messages],
   );
+  const conversationRecords = useMemo(() => buildConversationRecords(messages), [messages]);
   const latestPendingQuestionMessage =
     latestAssistantMessage &&
     latestAssistantMessage.finishReason === "question_required" &&
@@ -2682,24 +2874,27 @@ export function App() {
     }
   };
 
-  const handleCopyMessage = async (message: UiMessage) => {
-    const content = message.text || "";
+  const handleCopyText = async (copyId: string, content: string) => {
     if (!content) {
       return;
     }
     try {
       await copyTextToClipboard(content);
-      setCopiedMessageId(message.id);
+      setCopiedMessageId(copyId);
       if (copyFeedbackTimerRef.current !== null) {
         window.clearTimeout(copyFeedbackTimerRef.current);
       }
       copyFeedbackTimerRef.current = window.setTimeout(() => {
-        setCopiedMessageId((current) => (current === message.id ? "" : current));
+        setCopiedMessageId((current) => (current === copyId ? "" : current));
         copyFeedbackTimerRef.current = null;
       }, 1800);
     } catch (err) {
       setError((err as Error).message || "复制失败");
     }
+  };
+
+  const handleCopyMessage = async (message: UiMessage) => {
+    await handleCopyText(message.id, message.text || "");
   };
 
   const mergeStoppedTurnFromHistory = async (activeTurn: ActiveTurn): Promise<boolean> => {
@@ -3940,23 +4135,36 @@ export function App() {
                 </div>
               ) : null}
 
-              {messages.map((msg) => {
+              {conversationRecords.map((record) => {
+                if (record.kind === "assistant_group") {
+                  return renderAssistantGroupRecord({
+                    record,
+                    latestAssistantMessage,
+                    copiedMessageId,
+                    reasoningDefaultCollapsed,
+                    reasoningCollapsedState,
+                    onToggleReasoning: handleToggleReasoning,
+                    toolDefaultCollapsed,
+                    toolCollapsedState,
+                    onToggleToolContent: handleToggleToolContent,
+                    onCopyText: (copyId, content) => {
+                      void handleCopyText(copyId, content);
+                    },
+                    disabledActions: isStreaming || isApplyingModeSwitch,
+                    onModeSwitchAction: (action) => {
+                      void handleModeSwitchAction(action);
+                    },
+                  });
+                }
+
+                const msg = record.message;
                 return (
-                  <article key={msg.id} className={`terminal-record ${msg.role}`}>
+                  <article key={record.id} className={`terminal-record ${msg.role}`}>
                     <div className="terminal-record-head">
                       <div className="terminal-record-title">
                         <span className="terminal-prompt">{msg.role === "user" ? "you>" : msg.role === "assistant" ? "ai>" : "sys>"}</span>
                         <span className="message-role">{getRoleLabel(msg.role)}</span>
                         <span className="message-time">{formatTime(msg.createdAt)}</span>
-                        {msg.role === "assistant" ? (
-                          <span className="assistant-runtime-main">{buildAssistantMetaLine(msg)}</span>
-                        ) : null}
-                        {msg.role === "assistant" ? (
-                          <span className="assistant-runtime-sub">{buildProcessSummary(msg.responseMeta)}</span>
-                        ) : null}
-                        {msg.role === "assistant" && msg.turnCompletedAt ? (
-                          <span className="assistant-runtime-sub">完成于 {formatTime(msg.turnCompletedAt)}</span>
-                        ) : null}
                       </div>
                       <div className="terminal-record-actions">
                         <button
@@ -3971,31 +4179,7 @@ export function App() {
                         </button>
                       </div>
                     </div>
-                    <div className="terminal-record-body">
-                      {msg.role === "assistant"
-                        ? renderAssistantTimeline({
-                            message: msg,
-                            reasoningDefaultCollapsed,
-                            reasoningCollapsedState,
-                            onToggleReasoning: handleToggleReasoning,
-                            toolDefaultCollapsed,
-                            toolCollapsedState,
-                            onToggleToolContent: handleToggleToolContent,
-                          })
-                        : renderMessageBody(msg)}
-                      {renderModeSwitchActions({
-                        message: msg,
-                        isLatest: latestAssistantMessage?.id === msg.id,
-                        disabled: isStreaming || isApplyingModeSwitch,
-                        onAction: (action) => {
-                          void handleModeSwitchAction(action);
-                        },
-                      })}
-                      {renderQuestionPrompt({
-                        message: msg,
-                        isLatest: latestAssistantMessage?.id === msg.id,
-                      })}
-                    </div>
+                    <div className="terminal-record-body">{renderMessageBody(msg)}</div>
                   </article>
                 );
               })}
