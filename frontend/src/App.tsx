@@ -312,7 +312,7 @@ type StopSessionResp = {
 };
 
 type ActiveTurn = {
-  kind: "chat" | "mode_switch_confirm" | "question_answer" | "question_reject";
+  kind: "chat" | "mode_switch_confirm" | "question_answer" | "question_reject" | "active_run";
   assistantMessageId: string;
   userMessageId?: string;
   localTurnStartedAt: string;
@@ -325,6 +325,20 @@ type StreamCompletion = {
   finalPayload: Record<string, unknown> | null;
   closedWithoutTerminalDone: boolean;
 };
+
+class SseStreamError extends Error {
+  eventName: string;
+  code: string;
+  payload: Record<string, unknown>;
+
+  constructor(eventName: string, payload: Record<string, unknown>) {
+    super(readString(payload, "message", "服务端返回错误"));
+    this.name = "SseStreamError";
+    this.eventName = eventName;
+    this.code = readString(payload, "code");
+    this.payload = payload;
+  }
+}
 
 type ConversationRecord =
   | {
@@ -1675,7 +1689,7 @@ async function streamSse(params: {
         }
 
         if (event.event === "error") {
-          throw new Error(readString(payload, "message", "服务端返回错误"));
+          throw new SseStreamError(event.event, payload);
         }
       }
       splitIndex = buffer.indexOf("\n\n");
@@ -1717,6 +1731,22 @@ async function streamChat(params: {
       provider: params.provider,
       model: params.model,
     },
+    expectedSessionId: params.sessionId,
+    onDelta: params.onDelta,
+    onEvent: params.onEvent,
+    signal: params.signal,
+  });
+}
+
+async function streamActiveRun(params: {
+  sessionId: string;
+  onDelta: (delta: string) => void;
+  onEvent: (eventName: string, payload: Record<string, unknown>) => void;
+  signal?: AbortSignal;
+}): Promise<StreamCompletion> {
+  return streamSse({
+    url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/runs/active/stream`,
+    body: {},
     expectedSessionId: params.sessionId,
     onDelta: params.onDelta,
     onEvent: params.onEvent,
@@ -3031,6 +3061,7 @@ export function App() {
     if (isSessionInteractionLocked || isQuestionMode) {
       return;
     }
+    activeStreamControllerRef.current?.abort();
     const nextSessionId = buildSessionId();
     setShouldFollow(true);
     resetTransientUiState();
@@ -3058,6 +3089,7 @@ export function App() {
 
     setIsLoadingSession(true);
     setShouldFollow(true);
+    activeStreamControllerRef.current?.abort();
     resetTransientUiState();
     try {
       const history = filterConversationMessages(await loadHistory(nextSessionId));
@@ -3068,7 +3100,8 @@ export function App() {
       applySessionRuntimeFromHistory(history);
       setIsSessionLoadOpen(false);
       setSessionLoadDraft("");
-      if (history.length === 0) {
+      const resumed = await resumeActiveRun(nextSessionId);
+      if (history.length === 0 && !resumed) {
         setError(`session ${nextSessionId} 暂无历史记录`);
       }
     } catch (err) {
@@ -3151,11 +3184,6 @@ export function App() {
     }
   };
 
-  useEffect(() => {
-    void refreshHistory();
-    void refreshRuntimeOptions();
-  }, []);
-
   const appendRuntimeAlert = (payload: Record<string, unknown>) => {
     const message = readString(payload, "message");
     if (!message) {
@@ -3182,6 +3210,194 @@ export function App() {
       ];
     });
   };
+
+  const applyLiveStreamEvent = (assistantId: string, eventName: string, payload: Record<string, unknown>) => {
+    if (activeTurnRef.current?.assistantMessageId === assistantId) {
+      activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
+    }
+    if (eventName === "runtime_alert") {
+      appendRuntimeAlert(payload);
+      return;
+    }
+    if (eventName === "text_delta") {
+      const delta = readString(payload, "delta");
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? appendDisplayTextDelta(msg, delta, payload)
+            : msg,
+        ),
+      );
+    } else if (eventName === "reasoning_delta") {
+      const delta = readString(payload, "delta");
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? appendDisplayReasoningDelta(msg, delta, payload)
+            : msg,
+        ),
+      );
+    }
+    const processItem = buildLiveProcessItem(eventName, payload);
+    if (processItem) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? {
+                ...msg,
+                processItems: appendProcessItem(msg.processItems, processItem),
+                displayParts: (() => {
+                  const displayPart = buildLiveDisplayPart(eventName, payload);
+                  return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
+                })(),
+                displayTextMergeOpen: false,
+              }
+            : msg,
+        ),
+      );
+    } else if (eventName !== "text_delta" && eventName !== "reasoning_delta") {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? {
+                ...msg,
+                displayTextMergeOpen: false,
+              }
+            : msg,
+        ),
+      );
+    }
+    const providerName = readString(payload, "provider");
+    const modelName = readString(payload, "model");
+    if (providerName) {
+      setActiveProvider(providerName);
+    }
+    if (modelName) {
+      setActiveModel(modelName);
+    }
+  };
+
+  const resumeActiveRun = async (targetSessionId = sessionId): Promise<boolean> => {
+    if (isStreaming || isStopping || activeStreamControllerRef.current) {
+      return false;
+    }
+
+    const now = new Date().toISOString();
+    const assistantId = buildId("assistant");
+    const assistantMessage: UiMessage = {
+      id: assistantId,
+      role: "assistant",
+      text: "",
+      createdAt: now,
+      status: "running",
+      agent: mode,
+      provider: "",
+      model: "",
+      finishReason: "",
+      turnStartedAt: now,
+      turnCompletedAt: "",
+      responseMeta: emptyResponseMeta(),
+      processItems: [],
+      displayParts: [],
+      displayTextMergeOpen: false,
+      confirmation: null,
+      question: null,
+    };
+
+    setMessages((prev) => [...prev, assistantMessage]);
+    setIsStreaming(true);
+    setIsStopping(false);
+    setActiveProvider("");
+    setActiveModel("");
+    activeTurnRef.current = {
+      kind: "active_run",
+      assistantMessageId: assistantId,
+      localTurnStartedAt: now,
+      serverTurnStartedAt: "",
+      serverMessageId: "",
+    };
+
+    const controller = new AbortController();
+    activeStreamControllerRef.current = controller;
+    let wasAborted = false;
+    let finalStatus = "completed";
+
+    try {
+      const completion = await streamActiveRun({
+        sessionId: targetSessionId,
+        onDelta: () => {},
+        onEvent: (eventName, payload) => {
+          applyLiveStreamEvent(assistantId, eventName, payload);
+          if (eventName === "done") {
+            finalStatus = readString(payload, "status", "completed");
+          }
+        },
+        signal: controller.signal,
+      });
+
+      if (completion.finalPayload) {
+        finalStatus = readString(completion.finalPayload, "status", finalStatus);
+      }
+
+      if (completion.receivedTerminalDone && completion.finalPayload) {
+        const terminalPayload = completion.finalPayload;
+        setMessages((prev) =>
+          prev.map((msg) => (msg.id === assistantId ? mergeMessageWithFinalPayload(msg, finalStatus, terminalPayload) : msg)),
+        );
+        await refreshHistory(targetSessionId);
+      } else if (activeTurnRef.current) {
+        const recovered = await recoverStreamResultFromHistory(activeTurnRef.current, targetSessionId);
+        if (!recovered) {
+          setError("后台任务可能仍在执行，但当前连接已断开，请稍后重新加载会话确认结果。");
+        }
+      }
+      return true;
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        wasAborted = true;
+        return false;
+      }
+      if (err instanceof SseStreamError && err.code === "no_active_run") {
+        setMessages((prev) => prev.filter((msg) => msg.id !== assistantId));
+        return false;
+      }
+      if (err instanceof SseStreamError && err.code === "run_not_found") {
+        setMessages((prev) => prev.filter((msg) => msg.id !== assistantId));
+        await refreshHistory(targetSessionId);
+        return false;
+      }
+      setError((err as Error).message || "后台任务恢复失败");
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? {
+                ...msg,
+                status: "failed",
+                text: msg.text || "后台任务恢复失败，请稍后重试。",
+                displayTextMergeOpen: false,
+              }
+            : msg,
+        ),
+      );
+      return false;
+    } finally {
+      if (activeStreamControllerRef.current === controller) {
+        activeStreamControllerRef.current = null;
+      }
+      if (!wasAborted && activeTurnRef.current?.assistantMessageId === assistantId) {
+        activeTurnRef.current = null;
+      }
+      setIsStreaming(false);
+      setIsStopping(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshHistory().then(() => {
+      void resumeActiveRun(sessionId);
+    });
+    void refreshRuntimeOptions();
+  }, []);
 
   const updateQuestionDraft = (index: number, updater: (draft: QuestionDraft) => QuestionDraft) => {
     setQuestionDrafts((prev) =>

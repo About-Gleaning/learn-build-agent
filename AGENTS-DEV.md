@@ -135,10 +135,13 @@ LLM 返回 tool_calls
 浏览器请求
   -> src/web_main.py
   -> src/agent/web/app.py
+  -> runtime/run_manager.py（Web 流式请求后台化执行）
   -> runtime/session.py
   -> web/serializers.py
   -> SSE / JSON 响应
 ```
+
+Web 流式接口必须把任务执行和 SSE 连接生命周期解耦：`/api/chat/stream`、模式切换确认、问题回答/拒绝等会继续推进会话的流式请求，应先创建后台 Run，再由 SSE 订阅 Run 事件。浏览器刷新、网络断开或前端主动关闭 reader 只能移除当前订阅者，不能中断后台 agent loop；只有显式 stop 请求才表示用户希望停止会话。
 
 ### 3.5 LSP 链路
 
@@ -207,7 +210,7 @@ LSP 查询请求
 
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
-- Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件。
+- Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件；这些流式接口必须复用后台 Run 语义，不能让前端连接断开直接关闭后端生成器。
 - `SessionHook` 必须覆盖同步/流式会话的所有合法返回路径，包括 slash command 的即时完成与即时错误分支；Hook 上下文中的 `mode` 必须始终表示当前有效模式，而不是仅表示入口参数。
 - assistant 级 `process_items`、`display_parts` 与 `response_meta` 只作为运行时/SSE 展示投影，不再作为 Session JSONL 长期落库字段；需要历史展示时必须按单条 assistant 消息由 `blocks + meta` 重建，禁止重新退回到整轮 turn 只汇总到最后一条 assistant 的旧语义。
 - 若需要把展示投影、摘要汇总、落库等非业务能力下沉，优先使用 `loop_hooks.py` 的 Loop Hook；`session_hooks.py` 只负责整次 session 生命周期，不承担 loop 内归属判定。

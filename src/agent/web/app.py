@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 import re
 
 from fastapi import FastAPI, HTTPException, Query
@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from ..config.logging_setup import init_logging
 from ..config.settings import build_runtime_options
+from ..runtime.run_manager import RunConflictError, RunManager
 from ..runtime import session as session_runtime
 from ..runtime.workspace import configure_workspace, get_workspace
 from .path_suggestions import record_path_selection, suggest_workspace_paths
@@ -29,6 +30,52 @@ from .schemas import (
 from .serializers import message_to_vo, messages_to_vos, split_stream_event, sse_event
 
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+RUN_MANAGER = RunManager()
+SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+def _stream_existing_run(run_id: str, session_id: str) -> Generator[str, None, None]:
+    try:
+        for event in RUN_MANAGER.subscribe(run_id):
+            serialized = split_stream_event(event)
+            if serialized is None:
+                continue
+            event_type, payload = serialized
+            yield sse_event(event_type, payload)
+    except KeyError as exc:
+        yield sse_event(
+            "error",
+            {
+                "code": "run_not_found",
+                "message": str(exc),
+                "session_id": session_id,
+            },
+        )
+
+
+def _stream_background_events(
+    *,
+    session_id: str,
+    event_source: Callable[[], Generator[dict, None, None]],
+) -> Generator[str, None, None]:
+    try:
+        run = RUN_MANAGER.create_run(session_id=session_id, event_source=event_source)
+        yield from _stream_existing_run(run.run_id, session_id)
+    except RunConflictError as exc:
+        active_run = RUN_MANAGER.get_active_run(session_id)
+        yield sse_event(
+            "error",
+            {
+                "code": "session_run_conflict",
+                "message": str(exc),
+                "session_id": session_id,
+                "active_run_id": active_run.run_id if active_run is not None else "",
+            },
+        )
 
 
 def _normalize_session_id_or_raise(session_id: str) -> str:
@@ -42,20 +89,18 @@ def _normalize_session_id_or_raise(session_id: str) -> str:
 
 def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
     try:
-        for event in session_runtime.run_session_stream_events(
-            user_input=req.user_input,
+        yield from _stream_background_events(
             session_id=req.session_id,
-            mode=req.mode,
-            provider=req.provider,
-            model=req.model,
-            provider_specified="provider" in req.model_fields_set,
-            model_specified="model" in req.model_fields_set,
-        ):
-            serialized = split_stream_event(event)
-            if serialized is None:
-                continue
-            event_type, payload = serialized
-            yield sse_event(event_type, payload)
+            event_source=lambda: session_runtime.run_session_stream_events(
+                user_input=req.user_input,
+                session_id=req.session_id,
+                mode=req.mode,
+                provider=req.provider,
+                model=req.model,
+                provider_specified="provider" in req.model_fields_set,
+                model_specified="model" in req.model_fields_set,
+            ),
+        )
     except Exception as exc:  # pragma: no cover - 兜底分支
         yield sse_event(
             "error",
@@ -66,14 +111,48 @@ def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
         )
 
 
+def _stream_active_run(session_id: str) -> Generator[str, None, None]:
+    try:
+        active_run = RUN_MANAGER.get_active_run(session_id)
+        if active_run is None:
+            yield sse_event(
+                "error",
+                {
+                    "code": "no_active_run",
+                    "message": "当前会话没有正在执行的后台任务。",
+                    "session_id": session_id,
+                },
+            )
+            return
+        yield from _stream_existing_run(active_run.run_id, session_id)
+    except Exception as exc:  # pragma: no cover - 兜底分支
+        yield sse_event(
+            "error",
+            {
+                "code": "internal_error",
+                "message": str(exc),
+                "session_id": session_id,
+            },
+        )
+
+
 def _stream_mode_switch(session_id: str, req: ModeSwitchActionReq) -> Generator[str, None, None]:
     try:
-        for event in session_runtime.run_mode_switch_stream_events(session_id, req.action):
-            serialized = split_stream_event(event)
-            if serialized is None:
-                continue
-            event_type, payload = serialized
-            yield sse_event(event_type, payload)
+        def _events() -> Generator[dict, None, None]:
+            try:
+                yield from session_runtime.run_mode_switch_stream_events(session_id, req.action)
+            except ValueError as exc:
+                yield {
+                    "type": "error",
+                    "code": "mode_switch_conflict",
+                    "message": str(exc),
+                    "session_id": session_id,
+                }
+
+        yield from _stream_background_events(
+            session_id=session_id,
+            event_source=_events,
+        )
     except ValueError as exc:
         yield sse_event(
             "error",
@@ -95,12 +174,22 @@ def _stream_mode_switch(session_id: str, req: ModeSwitchActionReq) -> Generator[
 def _stream_question_answer(session_id: str, request_id: str, req: QuestionAnswerReq) -> Generator[str, None, None]:
     try:
         answer_payload = [item.model_dump() for item in req.answers]
-        for event in session_runtime.run_question_answer_stream_events(session_id, request_id, answer_payload):
-            serialized = split_stream_event(event)
-            if serialized is None:
-                continue
-            event_type, payload = serialized
-            yield sse_event(event_type, payload)
+
+        def _events() -> Generator[dict, None, None]:
+            try:
+                yield from session_runtime.run_question_answer_stream_events(session_id, request_id, answer_payload)
+            except ValueError as exc:
+                yield {
+                    "type": "error",
+                    "code": "question_conflict",
+                    "message": str(exc),
+                    "session_id": session_id,
+                }
+
+        yield from _stream_background_events(
+            session_id=session_id,
+            event_source=_events,
+        )
     except ValueError as exc:
         yield sse_event(
             "error",
@@ -121,12 +210,21 @@ def _stream_question_answer(session_id: str, request_id: str, req: QuestionAnswe
 
 def _stream_question_reject(session_id: str, request_id: str) -> Generator[str, None, None]:
     try:
-        for event in session_runtime.run_question_reject_stream_events(session_id, request_id):
-            serialized = split_stream_event(event)
-            if serialized is None:
-                continue
-            event_type, payload = serialized
-            yield sse_event(event_type, payload)
+        def _events() -> Generator[dict, None, None]:
+            try:
+                yield from session_runtime.run_question_reject_stream_events(session_id, request_id)
+            except ValueError as exc:
+                yield {
+                    "type": "error",
+                    "code": "question_conflict",
+                    "message": str(exc),
+                    "session_id": session_id,
+                }
+
+        yield from _stream_background_events(
+            session_id=session_id,
+            event_source=_events,
+        )
     except ValueError as exc:
         yield sse_event(
             "error",
@@ -221,11 +319,7 @@ def create_app() -> FastAPI:
         return StreamingResponse(
             _stream_chat(req),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            headers=SSE_HEADERS,
         )
 
     @app.post("/api/sessions/{session_id}/stop", response_model=StopSessionVO)
@@ -243,6 +337,15 @@ def create_app() -> FastAPI:
         return SessionMessagesVO(
             session_id=normalized_id,
             messages=messages_to_vos(selected),
+        )
+
+    @app.post("/api/sessions/{session_id}/runs/active/stream")
+    def stream_active_run(session_id: str) -> StreamingResponse:
+        normalized_id = _normalize_session_id_or_raise(session_id)
+        return StreamingResponse(
+            _stream_active_run(normalized_id),
+            media_type="text/event-stream",
+            headers=SSE_HEADERS,
         )
 
     @app.post("/api/sessions/{session_id}/mode-switch", response_model=ModeSwitchActionVO)
@@ -268,11 +371,7 @@ def create_app() -> FastAPI:
         return StreamingResponse(
             _stream_mode_switch(normalized_id, req),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            headers=SSE_HEADERS,
         )
 
     @app.post("/api/sessions/{session_id}/questions/{request_id}/answer", response_model=QuestionActionVO)
@@ -305,11 +404,7 @@ def create_app() -> FastAPI:
         return StreamingResponse(
             _stream_question_answer(normalized_id, normalized_request_id, req),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            headers=SSE_HEADERS,
         )
 
     @app.post("/api/sessions/{session_id}/questions/{request_id}/reject", response_model=QuestionActionVO)
@@ -341,11 +436,7 @@ def create_app() -> FastAPI:
         return StreamingResponse(
             _stream_question_reject(normalized_id, normalized_request_id),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            headers=SSE_HEADERS,
         )
 
     @app.delete("/api/sessions/{session_id}", response_model=SessionClearedVO)
