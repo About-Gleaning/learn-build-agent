@@ -184,6 +184,15 @@ LSP 查询请求
   - `workspaces/web-dev/<workspace_id>/`
   - `logs/`
 
+### 5.1.1 日志保存策略
+
+- 应用主日志统一由 `src/agent/config/logging_setup.py` 初始化，默认写入 `get_workspace().logs_dir`，即 `$CODEPILOT_HOME/logs/app-YYYY-MM-DD.log`。
+- 主日志必须启用生产化保护：按自然日自动切换文件，按 `logging.max_bytes` 做大小兜底轮转，并按 `logging.retention_days` 与 `logging.backup_count` 清理历史文件。
+- `project_runtime.json -> logging` 是日志策略唯一配置来源；新增日志策略字段时必须同步更新配置解析、默认配置、测试与本手册。
+- 日志落盘前必须先做敏感信息脱敏，再做字段截断；默认应开启 `redact_enabled` 与 `truncate_enabled`，避免 token、password、authorization、cookie、大模型上下文或工具参数无限落盘。
+- `codepilot web` 的 `backend.log/frontend.log` 只用于本地 Web 开发栈诊断，启动时允许清空，不作为生产日志保留策略的一部分。
+- 多进程或容器化生产部署优先使用 stdout/stderr 交给平台采集；若继续使用文件日志，必须先评估多进程写同一文件的并发安全性。
+
 ### 5.2 AGENTS 加载规则
 
 - system prompt 组装时必须先尝试加载 `~/.codepilot/AGENTS.md`

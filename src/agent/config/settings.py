@@ -42,8 +42,15 @@ DEFAULT_FILE_EXTRACTION_ALLOWED_EXTENSIONS = (".pdf",)
 DEFAULT_FILE_EXTRACTION_CLEANUP_MODE = "async_delete"
 DEFAULT_AGENT_LOOP_MAX_ROUNDS = 8
 DEFAULT_SUBAGENT_LOOP_MAX_ROUNDS = 15
-DEFAULT_LOG_TRUNCATE_ENABLED = False
-DEFAULT_LOG_TRUNCATE_LIMIT = 500
+DEFAULT_LOG_FILE_ENABLED = True
+DEFAULT_LOG_CONSOLE_ENABLED: bool | None = None
+DEFAULT_LOG_ROTATION_ENABLED = True
+DEFAULT_LOG_MAX_BYTES = 100 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 30
+DEFAULT_LOG_RETENTION_DAYS = 30
+DEFAULT_LOG_REDACT_ENABLED = True
+DEFAULT_LOG_TRUNCATE_ENABLED = True
+DEFAULT_LOG_TRUNCATE_LIMIT = 2000
 DEFAULT_SESSION_MEMORY_TRIM_ENABLED = True
 DEFAULT_SESSION_MEMORY_MAX_MESSAGES = 24
 DEFAULT_LSP_ENABLED = True
@@ -152,6 +159,13 @@ class SubagentLoopSettings:
 
 @dataclass(frozen=True)
 class LoggingSettings:
+    file_enabled: bool = DEFAULT_LOG_FILE_ENABLED
+    console_enabled: bool | None = DEFAULT_LOG_CONSOLE_ENABLED
+    rotation_enabled: bool = DEFAULT_LOG_ROTATION_ENABLED
+    max_bytes: int = DEFAULT_LOG_MAX_BYTES
+    backup_count: int = DEFAULT_LOG_BACKUP_COUNT
+    retention_days: int = DEFAULT_LOG_RETENTION_DAYS
+    redact_enabled: bool = DEFAULT_LOG_REDACT_ENABLED
     truncate_enabled: bool = DEFAULT_LOG_TRUNCATE_ENABLED
     truncate_limit: int = DEFAULT_LOG_TRUNCATE_LIMIT
 
@@ -577,12 +591,46 @@ def _load_project_logging_settings(raw_logging: Any) -> LoggingSettings:
     if not isinstance(raw_logging, dict):
         raise ValueError("project_runtime.logging 必须是对象。")
 
+    raw_file_enabled = raw_logging.get("file_enabled", DEFAULT_LOG_FILE_ENABLED)
+    file_enabled = _parse_bool(raw_file_enabled, field_name="logging.file_enabled")
+
+    raw_console_enabled = raw_logging.get("console_enabled", DEFAULT_LOG_CONSOLE_ENABLED)
+    if raw_console_enabled is None:
+        console_enabled = None
+    else:
+        console_enabled = _parse_bool(raw_console_enabled, field_name="logging.console_enabled")
+
+    raw_rotation_enabled = raw_logging.get("rotation_enabled", DEFAULT_LOG_ROTATION_ENABLED)
+    rotation_enabled = _parse_bool(raw_rotation_enabled, field_name="logging.rotation_enabled")
+
+    raw_max_bytes = raw_logging.get("max_bytes", DEFAULT_LOG_MAX_BYTES)
+    max_bytes = _parse_positive_int(raw_max_bytes, field_name="logging.max_bytes")
+
+    raw_backup_count = raw_logging.get("backup_count", DEFAULT_LOG_BACKUP_COUNT)
+    backup_count = _parse_positive_int(raw_backup_count, field_name="logging.backup_count")
+
+    raw_retention_days = raw_logging.get("retention_days", DEFAULT_LOG_RETENTION_DAYS)
+    retention_days = _parse_positive_int(raw_retention_days, field_name="logging.retention_days")
+
+    raw_redact_enabled = raw_logging.get("redact_enabled", DEFAULT_LOG_REDACT_ENABLED)
+    redact_enabled = _parse_bool(raw_redact_enabled, field_name="logging.redact_enabled")
+
     raw_truncate_enabled = raw_logging.get("truncate_enabled", DEFAULT_LOG_TRUNCATE_ENABLED)
     truncate_enabled = _parse_bool(raw_truncate_enabled, field_name="logging.truncate_enabled")
 
     raw_truncate_limit = raw_logging.get("truncate_limit", DEFAULT_LOG_TRUNCATE_LIMIT)
     truncate_limit = _parse_positive_int(raw_truncate_limit, field_name="logging.truncate_limit")
-    return LoggingSettings(truncate_enabled=truncate_enabled, truncate_limit=truncate_limit)
+    return LoggingSettings(
+        file_enabled=file_enabled,
+        console_enabled=console_enabled,
+        rotation_enabled=rotation_enabled,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+        retention_days=retention_days,
+        redact_enabled=redact_enabled,
+        truncate_enabled=truncate_enabled,
+        truncate_limit=truncate_limit,
+    )
 
 
 def _load_project_session_memory_settings(raw_session_memory: Any) -> SessionMemorySettings:
