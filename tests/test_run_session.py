@@ -4500,6 +4500,112 @@ def test_get_project_runtime_settings_should_support_json_comments(tmp_path, mon
         clear_runtime_settings_cache()
 
 
+def test_get_project_runtime_settings_should_merge_user_runtime_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "agent_loop": {
+            "max_rounds": 12
+          },
+          "logging": {
+            "truncate_enabled": true,
+            "truncate_limit": 100
+          },
+          "lsp": {
+            "include_severity": ["error", "warning"],
+            "languages": {
+              "java": {
+                "command": ["project-jdtls"],
+                "workspace_markers": ["pom.xml", "settings.gradle"]
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    runtime_home = tmp_path / ".codepilot-user"
+    runtime_home.mkdir()
+    user_config_path = runtime_home / "project_runtime.json"
+    user_config_path.write_text(
+        """
+        {
+          "logging": {
+            // 只覆盖限制值，保留项目配置中的开关。
+            "truncate_limit": 2048
+          },
+          "lsp": {
+            "include_severity": ["error"],
+            "languages": {
+              "java": {
+                "command": ["user-jdtls"]
+              }
+            }
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+    monkeypatch.setenv("CODEPILOT_HOME", str(runtime_home))
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.agent_loop.max_rounds == 12
+        assert settings.logging.truncate_enabled is True
+        assert settings.logging.truncate_limit == 2048
+        assert settings.lsp.include_severity == ("error",)
+        assert settings.lsp.languages["java"].command == ("user-jdtls",)
+        assert settings.lsp.languages["java"].workspace_markers == ("pom.xml", "settings.gradle")
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_read_user_config_when_project_file_missing(tmp_path, monkeypatch):
+    missing_path = tmp_path / "missing_project_runtime.json"
+    runtime_home = tmp_path / ".codepilot-user"
+    runtime_home.mkdir()
+    (runtime_home / "project_runtime.json").write_text(
+        """
+        {
+          "agent_loop": {
+            "max_rounds": 17
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", missing_path)
+    monkeypatch.setenv("CODEPILOT_HOME", str(runtime_home))
+
+    try:
+        settings = get_project_runtime_settings()
+        assert settings.agent_loop.max_rounds == 17
+        assert settings.subagent_loop.max_rounds == 15
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_invalid_user_runtime_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text("{}", encoding="utf-8")
+    runtime_home = tmp_path / ".codepilot-user"
+    runtime_home.mkdir()
+    (runtime_home / "project_runtime.json").write_text("[1, 2, 3]", encoding="utf-8")
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+    monkeypatch.setenv("CODEPILOT_HOME", str(runtime_home))
+
+    try:
+        with pytest.raises(ValueError, match="用户运行时配置文件顶层必须是 JSON 对象"):
+            get_project_runtime_settings()
+    finally:
+        clear_runtime_settings_cache()
+
+
 def test_get_project_runtime_settings_should_read_file_extraction_config(tmp_path, monkeypatch):
     config_path = tmp_path / "project_runtime.json"
     config_path.write_text(

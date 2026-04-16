@@ -59,6 +59,10 @@ def _resolve_runtime_home() -> Path:
     return DEFAULT_RUNTIME_HOME.resolve()
 
 
+def resolve_runtime_home() -> Path:
+    return _resolve_runtime_home()
+
+
 def build_session_storage_name(session_id: str, *, suffix: str = "") -> str:
     normalized_session_id = (session_id or "").strip()
     if not normalized_session_id:

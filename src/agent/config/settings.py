@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 
-from ..runtime.workspace import get_workspace
+from ..runtime.workspace import get_workspace, resolve_runtime_home
 from ..slash_commands import list_visible_slash_commands
 
 load_dotenv()
@@ -269,17 +269,58 @@ def _parse_positive_int(value: Any, *, field_name: str) -> int:
 
 
 def _load_project_runtime_payload() -> dict[str, Any]:
-    if not PROJECT_RUNTIME_CONFIG_PATH.exists():
-        return {}
+    project_payload = _load_json_object_file(
+        PROJECT_RUNTIME_CONFIG_PATH,
+        missing_ok=True,
+        invalid_json_message="项目运行时配置文件 JSON 格式非法",
+        invalid_root_message="项目运行时配置文件顶层必须是 JSON 对象。",
+    )
+    user_config_path = _resolve_project_runtime_user_config_path()
+    user_payload = _load_json_object_file(
+        user_config_path,
+        missing_ok=True,
+        invalid_json_message="用户运行时配置文件 JSON 格式非法",
+        invalid_root_message="用户运行时配置文件顶层必须是 JSON 对象。",
+    )
+    return _deep_merge_mapping(project_payload, user_payload)
+
+
+def _resolve_project_runtime_user_config_path() -> Path:
+    return (resolve_runtime_home() / "project_runtime.json").resolve()
+
+
+def _load_json_object_file(
+    path: Path,
+    *,
+    missing_ok: bool,
+    invalid_json_message: str,
+    invalid_root_message: str,
+) -> dict[str, Any]:
+    if not path.exists():
+        if missing_ok:
+            return {}
+        raise ValueError(f"未找到配置文件: {path}")
 
     try:
-        payload = json.loads(_strip_json_comments(PROJECT_RUNTIME_CONFIG_PATH.read_text(encoding="utf-8")))
+        payload = json.loads(_strip_json_comments(path.read_text(encoding="utf-8")))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"项目运行时配置文件 JSON 格式非法: {PROJECT_RUNTIME_CONFIG_PATH}") from exc
+        raise ValueError(f"{invalid_json_message}: {path}") from exc
 
     if not isinstance(payload, dict):
-        raise ValueError("项目运行时配置文件顶层必须是 JSON 对象。")
+        raise ValueError(invalid_root_message)
     return payload
+
+
+def _deep_merge_mapping(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, override_value in override.items():
+        base_value = merged.get(key)
+        # 只有两侧都是对象时才继续递归；数组和标量使用用户级配置整体替换，避免隐式拼接导致行为漂移。
+        if isinstance(base_value, dict) and isinstance(override_value, dict):
+            merged[key] = _deep_merge_mapping(base_value, override_value)
+            continue
+        merged[key] = override_value
+    return merged
 
 
 def _strip_json_comments(text: str) -> str:
