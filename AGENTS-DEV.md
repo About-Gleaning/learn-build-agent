@@ -51,7 +51,7 @@
 - `src/agent/adapters/llm/protocols.py`：协议层适配
 - `src/agent/adapters/llm/vendors.py`：厂商差异适配
 - `src/agent/config/llm_runtime.json`：模型、provider 与超时配置
-- `src/agent/config/project_runtime.json`：项目级运行时开关唯一配置来源
+- `src/agent/config/project_runtime.json`：项目级运行时开关基础配置；`$CODEPILOT_HOME/project_runtime.json` 可作为用户级覆盖配置，默认等价于 `~/.codepilot/project_runtime.json`
 
 ### 2.4 能力层
 
@@ -163,6 +163,7 @@ LSP 查询请求
 - 查询型 `lsp` 工具统一通过 `tools/lsp_tool.py` -> `lsp/client.py` -> `lsp/manager.py` 链路收敛。
 - Web 层消息序列化统一收敛在 `web/serializers.py`，不要在 `web/app.py` 手工散落映射逻辑。
 - 项目级运行时策略统一从 `project_runtime.json` / `llm_runtime.json` 读取，禁止在业务模块扩散硬编码配置。
+- `project_runtime.json` 先读仓库内置基础配置，再用 `$CODEPILOT_HOME/project_runtime.json` 做递归覆盖；数组与标量字段整体替换，不做拼接。
 - 子 Agent 扩展统一通过 `task` 工具路由，不在会话层写业务分支。
 
 ## 5. 关键运行时约束
