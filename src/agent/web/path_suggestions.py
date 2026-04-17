@@ -3,6 +3,7 @@ from __future__ import annotations
 import heapq
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,8 @@ class _IndexedPath:
 
 
 _INDEX_CACHE: dict[str, tuple[float, list[_IndexedPath]]] = {}
+_INDEX_CACHE_LOCK = threading.Lock()
+_INDEX_BUILD_LOCKS: dict[str, threading.Lock] = {}
 _MRU_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
 
 
@@ -77,16 +80,25 @@ def _iter_workspace_entries(root: Path) -> list[_IndexedPath]:
             continue
 
         for entry in entries:
-            try:
-                entry_path = Path(entry.path).resolve()
-            except OSError:
-                continue
-            if not entry_path.is_relative_to(root):
-                continue
-            relative_path = entry_path.relative_to(root).as_posix()
+            entry_path = Path(entry.path)
+            is_symlink = entry.is_symlink()
             kind = "directory" if entry.is_dir(follow_symlinks=False) else "file"
             if kind == "directory" and entry.name.lower() in SKIP_DIR_NAMES:
                 continue
+            if is_symlink:
+                try:
+                    resolved_entry_path = entry_path.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                if not resolved_entry_path.is_relative_to(root):
+                    continue
+                # 符号链接目录只作为可选路径展示，不继续递归，避免越界遍历和重复扫描。
+                kind = "directory" if resolved_entry_path.is_dir() else "file"
+            try:
+                relative_path = entry_path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            relative_parts = Path(relative_path).parts
             indexed.append(
                 _IndexedPath(
                     path=entry_path,
@@ -94,13 +106,22 @@ def _iter_workspace_entries(root: Path) -> list[_IndexedPath]:
                     name_lower=entry.name.lower(),
                     relative_lower=relative_path.lower(),
                     kind=kind,
-                    path_parts_lower=tuple(part.lower() for part in Path(relative_path).parts),
-                    depth=len(Path(relative_path).parts),
+                    path_parts_lower=tuple(part.lower() for part in relative_parts),
+                    depth=len(relative_parts),
                 )
             )
-            if kind == "directory":
+            if kind == "directory" and not is_symlink:
                 stack.append(entry_path)
     return indexed
+
+
+def _get_index_build_lock(cache_key: str) -> threading.Lock:
+    with _INDEX_CACHE_LOCK:
+        lock = _INDEX_BUILD_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _INDEX_BUILD_LOCKS[cache_key] = lock
+        return lock
 
 
 def _load_workspace_index() -> list[_IndexedPath]:
@@ -110,9 +131,15 @@ def _load_workspace_index() -> list[_IndexedPath]:
     cached = _INDEX_CACHE.get(cache_key)
     if cached and now - cached[0] <= INDEX_TTL_SECONDS:
         return cached[1]
-    indexed = _iter_workspace_entries(workspace_root)
-    _INDEX_CACHE[cache_key] = (now, indexed)
-    return indexed
+    build_lock = _get_index_build_lock(cache_key)
+    with build_lock:
+        now = time.monotonic()
+        cached = _INDEX_CACHE.get(cache_key)
+        if cached and now - cached[0] <= INDEX_TTL_SECONDS:
+            return cached[1]
+        indexed = _iter_workspace_entries(workspace_root)
+        _INDEX_CACHE[cache_key] = (time.monotonic(), indexed)
+        return indexed
 
 
 def _mru_storage_path() -> Path:
