@@ -3,7 +3,7 @@
     // 默认压缩配置。当前模型厂商没有专属配置时，直接使用这里的参数。
     "default": {
       // 是否开启旧 tool result 的占位压缩。为 false 时，旧工具结果不会被替换成占位符。
-      "tool_result_prune_enabled": true,
+      "tool_result_prune_enabled": false,
       // 按 role=tool 消息计数，保留最近多少条 tool result 不做占位压缩。
       "tool_result_keep_recent": 5,
       // 只有旧 tool result 的字符数大于这个阈值时，才会被替换成占位符。
@@ -42,10 +42,24 @@
     "max_rounds": 50
   },
   "logging": {
-    // 是否启用普通日志文本截断。关闭后会保留完整日志文本，但仍执行换行转义与敏感信息脱敏。
-    "truncate_enabled": false,
+    // 是否写入应用主日志文件。文件位于 CODEPILOT_HOME/logs/app-YYYY-MM-DD.log。
+    "file_enabled": true,
+    // 是否输出控制台日志。null 表示尊重调用方入参；true/false 表示配置强制覆盖。
+    "console_enabled": null,
+    // 是否启用按天切换与按大小兜底轮转。长进程跨天时会自动切换到新日期文件。
+    "rotation_enabled": true,
+    // 单个应用日志文件的最大字节数，超过后轮转为 app-YYYY-MM-DD.N.log。
+    "max_bytes": 104857600,
+    // 最多保留多少个历史应用日志文件，不包含当前正在写入的文件。
+    "backup_count": 30,
+    // 最多保留多少天内的历史应用日志文件。
+    "retention_days": 30,
+    // 是否启用敏感信息脱敏。会覆盖 token、password、authorization、cookie 等常见凭证形态。
+    "redact_enabled": true,
+    // 是否启用普通日志文本截断。生产默认开启，避免大模型上下文、工具参数或异常详情无限落盘。
+    "truncate_enabled": true,
     // 启用截断时，单个日志字段允许保留的最大字符数。
-    "truncate_limit": 500
+    "truncate_limit": 2000
   },
   "session_memory": {
     // 是否按消息条数裁剪会话历史。关闭后会保留全部非 system 消息，但仍保留 checkpoint 相关收口逻辑。

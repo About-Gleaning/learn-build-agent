@@ -1,5 +1,7 @@
 import json
 import re
+import threading
+import time
 
 from fastapi.testclient import TestClient
 
@@ -7,8 +9,9 @@ from agent.core.message import append_text_part, append_tool_call_part, append_t
 from agent.runtime import session as session_runtime
 from agent.runtime.session import clear_session_memory, configure_session_memory_store, generate_session_id
 from agent.runtime.session_memory import InMemorySessionMemoryStore
-from agent.web.app import create_app
+from agent.web.app import RUN_MANAGER, _stream_active_run, _stream_chat, create_app
 from agent.web.path_suggestions import PathSuggestion
+from agent.web.schemas import ChatStreamReq
 from agent.web.serializers import message_to_vo, split_stream_event
 
 
@@ -221,6 +224,238 @@ def test_chat_stream_should_passthrough_runtime_alert_event(monkeypatch):
     assert runtime_alert_payload["scope"] == "mcp"
     assert runtime_alert_payload["server_alias"] == "github"
     assert "GITHUB_TOKEN" in runtime_alert_payload["message"]
+
+
+def test_chat_stream_disconnect_should_not_stop_background_run(monkeypatch):
+    RUN_MANAGER.clear()
+    session_id = generate_session_id("test_web_disconnect")
+    allow_continue = threading.Event()
+    completed = threading.Event()
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        del user_input, mode, kwargs
+        yield {
+            "type": "start",
+            "event_id": "evt_disconnect_start",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+        }
+        yield {
+            "type": "tool_call",
+            "event_id": "evt_disconnect_tool_call",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "tool_call_id": "call_write",
+            "name": "write_file",
+            "arguments": '{"filePath":"/tmp/demo.md","content":"hello"}',
+        }
+        allow_continue.wait(timeout=2)
+        yield {
+            "type": "tool_result",
+            "event_id": "evt_disconnect_tool_result",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "tool_call_id": "call_write",
+            "name": "write_file",
+            "status": "completed",
+            "output_preview": "创建成功",
+        }
+        yield {
+            "type": "done",
+            "event_id": "evt_disconnect_done",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "msg_done",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {},
+            "process_items": [],
+            "display_parts": [],
+        }
+        completed.set()
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+
+    stream = _stream_chat(ChatStreamReq(session_id=session_id, user_input="创建文件", mode="build"))
+    seen_tool_call = False
+    try:
+        for chunk in stream:
+            if "event: tool_call" in chunk:
+                seen_tool_call = True
+                break
+    finally:
+        stream.close()
+
+    assert seen_tool_call is True
+    allow_continue.set()
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not completed.is_set():
+        time.sleep(0.01)
+
+    assert completed.is_set() is True
+    run_records = [run for run in RUN_MANAGER._runs.values() if run.session_id == session_id]
+    assert run_records
+    assert run_records[-1].status == "completed"
+    assert any(event.get("type") == "tool_result" for event in run_records[-1].events)
+
+
+def test_active_run_stream_should_resume_after_disconnect(monkeypatch):
+    RUN_MANAGER.clear()
+    session_id = generate_session_id("test_web_resume")
+    allow_continue = threading.Event()
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        del user_input, mode, kwargs
+        yield {
+            "type": "start",
+            "event_id": "evt_resume_start",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+        }
+        yield {
+            "type": "tool_call",
+            "event_id": "evt_resume_tool_call",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "tool_call_id": "call_resume",
+            "name": "write_file",
+            "arguments": "{}",
+        }
+        allow_continue.wait(timeout=2)
+        yield {
+            "type": "tool_result",
+            "event_id": "evt_resume_tool_result",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "tool_call_id": "call_resume",
+            "name": "write_file",
+            "status": "completed",
+            "output_preview": "创建成功",
+        }
+        yield {
+            "type": "done",
+            "event_id": "evt_resume_done",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "msg_resume_done",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {},
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+
+    stream = _stream_chat(ChatStreamReq(session_id=session_id, user_input="创建文件", mode="build"))
+    try:
+        for chunk in stream:
+            if "event: tool_call" in chunk:
+                break
+    finally:
+        stream.close()
+
+    assert RUN_MANAGER.get_active_run(session_id) is not None
+    allow_continue.set()
+
+    body = "".join(_stream_active_run(session_id))
+    events = _stream_events(body)
+    event_names = [event_name for event_name, _payload in events]
+
+    assert event_names[:2] == ["start", "tool_call"]
+    assert "tool_result" in event_names
+    assert event_names[-1] == "done"
+    assert RUN_MANAGER.get_active_run(session_id) is None
+
+
+def test_active_run_stream_should_return_no_active_run_when_idle():
+    RUN_MANAGER.clear()
+    session_id = generate_session_id("test_web_no_active")
+
+    body = "".join(_stream_active_run(session_id))
+    events = _stream_events(body)
+
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "no_active_run"
+    assert events[-1][1]["session_id"] == session_id
+
+
+def test_chat_stream_should_return_conflict_when_session_has_active_run(monkeypatch):
+    RUN_MANAGER.clear()
+    session_id = generate_session_id("test_web_active_conflict")
+    allow_continue = threading.Event()
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        del user_input, mode, kwargs
+        yield {
+            "type": "start",
+            "event_id": "evt_conflict_start",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+        }
+        allow_continue.wait(timeout=2)
+        yield {
+            "type": "done",
+            "event_id": "evt_conflict_done",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "msg_conflict_done",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {},
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+
+    first_stream = _stream_chat(ChatStreamReq(session_id=session_id, user_input="第一个任务", mode="build"))
+    try:
+        first_chunk = next(first_stream)
+        assert "event: start" in first_chunk
+
+        conflict_body = "".join(_stream_chat(ChatStreamReq(session_id=session_id, user_input="第二个任务", mode="build")))
+        events = _stream_events(conflict_body)
+
+        assert events[-1][0] == "error"
+        assert events[-1][1]["code"] == "session_run_conflict"
+        assert events[-1][1]["active_run_id"]
+        run_records = [run for run in RUN_MANAGER._runs.values() if run.session_id == session_id]
+        assert len(run_records) == 1
+    finally:
+        allow_continue.set()
+        first_stream.close()
 
 
 def test_runtime_options_should_return_backend_config():
@@ -677,6 +912,30 @@ def test_apply_mode_switch_stream_should_return_sse_events(monkeypatch):
     done_payload = next(payload for evt, payload in events if evt == "done")
     assert done_payload["agent"] == "plan"
     assert done_payload["response_meta"]["duration_ms"] == 500
+
+
+def test_apply_mode_switch_stream_should_return_conflict_error_event(monkeypatch):
+    app = create_app()
+    client = TestClient(app)
+
+    def raise_no_pending(session_id: str, action: str):
+        del session_id, action
+        raise ValueError("当前没有待确认的模式切换。")
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_mode_switch_stream_events", raise_no_pending)
+
+    with client.stream(
+        "POST",
+        "/api/sessions/s_mode_stream_conflict/mode-switch/stream",
+        json={"action": "confirm"},
+    ) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+
+    events = _stream_events(body)
+    error_payload = next(payload for evt, payload in events if evt == "error")
+    assert error_payload["code"] == "mode_switch_conflict"
+    assert error_payload["message"] == "当前没有待确认的模式切换。"
 
 
 def test_apply_mode_switch_should_return_conflict_when_no_pending(monkeypatch):

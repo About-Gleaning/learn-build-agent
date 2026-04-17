@@ -16,6 +16,7 @@
 - 查询型 `lsp` 工具统一走 `src/agent/tools/lsp_tool.py` -> `src/agent/lsp/client.py` -> `src/agent/lsp/manager.py` 链路。
 - Web 层消息序列化统一收敛在 `src/agent/web/serializers.py`，不要在 `src/agent/web/app.py` 手工散落映射逻辑。
 - 运行时策略以 `src/agent/config/project_runtime.json` 为基础配置，并允许 `$CODEPILOT_HOME/project_runtime.json` 递归覆盖；数组与标量字段整体替换。
+- 应用主日志由 `src/agent/config/logging_setup.py` 统一初始化，必须遵守 `project_runtime.json -> logging` 的轮转、保留、脱敏与截断策略；`codepilot web` 的 `backend.log/frontend.log` 仅用于本地开发诊断。
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止继续散落使用 `Path.cwd()` 推导边界。
 - Session Memory 统一通过 `src/agent/runtime/session_memory.py` 的 `SessionMemoryStore` 抽象读写，默认按工作区落盘到运行态 `workspaces/sessions/`。
 - Session Memory 文件格式统一为 JSONL，按消息粒度落库；具体持久化能力应通过内置 Session/Loop/Tool Hook 的实现接入，详细规范以 `AGENTS-DEV.md` 为准。

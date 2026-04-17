@@ -4421,8 +4421,15 @@ def test_get_project_runtime_settings_should_use_default_values_when_file_missin
         assert settings.file_extraction_vendors == {}
         assert settings.agent_loop.max_rounds == 8
         assert settings.subagent_loop.max_rounds == 15
-        assert settings.logging.truncate_enabled is False
-        assert settings.logging.truncate_limit == 500
+        assert settings.logging.file_enabled is True
+        assert settings.logging.console_enabled is None
+        assert settings.logging.rotation_enabled is True
+        assert settings.logging.max_bytes == 100 * 1024 * 1024
+        assert settings.logging.backup_count == 30
+        assert settings.logging.retention_days == 30
+        assert settings.logging.redact_enabled is True
+        assert settings.logging.truncate_enabled is True
+        assert settings.logging.truncate_limit == 2000
         assert settings.session_memory.trim_enabled is True
         assert settings.session_memory.max_messages == 24
         assert settings.lsp.enabled is True
@@ -4668,6 +4675,13 @@ def test_get_project_runtime_settings_should_read_logging_config(tmp_path, monke
         """
         {
           "logging": {
+            "file_enabled": true,
+            "console_enabled": false,
+            "rotation_enabled": true,
+            "max_bytes": 4096,
+            "backup_count": 7,
+            "retention_days": 14,
+            "redact_enabled": true,
             "truncate_enabled": true,
             "truncate_limit": 2048
           }
@@ -4680,6 +4694,13 @@ def test_get_project_runtime_settings_should_read_logging_config(tmp_path, monke
 
     try:
         settings = get_project_runtime_settings()
+        assert settings.logging.file_enabled is True
+        assert settings.logging.console_enabled is False
+        assert settings.logging.rotation_enabled is True
+        assert settings.logging.max_bytes == 4096
+        assert settings.logging.backup_count == 7
+        assert settings.logging.retention_days == 14
+        assert settings.logging.redact_enabled is True
         assert settings.logging.truncate_enabled is True
         assert settings.logging.truncate_limit == 2048
     finally:
@@ -4939,6 +4960,76 @@ def test_get_project_runtime_settings_should_reject_non_positive_logging_limit(t
         raise AssertionError("期望非法 logging.truncate_limit 配置抛出异常")
     except ValueError as exc:
         assert "logging.truncate_limit" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_non_positive_logging_rotation_values(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "max_bytes": 0,
+            "backup_count": 1,
+            "retention_days": 1
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging.max_bytes 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.max_bytes" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "max_bytes": 1024,
+            "backup_count": 0,
+            "retention_days": 1
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging.backup_count 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.backup_count" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "max_bytes": 1024,
+            "backup_count": 1,
+            "retention_days": 0
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging.retention_days 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.retention_days" in str(exc)
     finally:
         clear_runtime_settings_cache()
 
