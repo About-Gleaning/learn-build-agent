@@ -231,6 +231,10 @@ LSP 查询请求
 - `codepilot web` 支持按工作区并行启动多套实例。
 - 端口冲突时必须自动分配空闲端口，并把实际前后端地址写入当前工作区对应状态文件。
 - Web 前端默认必须走同源 `/api` 代理，由当前 Vite 实例转发到本工作区后端；禁止在 `codepilot web` 启动链路中把前端固定到某个后端端口。
+- 普通聊天流式请求统一走 `POST /api/sessions/{session_id}/stream`，前端必须提供稳定的 `client_run_id` 作为幂等键；断线重连时复用同一个 `client_run_id`，禁止重复提交用户输入。
+- Web 后台 Run 必须允许 SSE 连接断开后继续执行；订阅空闲时可发送不落库的 `heartbeat` 保活事件，前端不得把 heartbeat 展示到消息流或过程时间线。
+- 前端流式读取必须具备静默超时与重连兜底；恢复同一 run 时必须按 `event_id` 去重，避免重复追加文本、工具调用、diff 或工具结果。
+- 前端本地 pending run 只作为刷新后恢复订阅的线索，真实任务状态以后端 RunManager 与 Session Memory 为准；页面初始化时历史加载结果不得覆盖已经恢复中的 live stream 占位消息。
 - `codepilot web prune` 必须扫描全部工作区状态，只清理 `degraded/stale` 异常残留，并同时尝试停止登记的前后端 PID，保留健康实例。
 - `codepilot web prune` 对未登记的疑似 Web 后端监听进程只做报告提示，禁止默认 kill，避免误伤用户手动启动的服务。
 - `codepilot web stop --all` 必须扫描全部工作区状态，停止所有已登记实例并移除状态文件；未登记疑似进程只做报告提示，禁止默认 kill。

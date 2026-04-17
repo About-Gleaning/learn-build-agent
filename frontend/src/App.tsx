@@ -315,15 +315,19 @@ type ActiveTurn = {
   kind: "chat" | "mode_switch_confirm" | "question_answer" | "question_reject" | "active_run";
   assistantMessageId: string;
   userMessageId?: string;
+  clientRunId?: string;
   localTurnStartedAt: string;
   serverTurnStartedAt: string;
   serverMessageId: string;
+  seenEventIds: string[];
+  reconnectAttempts: number;
 };
 
 type StreamCompletion = {
   receivedTerminalDone: boolean;
   finalPayload: Record<string, unknown> | null;
   closedWithoutTerminalDone: boolean;
+  closeReason: "terminal" | "closed" | "timeout";
 };
 
 class SseStreamError extends Error {
@@ -391,10 +395,13 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const EXPECTED_WORKSPACE_ROOT = (import.meta.env.VITE_EXPECTED_WORKSPACE_ROOT as string | undefined)?.trim() || "";
 const SESSION_STORAGE_KEY_PREFIX = "codepilot:last-session-id:";
 const RUNTIME_SELECTION_STORAGE_KEY_PREFIX = "codepilot:runtime-selection:";
+const PENDING_RUN_STORAGE_KEY_PREFIX = "codepilot:pending-run:";
 const PATH_SUGGESTION_LIMIT = 50;
 const PATH_SUGGESTION_DEBOUNCE_MS = 150;
 const PATH_SUGGESTION_CACHE_TTL_MS = 30_000;
 const PATH_SUGGESTION_CACHE_LIMIT = 100;
+const STREAM_SILENCE_TIMEOUT_MS = 45_000;
+const STREAM_RECONNECT_DELAYS_MS = [500, 1000, 2000];
 
 function buildId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -404,6 +411,12 @@ function buildSessionId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 10);
   return `s_${ts}_${rand}`;
+}
+
+function buildClientRunId(): string {
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `run_${ts}_${rand}`;
 }
 
 function isValidSessionId(sessionId: string): boolean {
@@ -419,6 +432,20 @@ function buildRuntimeSelectionStorageKey(): string {
   const workspaceKey = EXPECTED_WORKSPACE_ROOT || window.location.origin;
   return `${RUNTIME_SELECTION_STORAGE_KEY_PREFIX}${workspaceKey}`;
 }
+
+function buildPendingRunStorageKey(sessionId: string): string {
+  const workspaceKey = EXPECTED_WORKSPACE_ROOT || window.location.origin;
+  return `${PENDING_RUN_STORAGE_KEY_PREFIX}${workspaceKey}:${sessionId}`;
+}
+
+type PendingRunState = {
+  sessionId: string;
+  clientRunId: string;
+  assistantMessageId: string;
+  userMessageId?: string;
+  startedAt: string;
+  mode: AgentName;
+};
 
 function loadPersistedSessionId(): string {
   try {
@@ -440,6 +467,46 @@ function persistSessionId(sessionId: string): void {
     window.localStorage.setItem(buildSessionStorageKey(), sessionId);
   } catch {
     // 持久化只是刷新恢复兜底，失败不能影响当前会话交互。
+  }
+}
+
+function loadPendingRun(sessionId: string): PendingRunState | null {
+  try {
+    const rawValue = window.localStorage.getItem(buildPendingRunStorageKey(sessionId)) || "";
+    if (!rawValue) {
+      return null;
+    }
+    const parsed = JSON.parse(rawValue) as Partial<PendingRunState>;
+    const clientRunId = String(parsed.clientRunId || "").trim();
+    if (!clientRunId.startsWith("run_")) {
+      return null;
+    }
+    return {
+      sessionId,
+      clientRunId,
+      assistantMessageId: String(parsed.assistantMessageId || ""),
+      userMessageId: parsed.userMessageId ? String(parsed.userMessageId) : undefined,
+      startedAt: String(parsed.startedAt || ""),
+      mode: parsed.mode === "plan" ? "plan" : "build",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistPendingRun(state: PendingRunState): void {
+  try {
+    window.localStorage.setItem(buildPendingRunStorageKey(state.sessionId), JSON.stringify(state));
+  } catch {
+    // pending run 只是断线恢复线索，写入失败不能影响本轮执行。
+  }
+}
+
+function clearPendingRun(sessionId: string): void {
+  try {
+    window.localStorage.removeItem(buildPendingRunStorageKey(sessionId));
+  } catch {
+    // 清理失败时最多导致刷新后多尝试一次恢复，后端会用 missing_user_input 兜底。
   }
 }
 
@@ -1637,6 +1704,7 @@ async function streamSse(params: {
   let buffer = "";
   let hasDoneEvent = false;
   let finalPayload: Record<string, unknown> | null = null;
+  let closeReason: StreamCompletion["closeReason"] = "closed";
 
   const isTerminalDoneEvent = (eventName: string, payload: Record<string, unknown>): boolean => {
     if (eventName !== "done") {
@@ -1664,8 +1732,34 @@ async function streamSse(params: {
     return { event, data };
   };
 
+  const readChunk = async (): Promise<
+    | { kind: "read"; result: ReadableStreamReadResult<Uint8Array> }
+    | { kind: "timeout" }
+  > =>
+    new Promise((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => resolve({ kind: "timeout" }), STREAM_SILENCE_TIMEOUT_MS);
+      reader
+        .read()
+        .then((result) => {
+          window.clearTimeout(timeoutId);
+          resolve({ kind: "read", result });
+        })
+        .catch((error) => {
+          window.clearTimeout(timeoutId);
+          reject(error);
+        });
+    });
+
   while (true) {
-    const { done, value } = await reader.read();
+    const readResult = await readChunk();
+
+    if (readResult.kind === "timeout") {
+      closeReason = "timeout";
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+
+    const { done, value } = readResult.result;
     if (value) {
       buffer += decoder.decode(value, { stream: !done });
     }
@@ -1677,6 +1771,10 @@ async function streamSse(params: {
       if (raw.trim()) {
         const event = parseEvent(raw);
         const payload = event.data ? (JSON.parse(event.data) as Record<string, unknown>) : {};
+        if (event.event === "heartbeat") {
+          splitIndex = buffer.indexOf("\n\n");
+          continue;
+        }
         params.onEvent(event.event, payload);
 
         if (event.event === "text_delta") {
@@ -1686,6 +1784,7 @@ async function streamSse(params: {
         if (isTerminalDoneEvent(event.event, payload)) {
           hasDoneEvent = true;
           finalPayload = payload;
+          closeReason = "terminal";
         }
 
         if (event.event === "error") {
@@ -1709,12 +1808,14 @@ async function streamSse(params: {
     receivedTerminalDone: hasDoneEvent,
     finalPayload,
     closedWithoutTerminalDone: !hasDoneEvent,
+    closeReason,
   };
 }
 
-async function streamChat(params: {
+async function streamSession(params: {
   sessionId: string;
-  userInput: string;
+  clientRunId: string;
+  userInput?: string;
   mode: AgentName;
   provider: string;
   model: string;
@@ -1723,10 +1824,10 @@ async function streamChat(params: {
   signal?: AbortSignal;
 }): Promise<StreamCompletion> {
   return streamSse({
-    url: `${API_BASE}/api/chat/stream`,
+    url: `${API_BASE}/api/sessions/${encodeURIComponent(params.sessionId)}/stream`,
     body: {
-      session_id: params.sessionId,
-      user_input: params.userInput,
+      client_run_id: params.clientRunId,
+      ...(params.userInput ? { user_input: params.userInput } : {}),
       mode: params.mode,
       provider: params.provider,
       model: params.model,
@@ -2642,6 +2743,7 @@ export function App() {
   const pathSuggestionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const pathSuggestionCacheRef = useRef<Map<string, PathSuggestionCacheEntry>>(new Map());
   const shouldApplyInitialHistoryProviderRef = useRef(!persistedRuntimeSelectionRef.current.providerModelKey);
+  const bootFlowSeqRef = useRef(0);
 
   const latestMessage = messages[messages.length - 1] || null;
   const latestAssistantMessage = useMemo(
@@ -3062,6 +3164,7 @@ export function App() {
       return;
     }
     activeStreamControllerRef.current?.abort();
+    clearPendingRun(sessionId);
     const nextSessionId = buildSessionId();
     setShouldFollow(true);
     resetTransientUiState();
@@ -3090,6 +3193,7 @@ export function App() {
     setIsLoadingSession(true);
     setShouldFollow(true);
     activeStreamControllerRef.current?.abort();
+    clearPendingRun(sessionId);
     resetTransientUiState();
     try {
       const history = filterConversationMessages(await loadHistory(nextSessionId));
@@ -3211,7 +3315,32 @@ export function App() {
     });
   };
 
+  const shouldApplyStreamEvent = (assistantId: string, payload: Record<string, unknown>): boolean => {
+    const eventId = readString(payload, "event_id");
+    if (!eventId) {
+      return true;
+    }
+    const activeTurn = activeTurnRef.current;
+    if (!activeTurn || activeTurn.assistantMessageId !== assistantId) {
+      return true;
+    }
+    if (activeTurn.seenEventIds.includes(eventId)) {
+      return false;
+    }
+    activeTurnRef.current = {
+      ...activeTurn,
+      seenEventIds: [...activeTurn.seenEventIds, eventId],
+    };
+    return true;
+  };
+
   const applyLiveStreamEvent = (assistantId: string, eventName: string, payload: Record<string, unknown>) => {
+    if (eventName === "heartbeat") {
+      return;
+    }
+    if (!shouldApplyStreamEvent(assistantId, payload)) {
+      return;
+    }
     if (activeTurnRef.current?.assistantMessageId === assistantId) {
       activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
     }
@@ -3277,20 +3406,71 @@ export function App() {
     }
   };
 
+  const reconnectChatRunInPlace = async (
+    assistantId: string,
+    targetSessionId: string,
+    clientRunId: string,
+  ): Promise<StreamCompletion | null> => {
+    for (let attempt = 0; attempt < STREAM_RECONNECT_DELAYS_MS.length; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, STREAM_RECONNECT_DELAYS_MS[attempt]));
+      const activeTurn = activeTurnRef.current;
+      if (!activeTurn || activeTurn.assistantMessageId !== assistantId) {
+        return null;
+      }
+      activeTurnRef.current = {
+        ...activeTurn,
+        reconnectAttempts: activeTurn.reconnectAttempts + 1,
+      };
+
+      const controller = new AbortController();
+      activeStreamControllerRef.current = controller;
+      try {
+        const completion = await streamSession({
+          sessionId: targetSessionId,
+          clientRunId,
+          mode,
+          provider: "",
+          model: "",
+          onDelta: () => {},
+          onEvent: (eventName, payload) => {
+            applyLiveStreamEvent(assistantId, eventName, payload);
+          },
+          signal: controller.signal,
+        });
+        if (completion.receivedTerminalDone) {
+          return completion;
+        }
+      } catch (err) {
+        if ((err as Error).name === "AbortError") {
+          return null;
+        }
+        if (err instanceof SseStreamError && err.code === "missing_user_input") {
+          return null;
+        }
+      } finally {
+        if (activeStreamControllerRef.current === controller) {
+          activeStreamControllerRef.current = null;
+        }
+      }
+    }
+    return null;
+  };
+
   const resumeActiveRun = async (targetSessionId = sessionId): Promise<boolean> => {
     if (isStreaming || isStopping || activeStreamControllerRef.current) {
       return false;
     }
 
+    const pendingRun = loadPendingRun(targetSessionId);
     const now = new Date().toISOString();
-    const assistantId = buildId("assistant");
+    const assistantId = pendingRun?.assistantMessageId || buildId("assistant");
     const assistantMessage: UiMessage = {
       id: assistantId,
       role: "assistant",
       text: "",
       createdAt: now,
       status: "running",
-      agent: mode,
+      agent: pendingRun?.mode || mode,
       provider: "",
       model: "",
       finishReason: "",
@@ -3304,17 +3484,37 @@ export function App() {
       question: null,
     };
 
-    setMessages((prev) => [...prev, assistantMessage]);
+    setMessages((prev) => {
+      const existingIndex = prev.findIndex((msg) => msg.id === assistantId);
+      if (existingIndex < 0) {
+        return [...prev, assistantMessage];
+      }
+      return prev.map((msg, index) =>
+        index === existingIndex
+          ? {
+              ...assistantMessage,
+              ...msg,
+              status: "running",
+              turnCompletedAt: "",
+              displayTextMergeOpen: msg.displayTextMergeOpen,
+            }
+          : msg,
+      );
+    });
     setIsStreaming(true);
     setIsStopping(false);
     setActiveProvider("");
     setActiveModel("");
     activeTurnRef.current = {
-      kind: "active_run",
+      kind: pendingRun ? "chat" : "active_run",
       assistantMessageId: assistantId,
+      userMessageId: pendingRun?.userMessageId,
+      clientRunId: pendingRun?.clientRunId,
       localTurnStartedAt: now,
       serverTurnStartedAt: "",
       serverMessageId: "",
+      seenEventIds: [],
+      reconnectAttempts: 0,
     };
 
     const controller = new AbortController();
@@ -3323,17 +3523,33 @@ export function App() {
     let finalStatus = "completed";
 
     try {
-      const completion = await streamActiveRun({
-        sessionId: targetSessionId,
-        onDelta: () => {},
-        onEvent: (eventName, payload) => {
-          applyLiveStreamEvent(assistantId, eventName, payload);
-          if (eventName === "done") {
-            finalStatus = readString(payload, "status", "completed");
-          }
-        },
-        signal: controller.signal,
-      });
+      const completion = pendingRun
+        ? await streamSession({
+            sessionId: targetSessionId,
+            clientRunId: pendingRun.clientRunId,
+            mode: pendingRun.mode,
+            provider: "",
+            model: "",
+            onDelta: () => {},
+            onEvent: (eventName, payload) => {
+              applyLiveStreamEvent(assistantId, eventName, payload);
+              if (eventName === "done") {
+                finalStatus = readString(payload, "status", "completed");
+              }
+            },
+            signal: controller.signal,
+          })
+        : await streamActiveRun({
+            sessionId: targetSessionId,
+            onDelta: () => {},
+            onEvent: (eventName, payload) => {
+              applyLiveStreamEvent(assistantId, eventName, payload);
+              if (eventName === "done") {
+                finalStatus = readString(payload, "status", "completed");
+              }
+            },
+            signal: controller.signal,
+          });
 
       if (completion.finalPayload) {
         finalStatus = readString(completion.finalPayload, "status", finalStatus);
@@ -3344,11 +3560,14 @@ export function App() {
         setMessages((prev) =>
           prev.map((msg) => (msg.id === assistantId ? mergeMessageWithFinalPayload(msg, finalStatus, terminalPayload) : msg)),
         );
+        clearPendingRun(targetSessionId);
         await refreshHistory(targetSessionId);
       } else if (activeTurnRef.current) {
         const recovered = await recoverStreamResultFromHistory(activeTurnRef.current, targetSessionId);
         if (!recovered) {
           setError("后台任务可能仍在执行，但当前连接已断开，请稍后重新加载会话确认结果。");
+        } else {
+          clearPendingRun(targetSessionId);
         }
       }
       return true;
@@ -3357,8 +3576,16 @@ export function App() {
         wasAborted = true;
         return false;
       }
+      if (pendingRun) {
+        clearPendingRun(targetSessionId);
+      }
       if (err instanceof SseStreamError && err.code === "no_active_run") {
         setMessages((prev) => prev.filter((msg) => msg.id !== assistantId));
+        return false;
+      }
+      if (err instanceof SseStreamError && err.code === "missing_user_input") {
+        setMessages((prev) => prev.filter((msg) => msg.id !== assistantId));
+        await refreshHistory(targetSessionId);
         return false;
       }
       if (err instanceof SseStreamError && err.code === "run_not_found") {
@@ -3393,10 +3620,44 @@ export function App() {
   };
 
   useEffect(() => {
-    void refreshHistory().then(() => {
-      void resumeActiveRun(sessionId);
-    });
+    const flowSeq = bootFlowSeqRef.current + 1;
+    bootFlowSeqRef.current = flowSeq;
+    const bootSessionId = sessionId;
+    let cancelled = false;
+
+    const isCurrentBootFlow = () => !cancelled && bootFlowSeqRef.current === flowSeq;
+
+    void (async () => {
+      setError("");
+      try {
+        const history = filterConversationMessages(await loadHistory(bootSessionId));
+        if (!isCurrentBootFlow()) {
+          return;
+        }
+        applySessionRuntimeFromHistory(history);
+        startTransition(() => {
+          if (isCurrentBootFlow()) {
+            setMessages(history);
+          }
+        });
+        if (!isCurrentBootFlow()) {
+          return;
+        }
+        await resumeActiveRun(bootSessionId);
+      } catch (err) {
+        if (isCurrentBootFlow()) {
+          setError((err as Error).message || "历史加载失败");
+        }
+      }
+    })();
+
     void refreshRuntimeOptions();
+
+    return () => {
+      cancelled = true;
+      bootFlowSeqRef.current += 1;
+      activeStreamControllerRef.current?.abort();
+    };
   }, []);
 
   const updateQuestionDraft = (index: number, updater: (draft: QuestionDraft) => QuestionDraft) => {
@@ -3540,14 +3801,26 @@ export function App() {
     setIsStopping(false);
     setActiveProvider("");
     setActiveModel("");
+    const clientRunId = buildClientRunId();
     activeTurnRef.current = {
       kind: "chat",
       assistantMessageId: assistantId,
       userMessageId: userMessage.id,
+      clientRunId,
       localTurnStartedAt: now,
       serverTurnStartedAt: "",
       serverMessageId: "",
+      seenEventIds: [],
+      reconnectAttempts: 0,
     };
+    persistPendingRun({
+      sessionId,
+      clientRunId,
+      assistantMessageId: assistantId,
+      userMessageId: userMessage.id,
+      startedAt: now,
+      mode,
+    });
 
     let finalStatus = "completed";
     const controller = new AbortController();
@@ -3564,69 +3837,16 @@ export function App() {
         : null);
 
     try {
-      const completion = await streamChat({
+      let completion = await streamSession({
         sessionId,
+        clientRunId,
         userInput: trimmed,
         mode,
         provider: selectedRuntime?.provider || "",
         model: selectedRuntime?.model || "",
         onDelta: () => {},
         onEvent: (eventName, payload) => {
-          if (activeTurnRef.current?.assistantMessageId === assistantId) {
-            activeTurnRef.current = applyServerTurnIdentity(activeTurnRef.current, payload);
-          }
-          if (eventName === "runtime_alert") {
-            appendRuntimeAlert(payload);
-            return;
-          }
-          if (eventName === "text_delta") {
-            const delta = readString(payload, "delta");
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId
-                  ? appendDisplayTextDelta(msg, delta, payload)
-                  : msg,
-              ),
-            );
-          } else if (eventName === "reasoning_delta") {
-            const delta = readString(payload, "delta");
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId
-                  ? appendDisplayReasoningDelta(msg, delta, payload)
-                  : msg,
-              ),
-            );
-          }
-          const processItem = buildLiveProcessItem(eventName, payload);
-          if (processItem) {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId
-                  ? {
-                      ...msg,
-                      processItems: appendProcessItem(msg.processItems, processItem),
-                      displayParts: (() => {
-                        const displayPart = buildLiveDisplayPart(eventName, payload);
-                        return displayPart ? appendDisplayPart(msg.displayParts, displayPart) : msg.displayParts;
-                      })(),
-                      displayTextMergeOpen: false,
-                    }
-                  : msg,
-              ),
-            );
-          } else if (eventName !== "text_delta" && eventName !== "reasoning_delta") {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId
-                  ? {
-                      ...msg,
-                      displayTextMergeOpen: false,
-                    }
-                  : msg,
-              ),
-            );
-          }
+          applyLiveStreamEvent(assistantId, eventName, payload);
           const providerName = readString(payload, "provider");
           const modelName = readString(payload, "model");
           if (providerName) {
@@ -3642,6 +3862,13 @@ export function App() {
         signal: controller.signal,
       });
 
+      if (!completion.receivedTerminalDone) {
+        const reconnected = await reconnectChatRunInPlace(assistantId, sessionId, clientRunId);
+        if (reconnected) {
+          completion = reconnected;
+        }
+      }
+
       if (completion.finalPayload) {
         finalStatus = readString(completion.finalPayload, "status", finalStatus);
       }
@@ -3656,10 +3883,13 @@ export function App() {
             return mergeMessageWithFinalPayload(msg, finalStatus, terminalPayload);
           }),
         );
+        clearPendingRun(sessionId);
       } else if (activeTurnRef.current) {
         const recovered = await recoverStreamResultFromHistory(activeTurnRef.current, sessionId);
         if (!recovered) {
           setError("本轮结果已结束，但终态消息同步失败，请重新加载会话确认结果。");
+        } else {
+          clearPendingRun(sessionId);
         }
       }
     } catch (err) {
@@ -3667,6 +3897,7 @@ export function App() {
         wasAborted = true;
         return;
       }
+      clearPendingRun(sessionId);
       setError((err as Error).message || "发送失败");
       setMessages((prev) =>
         prev.map((msg) =>
@@ -3749,6 +3980,8 @@ export function App() {
           localTurnStartedAt: now,
           serverTurnStartedAt: "",
           serverMessageId: "",
+          seenEventIds: [],
+          reconnectAttempts: 0,
         };
 
         let finalStatus = "completed";
@@ -3940,6 +4173,8 @@ export function App() {
       localTurnStartedAt: now,
       serverTurnStartedAt: "",
       serverMessageId: "",
+      seenEventIds: [],
+      reconnectAttempts: 0,
     };
 
     let finalStatus = "completed";
@@ -4157,6 +4392,8 @@ export function App() {
           const merged = await mergeStoppedTurnFromHistory(activeTurn);
           if (!merged) {
             setError("停止已请求，但本轮停止结果尚未同步完成，请稍后再试。");
+          } else {
+            clearPendingRun(sessionId);
           }
           if (activeTurnRef.current?.assistantMessageId === activeTurn.assistantMessageId) {
             activeTurnRef.current = null;
