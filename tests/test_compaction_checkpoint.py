@@ -1,6 +1,12 @@
+import json
+from pathlib import Path
+from typing import Any
+
 import agent.runtime.compaction as compaction_module
-from agent.config.settings import CompactionSettings, clear_runtime_settings_cache
+from agent.adapters.llm.protocols import ChatCompletionsAdapter
+from agent.config.settings import CompactionSettings, ResolvedLLMConfig, clear_runtime_settings_cache
 from agent.core.message import (
+    Message,
     append_compaction_part,
     append_text_part,
     append_tool_call_part,
@@ -11,6 +17,8 @@ from agent.core.message import (
 )
 from agent.runtime.session_memory import InMemorySessionMemoryStore, normalize_history_prefix
 
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
 
 def _tool_result_content(message):
     for part in message["parts"]:
@@ -20,6 +28,64 @@ def _tool_result_content(message):
         output = state.get("output") if isinstance(state.get("output"), dict) else {}
         return str(output.get("output", ""))
     return ""
+
+
+def _build_chat_config() -> ResolvedLLMConfig:
+    return ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="kimi-k2.5",
+        max_tokens=32000,
+        api_mode="chat_completions",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+
+def _provider_payload_to_runtime_messages(path: Path, *, session_id: str) -> list[Message]:
+    """把事故现场的 provider payload 还原成运行时消息，便于复现压缩链路。"""
+
+    provider_messages = json.loads(path.read_text(encoding="utf-8"))
+    tool_names_by_call_id: dict[str, str] = {}
+    runtime_messages: list[Message] = []
+
+    for provider_message in provider_messages:
+        role = str(provider_message.get("role", "")).strip()
+        content = str(provider_message.get("content") or "")
+        if role in {"system", "user"}:
+            message = create_message(role, session_id, status="completed")
+            append_text_part(message, content)
+            runtime_messages.append(message)
+            continue
+
+        if role == "assistant":
+            message = create_message("assistant", session_id, status="completed")
+            if content:
+                append_text_part(message, content)
+            for tool_call in provider_message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                tool_call_id = str(tool_call.get("id", "")).strip()
+                tool_name = str(function.get("name", "")).strip()
+                arguments = str(function.get("arguments") or "{}")
+                if not tool_call_id or not tool_name:
+                    continue
+                tool_names_by_call_id[tool_call_id] = tool_name
+                append_tool_call_part(message, tool_call_id=tool_call_id, name=tool_name, arguments=arguments)
+            runtime_messages.append(message)
+            continue
+
+        if role == "tool":
+            tool_call_id = str(provider_message.get("tool_call_id", "")).strip()
+            tool_name = tool_names_by_call_id.get(tool_call_id, "unknown")
+            message = create_message("tool", session_id, status="completed")
+            append_tool_result_part(message, tool_call_id=tool_call_id, name=tool_name, content=content)
+            runtime_messages.append(message)
+
+    return runtime_messages
 
 
 def test_trim_messages_by_compaction_checkpoint_should_keep_latest_completed_suffix():
@@ -114,6 +180,45 @@ def test_compaction_summary_should_build_checkpoint_pair(tmp_path, monkeypatch):
     assert compacted[2]["info"]["summary"] is True
     assert compacted[2]["info"]["parent_id"] == compacted[1]["info"]["message_id"]
     assert get_message_text(compacted[2]) == "压缩后的摘要"
+
+
+def test_compaction_summary_should_compact_session_1_fixture_without_empty_tools(monkeypatch):
+    session_id = "s_session_1_fixture"
+    messages = _provider_payload_to_runtime_messages(FIXTURES_DIR / "session-1.txt", session_id=session_id)
+    seen: dict[str, Any] = {"calls": 0}
+    adapter = ChatCompletionsAdapter(_build_chat_config())
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del hooks, llm_config, agent
+        seen["calls"] += 1
+        seen["max_tokens"] = max_tokens
+        seen["tools"] = tools
+        request = adapter.build_request(messages, tools=tools)
+        seen["request"] = request
+
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed", finish_reason="stop")
+        append_text_part(assistant, "session-1 已压缩为摘要")
+        return assistant
+
+    monkeypatch.setattr(compaction_module, "create_chat_completion", fake_chat)
+
+    compacted = compaction_module.compaction_summary(
+        messages,
+        llm_config=_build_chat_config(),
+        agent="build",
+        settings=CompactionSettings(summary_trigger_threshold=40000, summary_max_tokens=12000),
+    )
+
+    assert len(messages) == 247
+    assert seen["calls"] == 1
+    assert seen["max_tokens"] == 12000
+    assert seen["tools"] == []
+    assert "tools" not in seen["request"]
+    assert len(compacted) < 10
+    assert any(bool(message.get("info", {}).get("summary")) for message in compacted)
+    assert "以下历史消息已完成压缩总结" in get_message_text(compacted[-2])
+    assert get_message_text(compacted[-1]) == "session-1 已压缩为摘要"
+    assert get_message_text(compacted[-1]) != get_message_text(messages[-1])
 
 
 def test_prune_should_skip_when_tool_result_prune_disabled():
