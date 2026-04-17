@@ -1,4 +1,8 @@
+import concurrent.futures
+import time
 from pathlib import Path
+
+import pytest
 
 from agent.runtime.workspace import configure_workspace, reset_workspace
 from agent.web.path_suggestions import record_path_selection, suggest_workspace_paths
@@ -114,6 +118,29 @@ def test_suggest_workspace_paths_should_skip_large_generated_directories(tmp_pat
     assert [item.relative_path for item in results] == ["src/match.py"]
 
 
+def test_suggest_workspace_paths_should_keep_symlink_boundary(tmp_path: Path):
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_dir.mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "source.txt").write_text("source", encoding="utf-8")
+    (outside_dir / "outside-match.txt").write_text("outside", encoding="utf-8")
+    try:
+        (tmp_path / "link-match.txt").symlink_to(tmp_path / "src" / "source.txt")
+        (tmp_path / "outside-match.txt").symlink_to(outside_dir / "outside-match.txt")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"当前文件系统不支持符号链接: {exc}")
+
+    configure_workspace(tmp_path, launch_mode="web")
+    try:
+        results = suggest_workspace_paths("match")
+    finally:
+        reset_workspace()
+
+    relative_paths = [item.relative_path for item in results]
+    assert "link-match.txt" in relative_paths
+    assert "outside-match.txt" not in relative_paths
+
+
 def test_suggest_workspace_paths_should_clamp_limit_and_keep_tiebreaker(tmp_path: Path):
     for index in range(60):
         (tmp_path / f"file-{index:02d}.txt").write_text("x", encoding="utf-8")
@@ -156,6 +183,33 @@ def test_suggest_workspace_paths_should_reuse_index_cache(monkeypatch, tmp_path:
         reset_workspace()
 
     assert call_count == 1
+
+
+def test_suggest_workspace_paths_should_build_index_once_under_concurrency(monkeypatch, tmp_path: Path):
+    (tmp_path / "alpha.txt").write_text("a", encoding="utf-8")
+    call_count = 0
+
+    from agent.web import path_suggestions
+
+    original_iter_workspace_entries = path_suggestions._iter_workspace_entries
+
+    def wrapped_iter_workspace_entries(root: Path):
+        nonlocal call_count
+        call_count += 1
+        time.sleep(0.05)
+        return original_iter_workspace_entries(root)
+
+    monkeypatch.setattr(path_suggestions, "_iter_workspace_entries", wrapped_iter_workspace_entries)
+
+    configure_workspace(tmp_path, launch_mode="web")
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(lambda _: suggest_workspace_paths("alpha"), range(5)))
+    finally:
+        reset_workspace()
+
+    assert call_count == 1
+    assert all(items and items[0].relative_path == "alpha.txt" for items in results)
 
 
 def test_suggest_workspace_paths_should_ignore_recent_selection_for_sorting(tmp_path: Path):

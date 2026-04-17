@@ -15,7 +15,7 @@ from agent.adapters.llm.client import (
     create_chat_completion_stream,
     register_global_hook,
 )
-from agent.adapters.llm.protocols import normalize_qwen_responses_tools
+from agent.adapters.llm.protocols import ChatCompletionsAdapter, normalize_qwen_responses_tools
 from agent.adapters.llm.vendors import (
     KIMI_EXTRACTED_FILE_CONTEXT_PREFIX,
     KimiChatCompletionsAdapter,
@@ -565,6 +565,34 @@ def test_build_provider_adapter_should_choose_kimi_chat_adapter():
     adapter = build_provider_adapter(config)
 
     assert isinstance(adapter, KimiChatCompletionsAdapter)
+
+
+def test_chat_completions_adapter_should_omit_empty_tools():
+    adapter = ChatCompletionsAdapter(_build_chat_config())
+
+    request = adapter.build_request(_build_user_message(), tools=[])
+
+    assert request["model"] == "qwen3-max"
+    assert request["messages"][0]["role"] == "user"
+    assert "tools" not in request
+
+
+def test_chat_completions_adapter_should_keep_non_empty_tools():
+    adapter = ChatCompletionsAdapter(_build_chat_config())
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "todo_read",
+                "description": "读取 todo",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        }
+    ]
+
+    request = adapter.build_request(_build_user_message(), tools=tools)
+
+    assert request["tools"] == tools
 
 
 def test_build_provider_adapter_should_fallback_to_openai_responses_adapter():

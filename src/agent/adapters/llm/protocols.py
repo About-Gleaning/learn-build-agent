@@ -542,11 +542,13 @@ class ChatCompletionsAdapter(ProviderAdapter):
     ) -> dict[str, Any]:
         provider_messages = self.build_messages(messages, client=client)
         self.validate_messages(provider_messages)
-        return {
+        payload = {
             "model": self.model,
             "messages": provider_messages,
-            "tools": tools,
         }
+        if tools:
+            payload["tools"] = tools
+        return payload
 
     def parse_response(self, response: Any, *, session_id: str, parent_id: str = "") -> Message:
         return parse_provider_response(
