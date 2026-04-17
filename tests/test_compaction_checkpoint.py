@@ -4,12 +4,14 @@ from typing import Any
 
 import agent.runtime.compaction as compaction_module
 from agent.adapters.llm.protocols import ChatCompletionsAdapter
+from agent.adapters.llm.vendors import QwenResponsesAdapter
 from agent.config.settings import CompactionSettings, ResolvedLLMConfig, clear_runtime_settings_cache
 from agent.core.message import (
     Message,
     append_compaction_part,
     append_text_part,
     append_tool_call_part,
+    append_tool_part,
     append_tool_result_part,
     create_message,
     get_message_text,
@@ -38,6 +40,20 @@ def _build_chat_config() -> ResolvedLLMConfig:
         model="kimi-k2.5",
         max_tokens=32000,
         api_mode="chat_completions",
+        base_url="https://example.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+
+
+def _build_qwen_responses_config() -> ResolvedLLMConfig:
+    return ResolvedLLMConfig(
+        agent="build",
+        provider="qwen",
+        vendor="qwen",
+        model="qwen3.5-flash",
+        max_tokens=32000,
+        api_mode="responses",
         base_url="https://example.com/v1",
         api_key="test-key",
         timeout_seconds=30,
@@ -156,8 +172,11 @@ def test_compaction_summary_should_build_checkpoint_pair(tmp_path, monkeypatch):
     )
     clear_runtime_settings_cache()
     monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+    seen: dict[str, Any] = {}
 
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        seen["messages"] = messages
         session_id = messages[-1]["info"]["session_id"]
         assistant = create_message("assistant", session_id, status="completed", finish_reason="stop")
         append_text_part(assistant, "压缩后的摘要")
@@ -175,11 +194,190 @@ def test_compaction_summary_should_build_checkpoint_pair(tmp_path, monkeypatch):
     finally:
         clear_runtime_settings_cache()
 
+    summary_request = seen["messages"]
+    assert [message["info"]["role"] for message in summary_request] == ["system", "user", "user"]
+    assert "上下文恢复摘要" in get_message_text(summary_request[0])
+    assert "以下是会话内容" not in get_message_text(summary_request[0])
+    assert summary_request[1] is not user_message
+    assert get_message_text(summary_request[1]) == "原始上下文"
+    assert "请基于以上会话历史生成上下文压缩摘要" in get_message_text(summary_request[2])
+    assert "计划与 TODO" in get_message_text(summary_request[2])
+    assert "1. [user]" not in get_message_text(summary_request[2])
     assert len(compacted) == 3
     assert get_message_text(compacted[1]) == "以下历史消息已完成压缩总结，请结合下一条摘要继续当前任务。\n以下是历史对话摘要请求，请参考下一条 summary assistant。"
     assert compacted[2]["info"]["summary"] is True
     assert compacted[2]["info"]["parent_id"] == compacted[1]["info"]["message_id"]
     assert get_message_text(compacted[2]) == "压缩后的摘要"
+
+
+def test_compaction_summary_should_preserve_history_items_for_summary_request(monkeypatch):
+    seen: dict[str, Any] = {}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        seen["messages"] = messages
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed", finish_reason="stop")
+        append_text_part(assistant, "压缩后的摘要")
+        return assistant
+
+    monkeypatch.setattr(compaction_module, "create_chat_completion", fake_chat)
+
+    session_id = "s_compaction_tool_history"
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "读取文件")
+
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    append_tool_call_part(assistant_message, tool_call_id="call_1", name="read_file", arguments='{"path":"a.txt"}')
+
+    tool_message = create_message("tool", session_id, status="completed")
+    append_tool_result_part(tool_message, tool_call_id="call_1", name="read_file", content="hello")
+
+    compacted = compaction_module.compaction_summary(
+        [user_message, assistant_message, tool_message],
+        settings=CompactionSettings(summary_trigger_threshold=1),
+    )
+
+    summary_request = seen["messages"]
+    assert [message["info"]["role"] for message in summary_request] == ["system", "user", "assistant", "tool", "user"]
+    assert summary_request[1] is not user_message
+    assert summary_request[2] is not assistant_message
+    assert summary_request[3] is not tool_message
+    assert _tool_result_content(summary_request[3]) == "hello"
+    assert "请基于以上会话历史生成上下文压缩摘要" in get_message_text(summary_request[-1])
+    assert "1. [tool]" not in get_message_text(summary_request[-1])
+    assert compacted[-1]["info"]["summary"] is True
+
+
+def test_compaction_summary_prompt_should_prioritize_plan_and_todo_state(monkeypatch):
+    seen: dict[str, Any] = {}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        seen["messages"] = messages
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed", finish_reason="stop")
+        append_text_part(assistant, "压缩后的摘要")
+        return assistant
+
+    monkeypatch.setattr(compaction_module, "create_chat_completion", fake_chat)
+
+    session_id = "s_compaction_plan_todo"
+    plan_path = "/tmp/codepilot/workspaces/plan/s_compaction_plan_todo.md"
+
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "请先生成执行计划文件和 TODO List，再继续实现。")
+
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    append_tool_call_part(assistant_message, tool_call_id="call_plan", name="plan_enter", arguments=f'{{"plan_path":"{plan_path}"}}')
+    append_tool_call_part(
+        assistant_message,
+        tool_call_id="call_todo",
+        name="todo_write",
+        arguments='{"todo_list":[{"id":1,"text":"优化 compaction prompt","status":"in_progress","priority":"high"}]}',
+    )
+
+    plan_tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        plan_tool_message,
+        tool_call_id="call_plan",
+        name="plan_enter",
+        status="completed",
+        arguments=f'{{"plan_path":"{plan_path}"}}',
+        output={
+            "output": "等待用户确认是否切换到 plan 模式。",
+            "metadata": {"status": "confirmation_required", "plan_path": plan_path},
+        },
+    )
+
+    todo_tool_message = create_message("tool", session_id, status="completed")
+    append_tool_result_part(
+        todo_tool_message,
+        tool_call_id="call_todo",
+        name="todo_write",
+        content="[>] #1: 优化 compaction prompt (priority=high)\n\n(0/1 completed)",
+    )
+
+    compaction_module.compaction_summary(
+        [user_message, assistant_message, plan_tool_message, todo_tool_message],
+        settings=CompactionSettings(summary_trigger_threshold=1),
+    )
+
+    summary_request = seen["messages"]
+    system_prompt = get_message_text(summary_request[0])
+    compact_prompt = get_message_text(summary_request[-1])
+    assert "执行计划文件" in system_prompt
+    assert "TODO List" in system_prompt
+    assert "最高优先级" in system_prompt
+    assert "计划与 TODO" in compact_prompt
+    assert "todo_read/todo_write" in compact_prompt
+    assert "plan_path" in compact_prompt
+    assert summary_request[1] is not user_message
+    assert _tool_result_content(summary_request[3]) == "等待用户确认是否切换到 plan 模式。"
+    assert _tool_result_content(summary_request[4]) == "[>] #1: 优化 compaction prompt (priority=high)\n\n(0/1 completed)"
+
+
+def test_compaction_summary_should_strip_tool_file_attachments_from_summary_request(monkeypatch):
+    seen: dict[str, Any] = {}
+    adapter = QwenResponsesAdapter(_build_qwen_responses_config())
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        seen["messages"] = messages
+        seen["request"] = adapter.build_request(messages, tools=[])
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed", finish_reason="stop")
+        append_text_part(assistant, "压缩后的摘要")
+        return assistant
+
+    monkeypatch.setattr(compaction_module, "create_chat_completion", fake_chat)
+
+    session_id = "s_compaction_pdf_attachment"
+    user_message = create_message("user", session_id, status="completed")
+    append_text_part(user_message, "读取 PDF")
+
+    assistant_message = create_message("assistant", session_id, status="completed", finish_reason="tool_calls")
+    append_tool_call_part(assistant_message, tool_call_id="call_pdf", name="read_file", arguments='{"path":"demo.pdf"}')
+
+    tool_message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        tool_message,
+        tool_call_id="call_pdf",
+        name="read_file",
+        status="completed",
+        arguments='{"path":"demo.pdf"}',
+        output={
+            "output": "PDF read successfully",
+            "metadata": {"status": "completed"},
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "sessionID": session_id,
+                    "messageID": tool_message["info"]["message_id"],
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "filename": "demo.pdf",
+                    "url": "data:application/pdf;base64,QUJDRA==",
+                }
+            ],
+        },
+    )
+
+    compacted = compaction_module.compaction_summary(
+        [user_message, assistant_message, tool_message],
+        llm_config=_build_qwen_responses_config(),
+        settings=CompactionSettings(summary_trigger_threshold=1),
+    )
+
+    summary_tool_message = seen["messages"][3]
+    summary_tool_output = summary_tool_message["parts"][0]["state"]["output"]
+    original_tool_output = tool_message["parts"][0]["state"]["output"]
+    assert "attachments" not in summary_tool_output
+    assert original_tool_output["attachments"][0]["url"].startswith("data:application/pdf;base64,")
+    assert summary_tool_output["metadata"]["summary_omitted_file_attachments"] == [
+        {"filename": "demo.pdf", "mime": "application/pdf"}
+    ]
+    tool_outputs = [item for item in seen["request"]["input"] if item.get("type") == "function_call_output"]
+    assert tool_outputs[0]["output"] == "PDF read successfully"
+    assert "input_file" not in json.dumps(seen["request"], ensure_ascii=False)
+    assert compacted[-1]["info"]["summary"] is True
 
 
 def test_compaction_summary_should_compact_session_1_fixture_without_empty_tools(monkeypatch):

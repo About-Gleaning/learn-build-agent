@@ -9,7 +9,7 @@
       // 只有旧 tool result 的字符数大于这个阈值时，才会被替换成占位符。
       "tool_result_prune_min_chars": 100,
       // 触发摘要压缩的近似 token 阈值。上下文估算值超过它后，会生成 summary checkpoint。
-      "summary_trigger_threshold": 170000,
+      "summary_trigger_threshold": 30000,
       // 生成摘要压缩时，发给大模型的 max_tokens 上限。
       "summary_max_tokens": 12000,
       // 单次 tool 输出写回上下文前，允许保留的最大行数。

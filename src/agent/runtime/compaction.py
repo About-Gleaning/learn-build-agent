@@ -1,5 +1,6 @@
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -249,6 +250,49 @@ def _estimate_tokens(messages: list[Message]) -> int:
     return total
 
 
+def _strip_tool_file_attachments_for_summary(messages: list[Message]) -> list[Message]:
+    """构造摘要请求历史副本时剥离文件附件，避免重新上传 base64 大文件。"""
+    sanitized_messages = deepcopy(messages)
+    for message in sanitized_messages:
+        if get_role(message) != "tool":
+            continue
+        for part in message["parts"]:
+            if part.get("type") != "tool":
+                continue
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            output = state.get("output") if isinstance(state.get("output"), dict) else {}
+            attachments = output.get("attachments")
+            if not isinstance(attachments, list):
+                continue
+
+            omitted_files: list[dict[str, str]] = []
+            kept_attachments: list[Any] = []
+            for attachment in attachments:
+                if not isinstance(attachment, dict) or str(attachment.get("type", "")).strip() != "file":
+                    kept_attachments.append(attachment)
+                    continue
+                omitted_files.append(
+                    {
+                        "filename": str(attachment.get("filename") or "attachment"),
+                        "mime": str(attachment.get("mime") or "unknown"),
+                    }
+                )
+
+            if kept_attachments:
+                output["attachments"] = kept_attachments
+            else:
+                output.pop("attachments", None)
+
+            if omitted_files:
+                metadata = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
+                metadata["summary_omitted_file_attachments"] = omitted_files
+                output["metadata"] = metadata
+            state["output"] = output
+            part["state"] = state
+
+    return sanitized_messages
+
+
 def compaction_summary(
     messages: list[Message],
     *,
@@ -281,27 +325,31 @@ def compaction_summary(
     system_messages = [m for m in messages if get_role(m) == "system"]
     summarize_messages = [m for m in messages if get_role(m) != "system"]
 
-    lines = []
-    for i, msg in enumerate(summarize_messages, 1):
-        role = get_role(msg)
-        content = get_message_text(msg)
-        lines.append(f"{i}. [{role}] {content}")
+    summary_prompt = """
+你是负责生成上下文恢复摘要的 AI 助手。你的任务不是普通聊天总结，而是把压缩前的会话历史提炼成下一轮 agent 可以直接继续工作的恢复上下文。
 
-    summary_prompt = f"""
-你是一个乐于助人的 AI 助手，负责总结对话内容。
-当被要求进行总结时，请提供一份详尽但简洁的对话摘要。
-重点包含以下有助于继续对话的信息：
-已完成的工作
-当前正在处理的任务
-正在修改的文件
-下一步需要完成的事项
-用户的关键需求、约束条件或偏好（需持续关注）
-重要的技术决策及其原因
-你的摘要应足够全面以提供上下文，同时足够简洁以便快速理解。
+必须遵守：
+- 全程使用中文，保持简洁、结构化、可执行。
+- 忠实依据会话历史总结，不编造未出现的事实、文件、结论或测试结果。
+- 优先保留会影响后续执行的信息，删除闲聊、重复解释和已经无后续价值的中间过程。
+- 执行计划文件、TODO List、任务清单、checkpoint、未完成项属于最高优先级信息，必须保留路径、状态、优先级、依赖关系和下一步动作。
+- 保留当前目标、已完成工作、正在修改或需要继续检查的文件、关键技术决策及其原因。
+- 保留用户的关键需求、长期偏好、约束条件、安全要求和明确禁止事项。
+- 保留重要工具调用结论、验证结果、失败原因、阻塞点和风险；如果工具输出被截断或附件被省略，只记录可见结论、完整输出路径或后续读取建议，不假设完整内容。
+""".strip()
 
-以下是会话内容：
-{chr(10).join(lines)}
-"""
+    compact_prompt = """
+你正在执行一次**上下文检查点压缩**。请为另一个将继续此任务的 LLM 创建一份交接摘要。
+
+需要包含：
+
+* 当前进展与已做出的关键决策
+* 重要背景、约束条件或用户偏好
+* 还需要完成的事项（清晰的下一步）
+* 继续工作所需的任何关键数据、示例或参考信息
+
+要求：内容简洁、结构清晰，并重点帮助下一个 LLM 无缝继续这项工作。
+""".strip()
 
     summary_messages: list[Message] = []
     session_id = str(messages[-1]["info"].get("session_id", "")).strip()
@@ -309,12 +357,17 @@ def compaction_summary(
         raise ValueError("压缩上下文时缺少 session_id")
 
     system_message = create_message("system", session_id=session_id)
-    append_text_part(system_message, "你是一个擅长上下文压缩的助手，请输出简洁、结构化的中文摘要。")
+    append_text_part(system_message, summary_prompt)
     summary_messages.append(system_message)
 
-    user_message = create_message("user", session_id=session_id, status="completed")
-    append_text_part(user_message, summary_prompt)
-    summary_messages.append(user_message)
+    # 摘要调用需要看到原始消息结构，避免把 tool/assistant 历史压扁成一条 user 文本后丢失语义。
+    # 但 tool result 中的 PDF 等文件附件不能回传给摘要模型，否则会重复上传整份 base64 文件，
+    # 部分 provider 还会因为不支持附件输入直接失败。
+    summary_messages.extend(_strip_tool_file_attachments_for_summary(summarize_messages))
+
+    compact_message = create_message("user", session_id=session_id, status="completed")
+    append_text_part(compact_message, compact_prompt)
+    summary_messages.append(compact_message)
 
     logger.info(
         "compaction.summary_request token_size=%s summary_message_count=%s",

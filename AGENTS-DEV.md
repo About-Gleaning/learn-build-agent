@@ -211,6 +211,8 @@ LSP 查询请求
 - JSONL `message.meta.status` 必须表示可恢复历史的稳定状态；保存时应把已有内容或终止原因的 `pending/running` 消息归一化为 `completed`，但不得覆盖 `failed/interrupted` 等真实终态。
 - JSONL 追加单条消息是 O(1)，turn 结束和 compact 后的 `save_to_path` 是 O(n) 原子快照重写；文件写入必须使用临时文件加 rename/replace，避免半写损坏主文件。
 - 存储层默认不保存普通 system prompt；compact 后必须以第一条 `role=system` 摘要消息恢复上下文，并继续遵守 compaction checkpoint 裁剪；读取历史时必须经过 `normalize_history_prefix` 规范化，避免非法 tool 链片段直接作为会话起点。
+- 压缩摘要调用必须保留原始消息结构：摘要规则作为 system prompt，下游历史通过克隆后的 message items 传入，最后追加一条合成 user compact prompt；禁止把历史记录拼接成单条 user 文本后再发送给 LLM。
+- 压缩摘要内容必须优先保留执行计划文件、TODO List、任务清单、checkpoint、未完成项、关键路径、验证结论与下一步动作，确保 compact 后 agent 能恢复真实执行状态。
 - 会话持久化应通过四类内置 Hook 的具体实现接入：`SessionHook` 处理 user 与 turn 快照，`LoopHook` 处理完整 assistant 消息，`ToolHook` 处理工具结果，`LLMHook` 只保留 provider 调用观测，不直接做消息落库。
 - 同一轮 assistant 已由 `LoopPersistenceHook` 触发快照保存时，JSONL 增量追加 Hook 不得再次追加该 assistant，避免进程异常或中途读取时出现重复历史。
 - 清理会话必须走 `clear_session_memory` 或 `SessionMemoryStore.clear`，同时清理与该 session 绑定的待确认模式切换和待答问题状态。
