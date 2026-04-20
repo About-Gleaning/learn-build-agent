@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator
 import re
+import uuid
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,7 @@ from .schemas import (
     RuntimeOptionsVO,
     SessionClearedVO,
     SessionMessagesVO,
+    SessionStreamReq,
     StopSessionVO,
 )
 from .serializers import message_to_vo, messages_to_vos, split_stream_event, sse_event
@@ -78,6 +80,52 @@ def _stream_background_events(
         )
 
 
+def _stream_session(session_id: str, req: SessionStreamReq) -> Generator[str, None, None]:
+    normalized_client_run_id = (req.client_run_id or "").strip()
+    existing_run = RUN_MANAGER.get_run_by_client_id(session_id, normalized_client_run_id)
+    if existing_run is None and not (req.user_input or "").strip():
+        yield sse_event(
+            "error",
+            {
+                "code": "missing_user_input",
+                "message": "未找到可恢复的后台任务，首次创建 stream 时 user_input 不能为空。",
+                "session_id": session_id,
+                "client_run_id": normalized_client_run_id,
+            },
+        )
+        return
+
+    try:
+        run = RUN_MANAGER.create_or_get_run(
+            session_id=session_id,
+            client_run_id=normalized_client_run_id,
+            request_kind="chat",
+            event_source=lambda: session_runtime.run_session_stream_events(
+                user_input=(req.user_input or "").strip(),
+                session_id=session_id,
+                mode=req.mode,
+                provider=req.provider,
+                model=req.model,
+                provider_specified="provider" in req.model_fields_set,
+                model_specified="model" in req.model_fields_set,
+            ),
+        )
+        yield from _stream_existing_run(run.run_id, session_id)
+    except RunConflictError as exc:
+        active_run = RUN_MANAGER.get_active_run(session_id)
+        yield sse_event(
+            "error",
+            {
+                "code": "session_run_conflict",
+                "message": str(exc),
+                "session_id": session_id,
+                "client_run_id": normalized_client_run_id,
+                "active_run_id": active_run.run_id if active_run is not None else "",
+                "active_client_run_id": active_run.client_run_id if active_run is not None else "",
+            },
+        )
+
+
 def _normalize_session_id_or_raise(session_id: str) -> str:
     normalized_id = (session_id or "").strip()
     if not normalized_id:
@@ -89,17 +137,18 @@ def _normalize_session_id_or_raise(session_id: str) -> str:
 
 def _stream_chat(req: ChatStreamReq) -> Generator[str, None, None]:
     try:
-        yield from _stream_background_events(
+        session_req_payload: dict[str, object] = {
+            "client_run_id": f"run_legacy_{uuid.uuid4().hex[:12]}",
+            "user_input": req.user_input,
+            "mode": req.mode,
+        }
+        if "provider" in req.model_fields_set:
+            session_req_payload["provider"] = req.provider
+        if "model" in req.model_fields_set:
+            session_req_payload["model"] = req.model
+        yield from _stream_session(
             session_id=req.session_id,
-            event_source=lambda: session_runtime.run_session_stream_events(
-                user_input=req.user_input,
-                session_id=req.session_id,
-                mode=req.mode,
-                provider=req.provider,
-                model=req.model,
-                provider_specified="provider" in req.model_fields_set,
-                model_specified="model" in req.model_fields_set,
-            ),
+            req=SessionStreamReq(**session_req_payload),
         )
     except Exception as exc:  # pragma: no cover - 兜底分支
         yield sse_event(
@@ -318,6 +367,15 @@ def create_app() -> FastAPI:
     def chat_stream(req: ChatStreamReq) -> StreamingResponse:
         return StreamingResponse(
             _stream_chat(req),
+            media_type="text/event-stream",
+            headers=SSE_HEADERS,
+        )
+
+    @app.post("/api/sessions/{session_id}/stream")
+    def session_stream(session_id: str, req: SessionStreamReq) -> StreamingResponse:
+        normalized_id = _normalize_session_id_or_raise(session_id)
+        return StreamingResponse(
+            _stream_session(normalized_id, req),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
         )

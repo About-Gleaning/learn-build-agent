@@ -24,6 +24,8 @@ class RunRecord:
 
     run_id: str
     session_id: str
+    client_run_id: str = ""
+    request_kind: str = "chat"
     status: RunStatus = "running"
     created_at: str = field(default_factory=utc_now_iso)
     completed_at: str = ""
@@ -51,12 +53,15 @@ class RunManager:
         max_events_per_run: int = 1000,
         subscriber_queue_size: int = 256,
         completed_ttl_seconds: float = 600,
+        heartbeat_interval_seconds: float = 15,
     ) -> None:
         self._max_events_per_run = max_events_per_run
         self._subscriber_queue_size = subscriber_queue_size
         self._completed_ttl_seconds = completed_ttl_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._runs: dict[str, RunRecord] = {}
         self._active_by_session: dict[str, str] = {}
+        self._run_by_client_id: dict[tuple[str, str], str] = {}
         self._lock = threading.RLock()
 
     def create_run(
@@ -92,6 +97,60 @@ class RunManager:
         thread.start()
         return run
 
+    def create_or_get_run(
+        self,
+        *,
+        session_id: str,
+        client_run_id: str,
+        event_source: Callable[[], Iterable[dict[str, Any]]],
+        request_kind: str = "chat",
+    ) -> RunRecord:
+        """按前端幂等键创建或复用 run，避免断线重连造成重复提交。"""
+        normalized_session_id = (session_id or "").strip()
+        normalized_client_run_id = (client_run_id or "").strip()
+        if not normalized_session_id:
+            raise ValueError("session_id 不能为空")
+        if not normalized_client_run_id:
+            raise ValueError("client_run_id 不能为空")
+
+        with self._lock:
+            self._prune_locked()
+            client_key = (normalized_session_id, normalized_client_run_id)
+            existing_run_id = self._run_by_client_id.get(client_key, "")
+            if existing_run_id:
+                existing_run = self._runs.get(existing_run_id)
+                if existing_run is not None:
+                    existing_run.last_touched_at = time.monotonic()
+                    return existing_run
+                self._run_by_client_id.pop(client_key, None)
+
+            active_run_id = self._active_by_session.get(normalized_session_id, "")
+            if active_run_id:
+                active_run = self._runs.get(active_run_id)
+                if active_run is not None and active_run.status == "running":
+                    raise RunConflictError(f"当前会话已有任务正在执行：{active_run_id}")
+                self._active_by_session.pop(normalized_session_id, None)
+
+            run = RunRecord(
+                run_id=f"run_{uuid.uuid4().hex[:12]}",
+                session_id=normalized_session_id,
+                client_run_id=normalized_client_run_id,
+                request_kind=(request_kind or "chat").strip() or "chat",
+            )
+            self._runs[run.run_id] = run
+            self._active_by_session[normalized_session_id] = run.run_id
+            self._run_by_client_id[client_key] = run.run_id
+
+        thread = threading.Thread(
+            target=self._run_event_source,
+            args=(run.run_id, event_source),
+            name=f"agent-run-{run.run_id}",
+            daemon=True,
+        )
+        run.thread = thread
+        thread.start()
+        return run
+
     def subscribe(self, run_id: str) -> Iterator[dict[str, Any]]:
         subscriber: queue.Queue[dict[str, Any] | object] = queue.Queue(maxsize=self._subscriber_queue_size)
         with self._lock:
@@ -108,7 +167,14 @@ class RunManager:
 
         try:
             while True:
-                item = subscriber.get()
+                try:
+                    item = subscriber.get(timeout=self._heartbeat_interval_seconds)
+                except queue.Empty:
+                    heartbeat = self._build_heartbeat(run_id)
+                    if heartbeat is None:
+                        break
+                    yield heartbeat
+                    continue
                 if item is _SENTINEL:
                     break
                 if isinstance(item, dict):
@@ -123,6 +189,24 @@ class RunManager:
     def get_run(self, run_id: str) -> RunRecord | None:
         with self._lock:
             return self._runs.get(run_id)
+
+    def get_run_by_client_id(self, session_id: str, client_run_id: str) -> RunRecord | None:
+        normalized_session_id = (session_id or "").strip()
+        normalized_client_run_id = (client_run_id or "").strip()
+        if not normalized_session_id or not normalized_client_run_id:
+            return None
+
+        with self._lock:
+            self._prune_locked()
+            run_id = self._run_by_client_id.get((normalized_session_id, normalized_client_run_id), "")
+            if not run_id:
+                return None
+            run = self._runs.get(run_id)
+            if run is None:
+                self._run_by_client_id.pop((normalized_session_id, normalized_client_run_id), None)
+                return None
+            run.last_touched_at = time.monotonic()
+            return run
 
     def get_active_run(self, session_id: str) -> RunRecord | None:
         normalized_session_id = (session_id or "").strip()
@@ -147,6 +231,7 @@ class RunManager:
         with self._lock:
             self._runs.clear()
             self._active_by_session.clear()
+            self._run_by_client_id.clear()
 
     def _run_event_source(self, run_id: str, event_source: Callable[[], Iterable[dict[str, Any]]]) -> None:
         final_status: RunStatus = "completed"
@@ -232,6 +317,22 @@ class RunManager:
             run = self._runs.get(run_id)
             return run.session_id if run is not None else ""
 
+    def _build_heartbeat(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.status != "running":
+                return None
+            run.last_touched_at = time.monotonic()
+            payload: dict[str, Any] = {
+                "type": "heartbeat",
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "timestamp": utc_now_iso(),
+            }
+            if run.client_run_id:
+                payload["client_run_id"] = run.client_run_id
+            return payload
+
     def _prune_locked(self) -> None:
         now = time.monotonic()
         expired_run_ids = [
@@ -243,6 +344,8 @@ class RunManager:
             run = self._runs.pop(run_id, None)
             if run is not None:
                 self._active_by_session.pop(run.session_id, None)
+                if run.client_run_id:
+                    self._run_by_client_id.pop((run.session_id, run.client_run_id), None)
 
     def _offer_event(self, target_queue: queue.Queue[dict[str, Any] | object], event: dict[str, Any]) -> None:
         try:

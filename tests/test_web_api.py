@@ -9,9 +9,9 @@ from agent.core.message import append_text_part, append_tool_call_part, append_t
 from agent.runtime import session as session_runtime
 from agent.runtime.session import clear_session_memory, configure_session_memory_store, generate_session_id
 from agent.runtime.session_memory import InMemorySessionMemoryStore
-from agent.web.app import RUN_MANAGER, _stream_active_run, _stream_chat, create_app
+from agent.web.app import RUN_MANAGER, _stream_active_run, _stream_chat, _stream_session, create_app
 from agent.web.path_suggestions import PathSuggestion
-from agent.web.schemas import ChatStreamReq
+from agent.web.schemas import ChatStreamReq, SessionStreamReq
 from agent.web.serializers import message_to_vo, split_stream_event
 
 
@@ -391,6 +391,160 @@ def test_active_run_stream_should_resume_after_disconnect(monkeypatch):
     assert "tool_result" in event_names
     assert event_names[-1] == "done"
     assert RUN_MANAGER.get_active_run(session_id) is None
+
+
+def test_session_stream_should_reuse_client_run_without_duplicate_execution(monkeypatch):
+    RUN_MANAGER.clear()
+    session_id = generate_session_id("test_web_client_run")
+    allow_continue = threading.Event()
+    calls = {"count": 0}
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        del mode, kwargs
+        calls["count"] += 1
+        assert user_input == "创建文件"
+        yield {
+            "type": "start",
+            "event_id": "evt_client_start",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+        }
+        allow_continue.wait(timeout=2)
+        yield {
+            "type": "done",
+            "event_id": "evt_client_done",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "msg_client_done",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {},
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+
+    first_stream = _stream_session(
+        session_id,
+        SessionStreamReq(client_run_id="run_test_client_once", user_input="创建文件", mode="build"),
+    )
+    try:
+        first_chunk = next(first_stream)
+        assert "event: start" in first_chunk
+
+        second_stream = _stream_session(
+            session_id,
+            SessionStreamReq(client_run_id="run_test_client_once", mode="build"),
+        )
+        try:
+            replay_chunk = next(second_stream)
+            assert "event: start" in replay_chunk
+        finally:
+            second_stream.close()
+
+        assert calls["count"] == 1
+    finally:
+        allow_continue.set()
+        first_stream.close()
+
+
+def test_session_stream_should_require_user_input_when_client_run_missing():
+    RUN_MANAGER.clear()
+    session_id = generate_session_id("test_web_missing_input")
+
+    body = "".join(_stream_session(session_id, SessionStreamReq(client_run_id="run_missing_input", mode="build")))
+    events = _stream_events(body)
+
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "missing_user_input"
+    assert events[-1][1]["client_run_id"] == "run_missing_input"
+
+
+def test_session_stream_should_replay_completed_client_run_without_duplicate_execution(monkeypatch):
+    RUN_MANAGER.clear()
+    session_id = generate_session_id("test_web_client_done")
+    calls = {"count": 0}
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        del mode, kwargs
+        calls["count"] += 1
+        assert user_input == "创建文件"
+        yield {
+            "type": "start",
+            "event_id": "evt_client_done_start",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+        }
+        yield {
+            "type": "done",
+            "event_id": "evt_client_done_done",
+            "session_id": session_id,
+            "agent": "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "msg_client_done",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {},
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+
+    first_body = "".join(
+        _stream_session(
+            session_id,
+            SessionStreamReq(client_run_id="run_test_client_done", user_input="创建文件", mode="build"),
+        )
+    )
+    second_body = "".join(
+        _stream_session(
+            session_id,
+            SessionStreamReq(client_run_id="run_test_client_done", mode="build"),
+        )
+    )
+
+    first_events = _stream_events(first_body)
+    second_events = _stream_events(second_body)
+
+    assert calls["count"] == 1
+    assert [event_name for event_name, _payload in first_events] == ["start", "done"]
+    assert [event_name for event_name, _payload in second_events] == ["start", "done"]
+
+
+def test_run_manager_heartbeat_should_not_pollute_cached_events():
+    manager = type(RUN_MANAGER)(heartbeat_interval_seconds=0.01)
+    allow_continue = threading.Event()
+
+    def events():
+        yield {"type": "start", "event_id": "evt_hb_start", "session_id": "s_hb"}
+        allow_continue.wait(timeout=0.1)
+        yield {"type": "done", "event_id": "evt_hb_done", "session_id": "s_hb", "status": "completed"}
+
+    run = manager.create_or_get_run(session_id="s_hb", client_run_id="run_hb", event_source=events)
+    subscription = manager.subscribe(run.run_id)
+    try:
+        first_event = next(subscription)
+        heartbeat = next(subscription)
+    finally:
+        allow_continue.set()
+        subscription.close()
+
+    assert first_event["type"] == "start"
+    assert heartbeat["type"] == "heartbeat"
+    assert all(event["type"] != "heartbeat" for event in manager.get_run(run.run_id).events)
 
 
 def test_active_run_stream_should_return_no_active_run_when_idle():

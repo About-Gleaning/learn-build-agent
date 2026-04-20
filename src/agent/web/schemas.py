@@ -86,6 +86,14 @@ class ChatStreamReq(BaseModel):
     model: str | None = None
 
 
+class SessionStreamReq(BaseModel):
+    client_run_id: str = Field(min_length=1, max_length=96, pattern=r"^run_[A-Za-z0-9_-]+$")
+    user_input: str | None = Field(default=None, min_length=1, max_length=8000)
+    mode: Literal["build", "plan"] = "build"
+    provider: str | None = None
+    model: str | None = None
+
+
 class MessageVO(BaseModel):
     message_id: str
     role: str

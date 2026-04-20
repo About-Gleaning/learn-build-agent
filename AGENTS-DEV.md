@@ -212,7 +212,7 @@ LSP 查询请求
 - JSONL 追加单条消息是 O(1)，turn 结束和 compact 后的 `save_to_path` 是 O(n) 原子快照重写；文件写入必须使用临时文件加 rename/replace，避免半写损坏主文件。
 - 存储层默认不保存普通 system prompt；compact 后必须以第一条 `role=system` 摘要消息恢复上下文，并继续遵守 compaction checkpoint 裁剪；读取历史时必须经过 `normalize_history_prefix` 规范化，避免非法 tool 链片段直接作为会话起点。
 - 压缩摘要调用必须保留原始消息结构：摘要规则作为 system prompt，下游历史通过克隆后的 message items 传入，最后追加一条合成 user compact prompt；禁止把历史记录拼接成单条 user 文本后再发送给 LLM。
-- 压缩摘要内容必须优先保留执行计划文件、TODO List、任务清单、checkpoint、未完成项、关键路径、验证结论与下一步动作，确保 compact 后 agent 能恢复真实执行状态。
+- 压缩摘要内容必须优先保留任务目标、成功标准、交付物、范围边界、明确禁止事项、执行计划文件、TODO List、任务清单、checkpoint、未完成项、关键路径、验证结论与下一步动作，确保 compact 后 agent 能恢复真实执行状态。
 - 会话持久化应通过四类内置 Hook 的具体实现接入：`SessionHook` 处理 user 与 turn 快照，`LoopHook` 处理完整 assistant 消息，`ToolHook` 处理工具结果，`LLMHook` 只保留 provider 调用观测，不直接做消息落库。
 - 同一轮 assistant 已由 `LoopPersistenceHook` 触发快照保存时，JSONL 增量追加 Hook 不得再次追加该 assistant，避免进程异常或中途读取时出现重复历史。
 - 清理会话必须走 `clear_session_memory` 或 `SessionMemoryStore.clear`，同时清理与该 session 绑定的待确认模式切换和待答问题状态。
@@ -231,6 +231,10 @@ LSP 查询请求
 - `codepilot web` 支持按工作区并行启动多套实例。
 - 端口冲突时必须自动分配空闲端口，并把实际前后端地址写入当前工作区对应状态文件。
 - Web 前端默认必须走同源 `/api` 代理，由当前 Vite 实例转发到本工作区后端；禁止在 `codepilot web` 启动链路中把前端固定到某个后端端口。
+- 普通聊天流式请求统一走 `POST /api/sessions/{session_id}/stream`，前端必须提供稳定的 `client_run_id` 作为幂等键；断线重连时复用同一个 `client_run_id`，禁止重复提交用户输入。
+- Web 后台 Run 必须允许 SSE 连接断开后继续执行；订阅空闲时可发送不落库的 `heartbeat` 保活事件，前端不得把 heartbeat 展示到消息流或过程时间线。
+- 前端流式读取必须具备静默超时与重连兜底；恢复同一 run 时必须按 `event_id` 去重，避免重复追加文本、工具调用、diff 或工具结果。
+- 前端本地 pending run 只作为刷新后恢复订阅的线索，真实任务状态以后端 RunManager 与 Session Memory 为准；页面初始化时历史加载结果不得覆盖已经恢复中的 live stream 占位消息。
 - `codepilot web prune` 必须扫描全部工作区状态，只清理 `degraded/stale` 异常残留，并同时尝试停止登记的前后端 PID，保留健康实例。
 - `codepilot web prune` 对未登记的疑似 Web 后端监听进程只做报告提示，禁止默认 kill，避免误伤用户手动启动的服务。
 - `codepilot web stop --all` 必须扫描全部工作区状态，停止所有已登记实例并移除状态文件；未登记疑似进程只做报告提示，禁止默认 kill。
