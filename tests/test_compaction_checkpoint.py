@@ -201,6 +201,9 @@ def test_compaction_summary_should_build_checkpoint_pair(tmp_path, monkeypatch):
     assert summary_request[1] is not user_message
     assert get_message_text(summary_request[1]) == "原始上下文"
     assert "请基于以上会话历史生成上下文压缩摘要" in get_message_text(summary_request[2])
+    assert "## 任务目标" in get_message_text(summary_request[2])
+    assert "成功标准" in get_message_text(summary_request[2])
+    assert "预期交付物" in get_message_text(summary_request[2])
     assert "计划与 TODO" in get_message_text(summary_request[2])
     assert "1. [user]" not in get_message_text(summary_request[2])
     assert len(compacted) == 3
@@ -304,6 +307,11 @@ def test_compaction_summary_prompt_should_prioritize_plan_and_todo_state(monkeyp
     summary_request = seen["messages"]
     system_prompt = get_message_text(summary_request[0])
     compact_prompt = get_message_text(summary_request[-1])
+    assert "任务目标是最高优先级恢复信息" in system_prompt
+    assert "用户最初或最新明确要求解决的问题" in system_prompt
+    assert "当前有效目标" in system_prompt
+    assert "## 任务目标" in compact_prompt
+    assert "范围边界" in compact_prompt
     assert "执行计划文件" in system_prompt
     assert "TODO List" in system_prompt
     assert "最高优先级" in system_prompt
