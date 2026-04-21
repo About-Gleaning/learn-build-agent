@@ -12,6 +12,7 @@ from ..config.logging_setup import init_logging
 from ..config.settings import build_runtime_options
 from ..runtime.run_manager import RunConflictError, RunManager
 from ..runtime import session as session_runtime
+from ..runtime.prompt_optimizer import optimize_prompt
 from ..runtime.workspace import configure_workspace, get_workspace
 from .path_suggestions import record_path_selection, suggest_workspace_paths
 from .schemas import (
@@ -21,6 +22,8 @@ from .schemas import (
     PathSelectionReq,
     PathSelectionVO,
     PathSuggestionsVO,
+    PromptOptimizeReq,
+    PromptOptimizeVO,
     QuestionActionVO,
     QuestionAnswerReq,
     RuntimeOptionsVO,
@@ -370,6 +373,25 @@ def create_app() -> FastAPI:
             _stream_chat(req),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
+        )
+
+    @app.post("/api/prompts/optimize", response_model=PromptOptimizeVO)
+    def prompt_optimize(req: PromptOptimizeReq) -> PromptOptimizeVO:
+        try:
+            optimized_prompt, provider, model = optimize_prompt(
+                req.prompt,
+                mode=req.mode,
+                provider=req.provider,
+                model=req.model,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return PromptOptimizeVO(
+            optimized_prompt=optimized_prompt,
+            provider=provider,
+            model=model,
         )
 
     @app.post("/api/sessions/{session_id}/stream")

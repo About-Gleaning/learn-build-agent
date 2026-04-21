@@ -192,6 +192,12 @@ type RuntimeOptionsResp = {
   launch_mode: string;
 };
 
+type PromptOptimizeResp = {
+  optimized_prompt: string;
+  provider: string;
+  model: string;
+};
+
 type ProviderModelOption = {
   key: string;
   provider: string;
@@ -632,6 +638,31 @@ async function recordPathSelection(relativePath: string): Promise<void> {
   if (!resp.ok) {
     throw new Error(`路径选择记录失败: ${resp.status}`);
   }
+}
+
+async function optimizePromptRequest(params: {
+  prompt: string;
+  mode: AgentName;
+  provider: string;
+  model: string;
+}): Promise<PromptOptimizeResp> {
+  const resp = await fetch(`${API_BASE}/api/prompts/optimize`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      prompt: params.prompt,
+      mode: params.mode,
+      provider: params.provider,
+      model: params.model,
+    }),
+  });
+  if (!resp.ok) {
+    const payload = (await resp.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(payload.detail || `Prompt 优化失败: ${resp.status}`);
+  }
+  return (await resp.json()) as PromptOptimizeResp;
 }
 
 function emptyResponseMeta(): ResponseMeta {
@@ -2742,6 +2773,7 @@ export function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isApplyingModeSwitch, setIsApplyingModeSwitch] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+  const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
   const [shouldFollow, setShouldFollow] = useState(true);
   const [mode, setMode] = useState<AgentName>(() => persistedRuntimeSelectionRef.current.mode || "build");
   const [providerModelKey, setProviderModelKey] = useState(() => persistedRuntimeSelectionRef.current.providerModelKey);
@@ -2851,9 +2883,10 @@ export function App() {
       !isStreaming &&
       !isApplyingModeSwitch &&
       !isStopping &&
+      !isOptimizingPrompt &&
       !isLoadingSession &&
       !hasWorkspaceMismatch,
-    [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping, isLoadingSession, hasWorkspaceMismatch],
+    [input, activeQuestion, isStreaming, isApplyingModeSwitch, isStopping, isOptimizingPrompt, isLoadingSession, hasWorkspaceMismatch],
   );
   useEffect(() => {
     if (!shouldShowSlashMenu) {
@@ -2990,6 +3023,19 @@ export function App() {
     }
     return providerModelOptions[0]?.key || "";
   }, [mode, modeDefaults, providerDefaults, providerModelOptions]);
+  const selectedComposerRuntime = useMemo(() => {
+    if (selectedProviderModel) {
+      return selectedProviderModel;
+    }
+    if (!defaultProviderModelKey) {
+      return null;
+    }
+    return {
+      key: defaultProviderModelKey,
+      label: defaultProviderModelKey,
+      ...parseProviderModelKey(defaultProviderModelKey),
+    };
+  }, [defaultProviderModelKey, selectedProviderModel]);
 
   const updateModeSelection = (nextMode: AgentName, nextProviderModelKey = providerModelKey) => {
     setMode(nextMode);
@@ -3102,7 +3148,7 @@ export function App() {
     questionOptionsRef.current?.focus();
   }, [activeQuestion, questionCursor, questionFocus]);
 
-  const isSessionInteractionLocked = isRuntimeBusy || isLoadingSession || hasWorkspaceMismatch;
+  const isSessionInteractionLocked = isRuntimeBusy || isOptimizingPrompt || isLoadingSession || hasWorkspaceMismatch;
 
   const resetTransientUiState = () => {
     setError("");
@@ -3116,6 +3162,7 @@ export function App() {
     setActiveProvider("");
     setActiveModel("");
     setIsStopping(false);
+    setIsOptimizingPrompt(false);
     setReasoningCollapsedState({});
     activeTurnRef.current = null;
     activeStreamControllerRef.current = null;
@@ -3778,6 +3825,7 @@ export function App() {
       isStreaming ||
       isApplyingModeSwitch ||
       isStopping ||
+      isOptimizingPrompt ||
       isLoadingSession ||
       hasWorkspaceMismatch
     ) {
@@ -3862,15 +3910,6 @@ export function App() {
     const controller = new AbortController();
     activeStreamControllerRef.current = controller;
     let wasAborted = false;
-    const selectedRuntime =
-      selectedProviderModel ||
-      (defaultProviderModelKey
-        ? {
-            key: defaultProviderModelKey,
-            label: defaultProviderModelKey,
-            ...parseProviderModelKey(defaultProviderModelKey),
-          }
-        : null);
 
     try {
       let completion = await streamSession({
@@ -3878,8 +3917,8 @@ export function App() {
         clientRunId,
         userInput: trimmed,
         mode,
-        provider: selectedRuntime?.provider || "",
-        model: selectedRuntime?.model || "",
+        provider: selectedComposerRuntime?.provider || "",
+        model: selectedComposerRuntime?.model || "",
         onDelta: () => {},
         onEvent: (eventName, payload) => {
           applyLiveStreamEvent(assistantId, eventName, payload);
@@ -3962,6 +4001,53 @@ export function App() {
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     await submitComposerText(input);
+  };
+
+  const handleOptimizePrompt = async () => {
+    const originalPrompt = input.trim();
+    if (
+      !originalPrompt ||
+      activeQuestion ||
+      isStreaming ||
+      isApplyingModeSwitch ||
+      isStopping ||
+      isOptimizingPrompt ||
+      isLoadingSession ||
+      hasWorkspaceMismatch
+    ) {
+      return;
+    }
+
+    setError("");
+    try {
+      await copyTextToClipboard(originalPrompt);
+    } catch (err) {
+      setError((err as Error).message || "原 prompt 复制失败，但已继续优化。");
+    }
+
+    setIsOptimizingPrompt(true);
+    try {
+      const result = await optimizePromptRequest({
+        prompt: originalPrompt,
+        mode,
+        provider: selectedComposerRuntime?.provider || "",
+        model: selectedComposerRuntime?.model || "",
+      });
+      const nextPrompt = result.optimized_prompt.trim();
+      if (!nextPrompt) {
+        throw new Error("Prompt 优化结果为空");
+      }
+      setInput(nextPrompt);
+      window.requestAnimationFrame(() => {
+        const textarea = composerTextareaRef.current;
+        textarea?.focus();
+        textarea?.setSelectionRange(nextPrompt.length, nextPrompt.length);
+      });
+    } catch (err) {
+      setError((err as Error).message || "Prompt 优化失败");
+    } finally {
+      setIsOptimizingPrompt(false);
+    }
   };
 
   const handleMessageScroll = () => {
@@ -4885,7 +4971,7 @@ export function App() {
                   id="agent-mode"
                   value={mode}
                   onChange={(e) => updateModeSelection(e.target.value as AgentName)}
-                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isOptimizingPrompt || isQuestionMode || isLoadingSession}
                   className="terminal-select"
                 >
                   {agentOptions.map((item) => (
@@ -4902,7 +4988,7 @@ export function App() {
                   id="provider-name"
                   value={providerModelKey}
                   onChange={(e) => updateProviderModelSelection(e.target.value)}
-                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
+                  disabled={isStreaming || isApplyingModeSwitch || isStopping || isOptimizingPrompt || isQuestionMode || isLoadingSession}
                   className="terminal-select"
                 >
                   {providerModelOptions.map((item) => (
@@ -4915,7 +5001,7 @@ export function App() {
               <button
                 type="button"
                 onClick={() => setReasoningDefaultCollapsed((prev) => !prev)}
-                disabled={isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
+                disabled={isApplyingModeSwitch || isStopping || isOptimizingPrompt || isQuestionMode || isLoadingSession}
                 className="plain-btn terminal-inline-btn"
               >
                 {reasoningDefaultCollapsed ? "思考默认收起" : "思考默认展开"}
@@ -4923,7 +5009,7 @@ export function App() {
               <button
                 type="button"
                 onClick={() => void refreshRuntimeOptions()}
-                disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping || isQuestionMode || isLoadingSession}
+                disabled={isLoadingOptions || isStreaming || isApplyingModeSwitch || isStopping || isOptimizingPrompt || isQuestionMode || isLoadingSession}
                 className="plain-btn terminal-inline-btn"
               >
                 {isLoadingOptions ? "刷新中..." : "刷新配置"}
@@ -5093,7 +5179,7 @@ export function App() {
                     rows={3}
                     onKeyDown={onComposerKeyDown}
                     aria-label="消息输入框"
-                    disabled={isApplyingModeSwitch || isStopping || isLoadingSession}
+                    disabled={isApplyingModeSwitch || isStopping || isOptimizingPrompt || isLoadingSession}
                   />
                 </div>
               )}
@@ -5103,6 +5189,25 @@ export function App() {
                   {isQuestionMode ? <span>左右键切题，上下键选项，Tab 切换到 notes</span> : null}
                 </div>
                 <div className="composer-actions">
+                  {!isQuestionMode ? (
+                    <button
+                      type="button"
+                      className="plain-btn prompt-optimize-btn"
+                      disabled={
+                        !input.trim() ||
+                        isStreaming ||
+                        isApplyingModeSwitch ||
+                        isStopping ||
+                        isOptimizingPrompt ||
+                        isLoadingSession ||
+                        hasWorkspaceMismatch
+                      }
+                      onClick={() => void handleOptimizePrompt()}
+                      title="复制原 prompt，并用 AI 优化当前输入"
+                    >
+                      {isOptimizingPrompt ? "优化中..." : "AI"}
+                    </button>
+                  ) : null}
                   {isQuestionMode ? (
                     <button
                       type="button"

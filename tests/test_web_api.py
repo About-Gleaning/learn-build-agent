@@ -164,6 +164,62 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     assert done_payload["display_parts"][0]["kind"] == "assistant_text"
 
 
+def test_prompt_optimize_should_return_optimized_prompt(monkeypatch):
+    captured = {}
+
+    def fake_optimize_prompt(prompt: str, *, mode: str = "build", provider: str | None = None, model: str | None = None):
+        captured.update(
+            {
+                "prompt": prompt,
+                "mode": mode,
+                "provider": provider,
+                "model": model,
+            }
+        )
+        return "优化后的 prompt", "gpt", "gpt-4.1"
+
+    monkeypatch.setattr("agent.web.app.optimize_prompt", fake_optimize_prompt)
+
+    app = create_app()
+    client = TestClient(app)
+    resp = client.post(
+        "/api/prompts/optimize",
+        json={
+            "prompt": "写一个接口",
+            "mode": "plan",
+            "provider": "gpt",
+            "model": "gpt-4.1",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "optimized_prompt": "优化后的 prompt",
+        "provider": "gpt",
+        "model": "gpt-4.1",
+    }
+    assert captured == {
+        "prompt": "写一个接口",
+        "mode": "plan",
+        "provider": "gpt",
+        "model": "gpt-4.1",
+    }
+
+
+def test_prompt_optimize_should_return_bad_gateway_on_llm_error(monkeypatch):
+    def fake_optimize_prompt(*args, **kwargs):
+        raise RuntimeError("LLM 优化 prompt 失败")
+
+    monkeypatch.setattr("agent.web.app.optimize_prompt", fake_optimize_prompt)
+
+    app = create_app()
+    client = TestClient(app)
+    resp = client.post("/api/prompts/optimize", json={"prompt": "写一个接口"})
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "LLM 优化 prompt 失败"
+
+
 def test_session_stream_should_treat_empty_provider_model_as_unspecified(monkeypatch):
     captured = {}
 

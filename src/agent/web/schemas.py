@@ -94,6 +94,19 @@ class SessionStreamReq(BaseModel):
     model: str | None = None
 
 
+class PromptOptimizeReq(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8000)
+    mode: Literal["build", "plan"] = "build"
+    provider: str | None = None
+    model: str | None = None
+
+
+class PromptOptimizeVO(BaseModel):
+    optimized_prompt: str
+    provider: str = ""
+    model: str = ""
+
+
 class MessageVO(BaseModel):
     message_id: str
     role: str

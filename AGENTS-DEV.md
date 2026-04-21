@@ -40,6 +40,7 @@
 - `src/agent/runtime/delegation_hooks.py`：Subagent 委派生命周期 Hook 归口
 - `src/agent/runtime/plugin_hooks.py`：插件扩展 Hook 执行器，支持 `command` / `http` / `prompt` / `agent`
 - `src/agent/runtime/stream_display.py`：流式事件、`process_items`、`display_parts` 与响应摘要拼装
+- `src/agent/runtime/prompt_optimizer.py`：输入框 Prompt 优化辅助，复用 LLM 调用但不进入会话历史
 - `src/agent/runtime/tool_executor.py`：工具执行与 Tool Hook 调度
 - `src/agent/runtime/agents.py`：Agent 元信息唯一来源
 - `src/agent/runtime/workspace.py`：工作区根目录、运行态目录与 `CODEPILOT_HOME` 解析
@@ -142,6 +143,8 @@ LLM 返回 tool_calls
 ```
 
 Web 流式接口必须把任务执行和 SSE 连接生命周期解耦：`/api/chat/stream`、模式切换确认、问题回答/拒绝等会继续推进会话的流式请求，应先创建后台 Run，再由 SSE 订阅 Run 事件。浏览器刷新、网络断开或前端主动关闭 reader 只能移除当前订阅者，不能中断后台 agent loop；只有显式 stop 请求才表示用户希望停止会话。
+
+`/api/prompts/optimize` 是输入框编辑辅助接口，只复用当前运行时 LLM 配置做 Prompt 润色；它不创建 Run、不写 Session Memory，也不触发工具链。
 
 ### 3.5 LSP 链路
 
