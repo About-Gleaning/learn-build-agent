@@ -238,6 +238,7 @@ LSP 查询请求
 - 前端本地 pending run 只作为刷新后恢复订阅的线索，真实任务状态以后端 RunManager 与 Session Memory 为准；页面初始化时历史加载结果不得覆盖已经恢复中的 live stream 占位消息。
 - `codepilot web prune` 必须扫描全部工作区状态，只清理 `degraded/stale` 异常残留，并同时尝试停止登记的前后端 PID，保留健康实例。
 - `codepilot web prune` 对未登记的疑似 Web 后端监听进程只做报告提示，禁止默认 kill，避免误伤用户手动启动的服务。
+- `codepilot web status --all` 必须扫描全部工作区状态，只展示 `running/degraded/stale` 等需关注实例；正常关闭实例不展示，未登记疑似进程只做报告提示。
 - `codepilot web stop --all` 必须扫描全部工作区状态，停止所有已登记实例并移除状态文件；未登记疑似进程只做报告提示，禁止默认 kill。
 - Web 前端必须校验后端返回的 `workspace_root` 是否与当前实例预期工作区一致；若不一致，必须阻断继续聊天。
 
@@ -396,6 +397,7 @@ codepilot
 codepilot --help
 codepilot web start --host 127.0.0.1 --port 8000
 codepilot web status
+codepilot web status --all
 codepilot web stop
 codepilot web stop --all
 codepilot web prune

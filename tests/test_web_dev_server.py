@@ -757,6 +757,131 @@ def test_format_web_stack_stop_all_report_should_include_unmanaged_processes(tmp
     assert "PID 301" in output
 
 
+def test_format_web_stack_status_all_report_should_include_running_and_residual_instances(tmp_path):
+    running = web_dev_server_module.WebStackInspection(
+        state_path=tmp_path / "running" / "state.json",
+        state=web_dev_server_module.WebStackState(
+            workspace_root="/tmp/running",
+            host="0.0.0.0",
+            port=8000,
+            backend_pid=101,
+            frontend_pid=201,
+            backend_url="http://127.0.0.1:8000",
+            frontend_url="http://127.0.0.1:5173",
+            backend_log_path="/tmp/running-backend.log",
+            frontend_log_path="/tmp/running-frontend.log",
+            started_at=123.0,
+            status="running",
+            frontend_port=5173,
+        ),
+        status="running",
+        backend_alive=True,
+        frontend_alive=True,
+        backend_ready=True,
+        frontend_ready=True,
+    )
+    degraded = web_dev_server_module.WebStackInspection(
+        state_path=tmp_path / "degraded" / "state.json",
+        state=web_dev_server_module.WebStackState(
+            workspace_root="/tmp/degraded",
+            host="0.0.0.0",
+            port=8001,
+            backend_pid=102,
+            frontend_pid=202,
+            backend_url="http://127.0.0.1:8001",
+            frontend_url="http://127.0.0.1:5174",
+            backend_log_path="/tmp/degraded-backend.log",
+            frontend_log_path="/tmp/degraded-frontend.log",
+            started_at=123.0,
+            status="running",
+            frontend_port=5174,
+        ),
+        status="degraded",
+        backend_alive=True,
+        frontend_alive=False,
+        backend_ready=True,
+        frontend_ready=False,
+    )
+    stale = web_dev_server_module.WebStackInspection(
+        state_path=tmp_path / "stale" / "state.json",
+        state=web_dev_server_module.WebStackState(
+            workspace_root="/tmp/stale",
+            host="0.0.0.0",
+            port=8002,
+            backend_pid=103,
+            frontend_pid=203,
+            backend_url="http://127.0.0.1:8002",
+            frontend_url="http://127.0.0.1:5175",
+            backend_log_path="/tmp/stale-backend.log",
+            frontend_log_path="/tmp/stale-frontend.log",
+            started_at=123.0,
+            status="running",
+            frontend_port=5175,
+        ),
+        status="stale",
+        backend_alive=False,
+        frontend_alive=False,
+        backend_ready=False,
+        frontend_ready=False,
+    )
+
+    output = web_dev_server_module.format_web_stack_status_all_report([running, degraded, stale])
+
+    assert "扫描完成：共 3 个需关注实例，运行中 1 个，异常残留 1 个，失效残留 1 个。" in output
+    assert "运行中 | 工作区: /tmp/running" in output
+    assert "异常残留 | 工作区: /tmp/degraded" in output
+    assert "失效残留 | 工作区: /tmp/stale" in output
+    assert "backend_pid=up" in output
+    assert "frontend_port=closed" in output
+
+
+def test_format_web_stack_status_all_report_should_skip_stopped_instances(tmp_path):
+    stopped = web_dev_server_module.WebStackInspection(
+        state_path=tmp_path / "stopped" / "state.json",
+        state=web_dev_server_module.WebStackState(
+            workspace_root="/tmp/stopped",
+            host="0.0.0.0",
+            port=8000,
+            backend_pid=101,
+            frontend_pid=201,
+            backend_url="http://127.0.0.1:8000",
+            frontend_url="http://127.0.0.1:5173",
+            backend_log_path="/tmp/stopped-backend.log",
+            frontend_log_path="/tmp/stopped-frontend.log",
+            started_at=123.0,
+            status="stopped",
+            frontend_port=5173,
+        ),
+        status="stopped",
+        backend_alive=False,
+        frontend_alive=False,
+        backend_ready=False,
+        frontend_ready=False,
+    )
+
+    output = web_dev_server_module.format_web_stack_status_all_report([stopped])
+
+    assert output == "未发现运行中或异常残留的 Web 开发栈实例。"
+    assert "/tmp/stopped" not in output
+
+
+def test_format_web_stack_status_all_report_should_include_unmanaged_processes():
+    output = web_dev_server_module.format_web_stack_status_all_report(
+        [],
+        unmanaged_processes=[
+            web_dev_server_module.UnmanagedWebProcess(
+                pid=301,
+                port=8000,
+                command="python -m uvicorn agent.web.app:app --port 8000",
+            )
+        ],
+    )
+
+    assert "未登记的疑似 codepilot Web 后端监听进程" in output
+    assert "status --all 不会自动停止它们" in output
+    assert "PID 301" in output
+
+
 def test_format_web_stack_status_should_include_runtime_file_paths(monkeypatch, tmp_path):
     state = web_dev_server_module.WebStackState(
         workspace_root=str(tmp_path),

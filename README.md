@@ -83,6 +83,7 @@ codepilot web start --host 127.0.0.1 --port 8000
 ```bash
 codepilot web --help
 codepilot web status
+codepilot web status --all
 codepilot web stop
 codepilot web stop --all
 codepilot web prune

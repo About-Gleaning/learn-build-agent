@@ -69,6 +69,7 @@ def test_help_text_should_cover_parser_arguments():
     assert "--session SESSION" in output
     assert "--mode {build,plan}" in output
     assert "codepilot web status" in output
+    assert "codepilot web status --all" in output
     assert "codepilot web stop" in output
     assert "codepilot web stop --all" in output
     assert "codepilot web prune" in output
@@ -158,6 +159,17 @@ def test_main_should_route_web_status(monkeypatch, tmp_path):
     assert captured == {"status": True}
 
 
+def test_main_should_route_web_status_all(monkeypatch, tmp_path):
+    captured: dict[str, bool] = {}
+
+    monkeypatch.setattr(cli_module, "configure_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_module, "run_web_status_all", lambda: captured.update({"status_all": True}))
+
+    cli_module.main(["--workdir", str(tmp_path), "web", "status", "--all"])
+
+    assert captured == {"status_all": True}
+
+
 def test_main_should_route_web_stop(monkeypatch, tmp_path):
     captured: dict[str, bool] = {}
 
@@ -180,11 +192,11 @@ def test_main_should_route_web_stop_all(monkeypatch, tmp_path):
     assert captured == {"stop_all": True}
 
 
-def test_main_should_reject_web_all_for_non_stop_action(monkeypatch, tmp_path, capsys):
+def test_main_should_reject_web_all_for_unsupported_action(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli_module, "configure_workspace", lambda *args, **kwargs: None)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_module.main(["--workdir", str(tmp_path), "web", "status", "--all"])
+        cli_module.main(["--workdir", str(tmp_path), "web", "prune", "--all"])
 
     assert exc_info.value.code == 2
     assert "--all 仅支持" in capsys.readouterr().err

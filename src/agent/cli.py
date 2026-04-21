@@ -11,9 +11,11 @@ from .runtime.web_dev_server import (
     WebStackError,
     find_unmanaged_web_processes,
     format_web_stack_prune_report,
+    format_web_stack_status_all_report,
     format_web_stack_stop_all_report,
     format_web_stack_status,
     get_web_stack_status,
+    inspect_all_web_dev_stacks,
     prune_web_dev_stacks,
     start_web_dev_stack,
     stop_all_web_dev_stacks,
@@ -53,7 +55,7 @@ def _build_parser(*, include_custom_help: bool = True) -> argparse.ArgumentParse
         default="start",
         help="Web 管理动作，默认 start。",
     )
-    web_parser.add_argument("--all", action="store_true", help="仅用于 stop：停止所有已登记的 Web 开发栈实例。")
+    web_parser.add_argument("--all", action="store_true", help="用于 status/stop：查看或停止所有已登记的 Web 开发栈实例。")
     web_parser.add_argument("--host", default="0.0.0.0", help="监听地址。")
     web_parser.add_argument("--port", type=int, default=8000, help="监听端口。")
     web_parser.add_argument(
@@ -132,6 +134,8 @@ def _format_web_action_examples() -> list[str]:
         "    显式指定监听地址和后端起始端口。",
         "  codepilot web status",
         "    查看当前工作区 Web 实例状态与实际访问地址。",
+        "  codepilot web status --all",
+        "    列出所有运行中或异常残留的已登记 Web 实例。",
         "  codepilot web stop",
         "    停止当前工作区 Web 实例。",
         "  codepilot web stop --all",
@@ -244,6 +248,12 @@ def run_web_status() -> None:
     print(format_web_stack_status(status, state))
 
 
+def run_web_status_all() -> None:
+    init_logging(get_workspace().logs_dir, console_enabled=False)
+    inspections = inspect_all_web_dev_stacks()
+    print(format_web_stack_status_all_report(inspections, unmanaged_processes=find_unmanaged_web_processes(inspections)))
+
+
 def run_web_stop() -> None:
     init_logging(get_workspace().logs_dir, console_enabled=False)
     status, state = stop_web_dev_stack()
@@ -273,10 +283,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "web":
         web_action = getattr(args, "web_action", "start") or "start"
         stop_all = bool(getattr(args, "all", False))
-        if stop_all and web_action != "stop":
-            parser.error("--all 仅支持与 `codepilot web stop` 一起使用。")
+        if stop_all and web_action not in {"status", "stop"}:
+            parser.error("--all 仅支持与 `codepilot web status` 或 `codepilot web stop` 一起使用。")
         if web_action == "status":
-            run_web_status()
+            if stop_all:
+                run_web_status_all()
+            else:
+                run_web_status()
             return
         if web_action == "stop":
             if stop_all:

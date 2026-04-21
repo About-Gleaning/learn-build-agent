@@ -557,6 +557,48 @@ def format_web_stack_stop_all_report(
     return "\n".join(lines)
 
 
+def format_web_stack_status_all_report(
+    inspections: list[WebStackInspection],
+    *,
+    unmanaged_processes: list[UnmanagedWebProcess] | None = None,
+) -> str:
+    unmanaged_processes = unmanaged_processes or []
+    visible_inspections = [item for item in inspections if item.status in {"running", "degraded", "stale"}]
+    if not visible_inspections and not unmanaged_processes:
+        return "未发现运行中或异常残留的 Web 开发栈实例。"
+
+    status_label = {
+        "running": "运行中",
+        "degraded": "异常残留",
+        "stale": "失效残留",
+    }
+    lines: list[str] = []
+    running_count = sum(1 for item in visible_inspections if item.status == "running")
+    degraded_count = sum(1 for item in visible_inspections if item.status == "degraded")
+    stale_count = sum(1 for item in visible_inspections if item.status == "stale")
+    lines.append(
+        f"扫描完成：共 {len(visible_inspections)} 个需关注实例，"
+        f"运行中 {running_count} 个，异常残留 {degraded_count} 个，失效残留 {stale_count} 个。"
+    )
+    for inspection in visible_inspections:
+        lines.extend(
+            [
+                f"- {status_label.get(inspection.status, inspection.status)} | 工作区: {inspection.state.workspace_root}",
+                f"  状态文件: {inspection.state_path}",
+                f"  后端: {inspection.state.backend_url} (PID {inspection.state.backend_pid})",
+                f"  前端: {(inspection.state.frontend_local_url or inspection.state.frontend_url)} (PID {inspection.state.frontend_pid})",
+                f"  健康检查: {_format_stack_health(inspection)}",
+            ]
+        )
+        if inspection.state.frontend_network_url:
+            lines.append(f"  前端局域网访问地址: {inspection.state.frontend_network_url}")
+    if unmanaged_processes:
+        lines.append("发现未登记的疑似 codepilot Web 后端监听进程，status --all 不会自动停止它们：")
+        for process in unmanaged_processes:
+            lines.append(f"- PID {process.pid} | 端口 {process.port} | {process.command}")
+    return "\n".join(lines)
+
+
 def find_unmanaged_web_processes(inspections: list[WebStackInspection] | None = None) -> list[UnmanagedWebProcess]:
     managed_pids: set[int] = set()
     source_inspections = inspect_all_web_dev_stacks() if inspections is None else inspections
