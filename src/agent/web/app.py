@@ -104,11 +104,11 @@ def _stream_session(session_id: str, req: SessionStreamReq) -> Generator[str, No
             event_source=lambda: session_runtime.run_session_stream_events(
                 user_input=(req.user_input or "").strip(),
                 session_id=session_id,
-                mode=req.mode,
+                mode=req.mode if "mode" in req.model_fields_set else None,
                 provider=req.provider,
                 model=req.model,
-                provider_specified="provider" in req.model_fields_set,
-                model_specified="model" in req.model_fields_set,
+                provider_specified="provider" in req.model_fields_set and bool((req.provider or "").strip()),
+                model_specified="model" in req.model_fields_set and bool((req.model or "").strip()),
             ),
         )
         yield from _stream_existing_run(run.run_id, session_id)

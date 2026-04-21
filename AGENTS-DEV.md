@@ -221,6 +221,7 @@ LSP 查询请求
 ### 5.4 模式切换与问题恢复
 
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
+- 新建对话 Run 的显式 `mode/provider/model` 优先于 Session Runtime 与历史推断；空 `provider/model` 表示“不覆盖当前 Runtime”，不得当作重置默认值。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件；这些流式接口必须复用后台 Run 语义，不能让前端连接断开直接关闭后端生成器。
 - `SessionHook` 必须覆盖同步/流式会话的所有合法返回路径，包括 slash command 的即时完成与即时错误分支；Hook 上下文中的 `mode` 必须始终表示当前有效模式，而不是仅表示入口参数。

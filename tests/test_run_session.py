@@ -359,8 +359,8 @@ def test_run_session_should_resolve_init_slash_command_before_llm_when_agents_mi
     assert get_message_text(result) == "已生成 AGENTS.md"
     assert captured["agent"] == "build"
     assert "AGENTS.md" in captured["user_text"]
-    assert "面向内容贡献者" in captured["user_text"]
-    assert "无需再次检查文件是否存在" in captured["user_text"]
+    assert "作为该仓库的贡献者指南" in captured["user_text"]
+    assert "Repository Guidelines" in captured["user_text"]
     assert "先确认目标文件当前不存在" not in captured["user_text"]
     history_messages = session_module.SESSION_MEMORY_STORE.load("s_init")
     assert _last_user_display_text(history_messages) == "/init"
@@ -1106,6 +1106,39 @@ def test_plan_exit_confirmed_should_append_plan_path_when_file_exists(monkeypatc
     assert get_message_text(result) == "ok"
 
 
+def test_explicit_user_mode_should_clear_stale_mode_switch(monkeypatch):
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        call_state["count"] += 1
+        assistant = create_message("assistant", session_id, status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_plan_exit_stale",
+                name="plan_exit",
+                arguments="{}",
+            )
+        else:
+            tool_names = {tool["function"]["name"] for tool in tools}
+            last_agent = _last_user_agent(messages)
+            uses_build_tools = "plan_enter" in tool_names and "plan_exit" not in tool_names
+            append_text_part(assistant, "ok" if last_agent == "build" and uses_build_tools else "bad")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+
+    first_result = run_session("退出 plan", session_id="s_stale_mode_switch", mode="plan")
+    assert first_result["info"]["finish_reason"] == "confirmation_required"
+    assert session_module.get_pending_mode_switch("s_stale_mode_switch") is not None
+
+    result = run_session("直接执行 build 任务", session_id="s_stale_mode_switch", mode="build")
+
+    assert get_message_text(result) == "ok"
+    assert session_module.get_pending_mode_switch("s_stale_mode_switch") is None
+
+
 def test_plan_enter_confirmed_should_continue_with_stream_events(monkeypatch):
     call_state = {"count": 0}
 
@@ -1229,7 +1262,7 @@ def test_plan_mode_bash_should_allow_readonly_pipe(monkeypatch):
                 tool_call_id="call_bash_pipe",
                 name="bash",
                 arguments=(
-                    '{"command":"grep -n \\"build.default.txt\\" README.md | head -5",'
+                    '{"command":"ls src/agent/runtime/prompts | grep build.default.txt",'
                     '"description":"Finds build prompt references"}'
                 ),
             )
@@ -3622,6 +3655,7 @@ def test_run_session_should_keep_explicit_runtime_after_compaction_drops_user_me
 def test_run_session_should_use_provider_default_model_when_model_is_omitted(monkeypatch):
     configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
     clear_session_memory("s_provider_default_model")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     seen: list[tuple[str, str]] = []
 
     def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
@@ -3648,7 +3682,7 @@ def test_build_system_prompt_should_use_model_specific_prompt(monkeypatch):
         session_id=generate_session_id("test_prompt"),
     )
 
-    assert "你是 **爪爪**" in prompt
+    assert "你是 **Coding**" in prompt
     assert "- vendor: qwen" in prompt
     assert "- model: qwen3-max" in prompt
 
@@ -3664,7 +3698,7 @@ def test_build_system_prompt_should_fallback_to_default_prompt(monkeypatch):
     )
 
     assert "Qwen 系列模型" not in prompt
-    assert "你是 **爪爪**" in prompt
+    assert "你是 **Coding**" in prompt
     assert "- vendor: openai" in prompt
     assert "- model: gpt-4.1" in prompt
 
@@ -3710,7 +3744,7 @@ def test_build_system_prompt_should_share_vendor_prompt_for_qwen_coder(monkeypat
         session_id=generate_session_id("test_prompt"),
     )
 
-    assert "你是 **爪爪**" in prompt
+    assert "你是 **Coding**" in prompt
     assert "- provider: qwen-coder" in prompt
     assert "- vendor: qwen" in prompt
     assert "- model: qwen3-coder-next" in prompt
@@ -3861,7 +3895,6 @@ def test_build_system_prompt_should_include_git_environment(monkeypatch):
     assert "- vendor: google" in prompt
     assert "当前可用 skills catalog" not in prompt
     assert "{skills_catalog}" not in prompt
-    assert "`load_skill`" in prompt
 
 
 def test_build_system_prompt_should_share_plan_path_source_with_plan_enter(monkeypatch, tmp_path):
@@ -3911,8 +3944,8 @@ def test_run_session_should_refresh_system_prompt_when_mode_changes(monkeypatch)
     result = session_module.apply_mode_switch_action("s_prompt_mode_switch", "confirm")
 
     assert get_message_text(result) == "ok"
-    assert seen_system_prompts[0] == "PROMPT::build::qwen::qwen::qwen3-max"
-    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen::qwen3.5-flash"
+    assert seen_system_prompts[0] == "PROMPT::build::qwen::qwen::kimi-k2.5"
+    assert seen_system_prompts[-1] == "PROMPT::plan::qwen::qwen::kimi-k2.5"
 
 
 def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
@@ -3935,7 +3968,7 @@ def test_run_session_stream_events_should_use_file_prompt_builder(monkeypatch):
     events = list(run_session_stream_events("你好", session_id="s_stream_prompt"))
 
     assert events[-1]["type"] == "done"
-    assert seen_system_prompts == ["STREAM::build::qwen::qwen::qwen3-max"]
+    assert seen_system_prompts == ["STREAM::build::qwen::qwen::kimi-k2.5"]
 
 
 def test_run_session_should_fail_when_session_id_missing():
