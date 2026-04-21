@@ -164,6 +164,61 @@ def test_chat_stream_should_return_chunk_and_done(monkeypatch):
     assert done_payload["display_parts"][0]["kind"] == "assistant_text"
 
 
+def test_session_stream_should_treat_empty_provider_model_as_unspecified(monkeypatch):
+    captured = {}
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        captured.update(
+            {
+                "user_input": user_input,
+                "session_id": session_id,
+                "mode": mode,
+                "provider": kwargs["provider"],
+                "model": kwargs["model"],
+                "provider_specified": kwargs["provider_specified"],
+                "model_specified": kwargs["model_specified"],
+            }
+        )
+        yield {
+            "type": "done",
+            "event_id": "evt_empty_runtime_done",
+            "session_id": session_id,
+            "agent": mode or "build",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "m_empty_runtime",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "response_meta": {},
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+    RUN_MANAGER.clear()
+
+    body = "".join(
+        _stream_session(
+            "s_empty_runtime",
+            SessionStreamReq(
+                client_run_id="run_empty_runtime",
+                user_input="继续",
+                mode="build",
+                provider="",
+                model="",
+            ),
+        )
+    )
+
+    assert "event: done" in body
+    assert captured["provider"] == ""
+    assert captured["model"] == ""
+    assert captured["provider_specified"] is False
+    assert captured["model_specified"] is False
+
+
 def test_chat_stream_should_passthrough_runtime_alert_event(monkeypatch):
     app = create_app()
     client = TestClient(app)

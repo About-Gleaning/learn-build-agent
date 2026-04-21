@@ -193,6 +193,7 @@ class SessionBootstrap:
     session_id: str
     turn_started_at: str
     mode_enabled: bool
+    mode_explicit: bool
     initial_mode: MainAgentMode
     history_messages: list[Message]
     initial_runtime: ResolvedLLMConfig
@@ -897,6 +898,24 @@ def _resolve_mode_from_messages(messages: list[Message], fallback: MainAgentMode
     return fallback
 
 
+def _resolve_loop_mode(
+    messages: list[Message],
+    *,
+    current_mode: MainAgentMode,
+    current_session_runtime: dict[str, object] | None,
+    initial_mode: MainAgentMode,
+    mode_explicit: bool,
+) -> MainAgentMode:
+    """本轮显式 mode 优先，避免旧历史在 loop 内把当前选择反向覆盖。"""
+
+    if mode_explicit:
+        return current_mode
+    return _resolve_mode_from_messages(
+        messages,
+        fallback=_resolve_mode_from_runtime(current_session_runtime, initial_mode),
+    )
+
+
 def _resolve_provider_preference_from_messages(messages: list[Message]) -> str | None:
     for meta in _iter_user_text_meta(messages):
         if bool(meta.get("provider_reset_to_default")):
@@ -1137,6 +1156,7 @@ def _bootstrap_session(
     registry = _get_skill_registry()
 
     initial_mode: MainAgentMode = "build"
+    mode_explicit = mode in {"build", "plan"}
     if mode in {"build", "plan"}:
         initial_mode = mode
 
@@ -1221,6 +1241,7 @@ def _bootstrap_session(
         session_id=active_session_id,
         turn_started_at=turn_started_at,
         mode_enabled=mode_enabled,
+        mode_explicit=mode_explicit,
         initial_mode=initial_mode,
         history_messages=history_messages,
         initial_runtime=initial_runtime,
@@ -1408,6 +1429,16 @@ def _clear_pending_mode_switch(session_id: str | None = None) -> None:
         PENDING_MODE_SWITCHES.clear()
         return
     PENDING_MODE_SWITCHES.pop(normalized, None)
+
+
+def _clear_pending_mode_switch_for_explicit_user_turn(session_id: str, mode: MainAgentMode | None) -> None:
+    """用户显式发起新对话时，旧的模式确认已不再代表当前意图。"""
+
+    normalized = (session_id or "").strip()
+    if not normalized or mode not in {"build", "plan"}:
+        return
+    if get_pending_mode_switch(normalized) is not None:
+        _clear_pending_mode_switch(normalized)
 
 
 def request_session_stop(session_id: str) -> None:
@@ -2864,6 +2895,9 @@ def _run_session_stream(
             message=assistant_message,
         )
 
+    if tools is None and system_prompt is None and prepared_input.mode in {"build", "plan"}:
+        _clear_pending_mode_switch_for_explicit_user_turn(session_id, prepared_input.mode)
+
     bootstrap = _bootstrap_session(
         prepared_input.user_input,
         session_id=session_id,
@@ -3156,9 +3190,12 @@ def _run_session_stream(
 
             selected_tools = bootstrap.initial_tools
             if mode_enabled:
-                current_mode = _resolve_mode_from_messages(
+                current_mode = _resolve_loop_mode(
                     messages,
-                    fallback=_resolve_mode_from_runtime(current_session_runtime, bootstrap.initial_mode),
+                    current_mode=current_mode,
+                    current_session_runtime=current_session_runtime,
+                    initial_mode=bootstrap.initial_mode,
+                    mode_explicit=bootstrap.mode_explicit,
                 )
                 _set_session_hook_mode(session_hook_ctx, current_mode)
                 current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
@@ -4150,6 +4187,9 @@ def run_session(
             message=assistant_message,
         )
 
+    if tools is None and system_prompt is None and prepared_input.mode in {"build", "plan"}:
+        _clear_pending_mode_switch_for_explicit_user_turn(session_id, prepared_input.mode)
+
     bootstrap = _bootstrap_session(
         prepared_input.user_input,
         session_id=session_id,
@@ -4252,9 +4292,12 @@ def run_session(
 
             selected_tools = bootstrap.initial_tools
             if mode_enabled:
-                current_mode = _resolve_mode_from_messages(
+                current_mode = _resolve_loop_mode(
                     messages,
-                    fallback=_resolve_mode_from_runtime(current_session_runtime, bootstrap.initial_mode),
+                    current_mode=current_mode,
+                    current_session_runtime=current_session_runtime,
+                    initial_mode=bootstrap.initial_mode,
+                    mode_explicit=bootstrap.mode_explicit,
                 )
                 _set_session_hook_mode(session_hook_ctx, current_mode)
                 current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
