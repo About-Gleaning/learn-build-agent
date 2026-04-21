@@ -96,6 +96,27 @@ def test_save_to_path_should_write_session_meta_and_messages(tmp_path):
     assert records[1]["message"]["role"] == "user"
 
 
+def test_session_runtime_should_persist_in_session_meta(tmp_path):
+    path = tmp_path / "nested" / "s_runtime.jsonl"
+    session = Session.new("s_runtime")
+    session.runtime = {
+        "mode": "plan",
+        "provider": "qwen",
+        "model": "kimi-k2.5",
+        "provider_explicit": True,
+        "model_explicit": True,
+    }
+    session.messages.append(ConversationMessage.user_text("第一条"))
+
+    session.save_to_path(path)
+
+    loaded = Session.load_from_path(path)
+    records = _jsonl_records(path)
+    assert records[0]["runtime"]["mode"] == "plan"
+    assert records[0]["runtime"]["model"] == "kimi-k2.5"
+    assert loaded.runtime == session.runtime
+
+
 def test_compaction_snapshot_should_rewrite_main_file(tmp_path):
     path = tmp_path / "s_compact.jsonl"
     session = Session.new("s_compact").with_persistence_path(path)

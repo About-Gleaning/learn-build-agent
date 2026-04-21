@@ -45,6 +45,7 @@ from agent.core.message import (
     create_error_message,
     create_message,
     get_message_text,
+    get_role,
     to_provider_messages,
 )
 from agent.adapters.llm.vendors import build_provider_adapter
@@ -2265,6 +2266,7 @@ def test_run_session_should_use_configured_memory_store(monkeypatch):
         def __init__(self) -> None:
             self.saved = False
             self._history: list = []
+            self._runtime: dict[str, object] | None = None
 
         def load(self, session_id: str):
             return self._history
@@ -2273,8 +2275,15 @@ def test_run_session_should_use_configured_memory_store(monkeypatch):
             self.saved = True
             self._history = [msg for msg in messages if msg["info"].get("role") != "system"][-2:]
 
+        def load_runtime(self, session_id: str):
+            return self._runtime
+
+        def save_runtime(self, session_id: str, runtime):
+            self._runtime = dict(runtime) if runtime else None
+
         def clear(self, session_id: str | None = None):
             self._history = []
+            self._runtime = None
 
     store = StubMemoryStore()
     configure_session_memory_store(store)
@@ -3561,6 +3570,53 @@ def test_run_session_should_reset_to_agent_default_provider_and_model(monkeypatc
 
     assert seen[0] == ("qwen", "qwen3-coder-next")
     assert seen[1] == ("qwen", "qwen3.5-flash")
+
+
+def test_run_session_should_keep_explicit_runtime_after_compaction_drops_user_meta(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_provider_compaction")
+    seen: list[tuple[str, str]] = []
+    call_state = {"count": 0}
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        session_id = messages[-1]["info"]["session_id"]
+        seen.append((llm_config.provider, llm_config.model))
+        assistant = create_message("assistant", session_id, status="completed")
+        call_state["count"] += 1
+        if call_state["count"] == 1:
+            append_tool_call_part(assistant, tool_call_id="call_1", name="todo_read", arguments="{}")
+        else:
+            append_text_part(assistant, "ok")
+        return assistant
+
+    def fake_compact(messages, llm_config=None, agent="build"):
+        del llm_config, agent
+        if call_state["count"] >= 1:
+            return [message for message in messages if get_role(message) != "user"]
+        return messages
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion", fake_chat)
+    monkeypatch.setattr("agent.runtime.session.compact", fake_compact)
+
+    run_session(
+        "第一轮",
+        session_id="s_provider_compaction",
+        mode="plan",
+        provider="qwen",
+        provider_specified=True,
+        model="kimi-k2.5",
+        model_specified=True,
+    )
+
+    assert seen == [("qwen", "kimi-k2.5"), ("qwen", "kimi-k2.5")]
+    runtime = session_module.get_session_runtime("s_provider_compaction")
+    assert runtime == {
+        "mode": "plan",
+        "provider": "qwen",
+        "model": "kimi-k2.5",
+        "provider_explicit": True,
+        "model_explicit": True,
+    }
 
 
 def test_run_session_should_use_provider_default_model_when_model_is_omitted(monkeypatch):

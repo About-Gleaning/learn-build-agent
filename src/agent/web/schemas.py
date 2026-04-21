@@ -113,8 +113,17 @@ class MessageVO(BaseModel):
     question: QuestionVO | None = None
 
 
+class SessionRuntimeVO(BaseModel):
+    mode: Literal["build", "plan"] = "build"
+    provider: str = ""
+    model: str = ""
+    provider_explicit: bool = False
+    model_explicit: bool = False
+
+
 class SessionMessagesVO(BaseModel):
     session_id: str
+    runtime: SessionRuntimeVO | None = None
     messages: list[MessageVO]
 
 

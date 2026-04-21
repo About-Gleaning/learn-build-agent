@@ -20,6 +20,7 @@
 - 工作区根目录统一由启动命令所在目录或 `--workdir` 指定目录决定，禁止继续散落使用 `Path.cwd()` 推导边界。
 - Session Memory 统一通过 `src/agent/runtime/session_memory.py` 的 `SessionMemoryStore` 抽象读写，默认按工作区落盘到运行态 `workspaces/sessions/`。
 - Session Memory 文件格式统一为 JSONL，按消息粒度落库；具体持久化能力应通过内置 Session/Loop/Tool Hook 的实现接入，详细规范以 `AGENTS-DEV.md` 为准。
+- 用户显式选择的 `mode/provider/model` 必须持久化在 Session JSONL 的 `session_meta.runtime`，禁止只依赖普通历史消息 `meta` 做恢复。
 - assistant 级 `process_items`、`display_parts`、`response_meta` 只作为运行时/SSE 展示投影；Session JSONL 仅持久化精简摘要字段，Web 历史展示由 `blocks + meta` 重建。
 - LLM 调用观测归 `LLMHook`，工具执行观测归 `ToolHook`；不要把 provider 调用细节或工具审计逻辑重新塞回 `src/agent/runtime/session.py`。
 - `write_file` 仅用于创建新文件，禁止覆盖已有文件；已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。

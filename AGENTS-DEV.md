@@ -207,6 +207,7 @@ LSP 查询请求
 - `project_runtime.json -> session_memory.trim_enabled/max_messages` 是历史裁剪配置来源；保存前必须统一复用存储层裁剪逻辑，避免不同入口保存出不一致历史。
 - 会话落库粒度必须是消息，不是流式事件；`text_delta`、进度事件、权限检查过程和 Hook 过程事件只用于运行时展示或汇总，不逐条落库。
 - JSONL 记录顺序为 `session_meta`、可选 `compaction`、多条 `message`；`message.blocks` 只使用 `text`、`tool_use`、`tool_result` 三类核心块。
+- 用户显式选择的 `mode/provider/model` 属于会话级状态，必须持久化在 `session_meta.runtime`；禁止再把它仅托管在普通 user message `meta` 上作为唯一恢复来源。
 - JSONL 中 assistant `meta` 禁止持久化 `response_meta`、`process_items`、`display_parts` 三个展示投影大字段；只保留 `round_count`、`tool_call_count`、`tool_names`、`delegation_count`、`delegated_agents` 等摘要字段，Web 历史展示统一由 `blocks + meta` 动态重建。
 - JSONL `message.meta.status` 必须表示可恢复历史的稳定状态；保存时应把已有内容或终止原因的 `pending/running` 消息归一化为 `completed`，但不得覆盖 `failed/interrupted` 等真实终态。
 - JSONL 追加单条消息是 O(1)，turn 结束和 compact 后的 `save_to_path` 是 O(n) 原子快照重写；文件写入必须使用临时文件加 rename/replace，避免半写损坏主文件。

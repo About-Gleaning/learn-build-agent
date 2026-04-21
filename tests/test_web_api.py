@@ -547,6 +547,108 @@ def test_run_manager_heartbeat_should_not_pollute_cached_events():
     assert all(event["type"] != "heartbeat" for event in manager.get_run(run.run_id).events)
 
 
+def test_active_run_resume_should_keep_session_runtime_in_history_api(monkeypatch):
+    RUN_MANAGER.clear()
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    session_id = generate_session_id("test_web_resume_runtime")
+    clear_session_memory(session_id)
+    allow_continue = threading.Event()
+
+    user_msg = create_message("user", session_id, status="completed")
+    append_text_part(user_msg, "读取长文档", meta={"agent": "plan"})
+    assistant_msg = create_message("assistant", session_id, status="completed")
+    assistant_msg["info"]["agent"] = "plan"
+    assistant_msg["info"]["provider"] = "qwen"
+    assistant_msg["info"]["model"] = "kimi-k2.5"
+    append_text_part(assistant_msg, "开始处理")
+    session_runtime.SESSION_MEMORY_STORE.save(session_id, [user_msg, assistant_msg])
+    session_runtime.SESSION_MEMORY_STORE.save_runtime(
+        session_id,
+        {
+            "mode": "plan",
+            "provider": "qwen",
+            "model": "kimi-k2.5",
+            "provider_explicit": True,
+            "model_explicit": True,
+        },
+    )
+
+    def fake_stream_events(user_input: str, session_id: str, mode: str | None = None, **kwargs):
+        del user_input, mode, kwargs
+        yield {
+            "type": "start",
+            "event_id": "evt_resume_runtime_start",
+            "session_id": session_id,
+            "agent": "plan",
+            "agent_kind": "primary",
+            "depth": 0,
+            "provider": "qwen",
+            "model": "kimi-k2.5",
+        }
+        yield {
+            "type": "tool_call",
+            "event_id": "evt_resume_runtime_tool_call",
+            "session_id": session_id,
+            "agent": "plan",
+            "agent_kind": "primary",
+            "depth": 0,
+            "round": 1,
+            "tool_call_id": "call_resume_runtime",
+            "name": "read_file",
+            "arguments": "{}",
+            "provider": "qwen",
+            "model": "kimi-k2.5",
+        }
+        allow_continue.wait(timeout=2)
+        yield {
+            "type": "done",
+            "event_id": "evt_resume_runtime_done",
+            "session_id": session_id,
+            "agent": "plan",
+            "agent_kind": "primary",
+            "depth": 0,
+            "message_id": "msg_resume_runtime_done",
+            "status": "completed",
+            "finish_reason": "stop",
+            "turn_started_at": "t1",
+            "turn_completed_at": "t2",
+            "provider": "qwen",
+            "model": "kimi-k2.5",
+            "response_meta": {},
+            "process_items": [],
+            "display_parts": [],
+        }
+
+    monkeypatch.setattr("agent.web.app.session_runtime.run_session_stream_events", fake_stream_events)
+
+    stream = _stream_chat(ChatStreamReq(session_id=session_id, user_input="继续", mode="plan"))
+    try:
+        for chunk in stream:
+            if "event: tool_call" in chunk:
+                break
+    finally:
+        stream.close()
+
+    assert RUN_MANAGER.get_active_run(session_id) is not None
+    allow_continue.set()
+    body = "".join(_stream_active_run(session_id))
+    events = _stream_events(body)
+    assert events[-1][0] == "done"
+
+    app = create_app()
+    client = TestClient(app)
+    resp = client.get(f"/api/sessions/{session_id}/messages?limit=20")
+
+    assert resp.status_code == 200
+    assert resp.json()["runtime"] == {
+        "mode": "plan",
+        "provider": "qwen",
+        "model": "kimi-k2.5",
+        "provider_explicit": True,
+        "model_explicit": True,
+    }
+
+
 def test_active_run_stream_should_return_no_active_run_when_idle():
     RUN_MANAGER.clear()
     session_id = generate_session_id("test_web_no_active")
@@ -945,6 +1047,44 @@ def test_get_session_messages_and_clear():
     resp_after_clear = client.get("/api/sessions/s_hist/messages?limit=20")
     assert resp_after_clear.status_code == 200
     assert resp_after_clear.json()["messages"] == []
+
+
+def test_get_session_messages_should_return_session_runtime():
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_hist_runtime")
+    app = create_app()
+    client = TestClient(app)
+
+    user_msg = create_message("user", "s_hist_runtime", status="completed")
+    append_text_part(user_msg, "你好", meta={"agent": "plan", "provider": "qwen", "model": "kimi-k2.5"})
+    assistant_msg = create_message("assistant", "s_hist_runtime", status="completed")
+    assistant_msg["info"]["agent"] = "plan"
+    assistant_msg["info"]["provider"] = "qwen"
+    assistant_msg["info"]["model"] = "kimi-k2.5"
+    append_text_part(assistant_msg, "ok")
+    session_runtime.SESSION_MEMORY_STORE.save("s_hist_runtime", [user_msg, assistant_msg])
+    session_runtime.SESSION_MEMORY_STORE.save_runtime(
+        "s_hist_runtime",
+        {
+            "mode": "plan",
+            "provider": "qwen",
+            "model": "kimi-k2.5",
+            "provider_explicit": True,
+            "model_explicit": True,
+        },
+    )
+
+    resp = client.get("/api/sessions/s_hist_runtime/messages?limit=20")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["runtime"] == {
+        "mode": "plan",
+        "provider": "qwen",
+        "model": "kimi-k2.5",
+        "provider_explicit": True,
+        "model_explicit": True,
+    }
 
 
 def test_chat_stream_should_validate_session_id():

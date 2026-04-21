@@ -917,10 +917,47 @@ def _resolve_model_preference_from_messages(messages: list[Message]) -> str | No
     return None
 
 
+def _normalize_session_runtime(runtime: dict[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(runtime, dict):
+        return None
+    mode = str(runtime.get("mode", "")).strip().lower()
+    provider = str(runtime.get("provider", "")).strip().lower()
+    model = str(runtime.get("model", "")).strip()
+    normalized = {
+        "mode": mode if mode in {"build", "plan"} else "",
+        "provider": provider,
+        "model": model,
+        "provider_explicit": bool(runtime.get("provider_explicit")),
+        "model_explicit": bool(runtime.get("model_explicit")),
+    }
+    if not any(
+        [
+            normalized["mode"],
+            normalized["provider"],
+            normalized["model"],
+            normalized["provider_explicit"],
+            normalized["model_explicit"],
+        ]
+    ):
+        return None
+    return normalized
+
+
+def _resolve_mode_from_runtime(runtime: dict[str, object] | None, fallback: MainAgentMode) -> MainAgentMode:
+    normalized = _normalize_session_runtime(runtime)
+    if not normalized:
+        return fallback
+    mode = str(normalized.get("mode", "")).strip().lower()
+    if mode in {"build", "plan"}:
+        return mode  # type: ignore[return-value]
+    return fallback
+
+
 def _resolve_provider_selection(
     messages: list[Message],
     *,
     mode: MainAgentMode,
+    session_runtime: dict[str, object] | None,
     provider: str | None,
     provider_specified: bool,
 ) -> tuple[str, bool]:
@@ -929,6 +966,12 @@ def _resolve_provider_selection(
         if normalized_provider:
             return normalized_provider, True
         return resolve_llm_config(mode).provider, False
+
+    normalized_runtime = _normalize_session_runtime(session_runtime)
+    if normalized_runtime:
+        runtime_provider = str(normalized_runtime.get("provider", "")).strip().lower()
+        if runtime_provider and bool(normalized_runtime.get("provider_explicit")):
+            return runtime_provider, True
 
     inherited_provider = _resolve_provider_preference_from_messages(messages)
     if inherited_provider:
@@ -940,6 +983,7 @@ def _resolve_runtime_config(
     messages: list[Message],
     *,
     mode: MainAgentMode,
+    session_runtime: dict[str, object] | None,
     provider: str | None,
     provider_specified: bool,
     model: str | None = None,
@@ -947,11 +991,24 @@ def _resolve_runtime_config(
 ) -> tuple[ResolvedLLMConfig, bool, bool]:
     normalized_provider = (provider or "").strip()
     normalized_model = (model or "").strip()
+    normalized_runtime = _normalize_session_runtime(session_runtime)
+    runtime_provider_pref = ""
+    runtime_model_pref = ""
+    runtime_provider_explicit = False
+    runtime_model_explicit = False
+    if normalized_runtime:
+        runtime_provider_pref = str(normalized_runtime.get("provider", "")).strip().lower()
+        runtime_model_pref = str(normalized_runtime.get("model", "")).strip()
+        runtime_provider_explicit = bool(normalized_runtime.get("provider_explicit"))
+        runtime_model_explicit = bool(normalized_runtime.get("model_explicit"))
 
     # 当本轮既没有显式 provider，也没有从历史继承 provider 偏好时，应优先回到 agent 默认配置。
-    if not provider_specified and _resolve_provider_preference_from_messages(messages) is None:
+    if not provider_specified and not runtime_provider_explicit and _resolve_provider_preference_from_messages(messages) is None:
         if normalized_model and model_specified:
             return resolve_llm_config(mode, model_name=normalized_model), False, True
+
+        if runtime_model_pref and runtime_model_explicit:
+            return resolve_llm_config(mode, model_name=runtime_model_pref), False, True
 
         inherited_model = _resolve_model_preference_from_messages(messages)
         if inherited_model:
@@ -962,6 +1019,7 @@ def _resolve_runtime_config(
     provider_name, is_explicit = _resolve_provider_selection(
         messages,
         mode=mode,
+        session_runtime=session_runtime,
         provider=provider,
         provider_specified=provider_specified,
     )
@@ -975,11 +1033,30 @@ def _resolve_runtime_config(
     if provider_specified:
         return resolve_llm_config(mode, provider_name), is_explicit, False
 
+    if runtime_model_pref and runtime_model_explicit:
+        return resolve_llm_config(mode, provider_name, runtime_model_pref), is_explicit, True
+
     inherited_model = _resolve_model_preference_from_messages(messages)
     if inherited_model:
         return resolve_llm_config(mode, provider_name, inherited_model), is_explicit, True
 
     return resolve_llm_config(mode, provider_name), is_explicit, False
+
+
+def _build_session_runtime_payload(
+    *,
+    mode: MainAgentMode,
+    runtime: ResolvedLLMConfig,
+    provider_explicit: bool,
+    model_explicit: bool,
+) -> dict[str, object]:
+    return {
+        "mode": mode,
+        "provider": runtime.provider,
+        "model": runtime.model,
+        "provider_explicit": provider_explicit,
+        "model_explicit": model_explicit,
+    }
 
 
 def _build_user_message_meta(
@@ -1064,17 +1141,22 @@ def _bootstrap_session(
         initial_mode = mode
 
     history_messages: list[Message] = SESSION_MEMORY_STORE.load(active_session_id) if mode_enabled else []
+    persisted_runtime = SESSION_MEMORY_STORE.load_runtime(active_session_id) if mode_enabled else None
     if mode_enabled and history_messages:
         history_messages, history_repaired = _recover_incomplete_tool_calls(history_messages)
         if history_repaired:
             SESSION_MEMORY_STORE.save(active_session_id, history_messages)
-    if mode is None and mode_enabled and history_messages:
-        initial_mode = _resolve_mode_from_messages(history_messages, fallback=initial_mode)
+    if mode is None and mode_enabled:
+        initial_mode = _resolve_mode_from_messages(
+            history_messages,
+            fallback=_resolve_mode_from_runtime(persisted_runtime, initial_mode),
+        )
 
     if mode_enabled:
         initial_runtime, initial_provider_explicit, initial_model_explicit = _resolve_runtime_config(
             history_messages,
             mode=initial_mode,
+            session_runtime=persisted_runtime,
             provider=provider,
             provider_specified=provider_specified,
             model=model,
@@ -2133,6 +2215,12 @@ def _handle_mode_switch_tool_result(
             synthetic_runtime, synthetic_provider_explicit, synthetic_model_explicit = _resolve_runtime_config(
                 messages,
                 mode=synthetic_agent,  # type: ignore[arg-type]
+                session_runtime=_build_session_runtime_payload(
+                    mode=current_mode,
+                    runtime=current_runtime,
+                    provider_explicit=current_provider_explicit,
+                    model_explicit=current_model_explicit,
+                ),
                 provider=current_runtime.provider if current_provider_explicit else None,
                 provider_specified=current_provider_explicit,
                 model=current_runtime.model if current_model_explicit else None,
@@ -2336,6 +2424,25 @@ def clear_session_memory(session_id: str | None = None) -> None:
     _clear_pending_mode_switch(session_id)
     _clear_pending_question(session_id)
     clear_session_stop(session_id)
+
+
+def get_session_runtime(session_id: str) -> dict[str, object] | None:
+    normalized_session_id = (session_id or "").strip()
+    if not normalized_session_id:
+        return None
+    runtime = _normalize_session_runtime(SESSION_MEMORY_STORE.load_runtime(normalized_session_id))
+    if runtime:
+        return runtime
+    history_messages = SESSION_MEMORY_STORE.load(normalized_session_id)
+    if history_messages:
+        return {
+            "mode": _resolve_mode_from_messages(history_messages, fallback="build"),
+            "provider": _resolve_provider_preference_from_messages(history_messages) or _latest_provider(history_messages),
+            "model": _resolve_model_preference_from_messages(history_messages) or _latest_model(history_messages),
+            "provider_explicit": bool(_resolve_provider_preference_from_messages(history_messages)),
+            "model_explicit": bool(_resolve_model_preference_from_messages(history_messages)),
+        }
+    return None
 
 
 def apply_mode_switch_action(session_id: str, action: ModeSwitchAction) -> Message:
@@ -2826,6 +2933,14 @@ def _run_session_stream(
     current_runtime = bootstrap.current_runtime
     current_provider_explicit = bootstrap.current_provider_explicit
     current_model_explicit = bootstrap.current_model_explicit
+    current_session_runtime = _build_session_runtime_payload(
+        mode=current_mode,
+        runtime=current_runtime,
+        provider_explicit=current_provider_explicit,
+        model_explicit=current_model_explicit,
+    )
+    if mode_enabled:
+        SESSION_MEMORY_STORE.save_runtime(active_session_id, current_session_runtime)
     initial_agent = bootstrap.initial_agent
     agent_kind = _resolve_agent_kind(initial_agent)
     stop_message_saved = False
@@ -3041,16 +3156,27 @@ def _run_session_stream(
 
             selected_tools = bootstrap.initial_tools
             if mode_enabled:
-                current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
+                current_mode = _resolve_mode_from_messages(
+                    messages,
+                    fallback=_resolve_mode_from_runtime(current_session_runtime, bootstrap.initial_mode),
+                )
                 _set_session_hook_mode(session_hook_ctx, current_mode)
                 current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
                     messages,
                     mode=current_mode,
+                    session_runtime=current_session_runtime,
                     provider=provider,
                     provider_specified=False,
                     model=model,
                     model_specified=False,
                 )
+                current_session_runtime = _build_session_runtime_payload(
+                    mode=current_mode,
+                    runtime=current_runtime,
+                    provider_explicit=current_provider_explicit,
+                    model_explicit=current_model_explicit,
+                )
+                SESSION_MEMORY_STORE.save_runtime(active_session_id, current_session_runtime)
                 selected_tools = _get_tools_for_mode(current_mode)
                 messages = _ensure_system_prompt(
                     messages,
@@ -4077,6 +4203,14 @@ def run_session(
     current_runtime = bootstrap.current_runtime
     current_provider_explicit = bootstrap.current_provider_explicit
     current_model_explicit = bootstrap.current_model_explicit
+    current_session_runtime = _build_session_runtime_payload(
+        mode=current_mode,
+        runtime=current_runtime,
+        provider_explicit=current_provider_explicit,
+        model_explicit=current_model_explicit,
+    )
+    if mode_enabled:
+        SESSION_MEMORY_STORE.save_runtime(active_session_id, current_session_runtime)
     tool_call_owner_map: dict[str, str] = {}
 
     tool_executor = ToolExecutor(
@@ -4118,16 +4252,27 @@ def run_session(
 
             selected_tools = bootstrap.initial_tools
             if mode_enabled:
-                current_mode = _resolve_mode_from_messages(messages, fallback=bootstrap.initial_mode)
+                current_mode = _resolve_mode_from_messages(
+                    messages,
+                    fallback=_resolve_mode_from_runtime(current_session_runtime, bootstrap.initial_mode),
+                )
                 _set_session_hook_mode(session_hook_ctx, current_mode)
                 current_runtime, current_provider_explicit, current_model_explicit = _resolve_runtime_config(
                     messages,
                     mode=current_mode,
+                    session_runtime=current_session_runtime,
                     provider=provider,
                     provider_specified=False,
                     model=model,
                     model_specified=False,
                 )
+                current_session_runtime = _build_session_runtime_payload(
+                    mode=current_mode,
+                    runtime=current_runtime,
+                    provider_explicit=current_provider_explicit,
+                    model_explicit=current_model_explicit,
+                )
+                SESSION_MEMORY_STORE.save_runtime(active_session_id, current_session_runtime)
                 selected_tools = _get_tools_for_mode(current_mode)
                 messages = _ensure_system_prompt(
                     messages,

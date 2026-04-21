@@ -26,6 +26,7 @@ from .schemas import (
     RuntimeOptionsVO,
     SessionClearedVO,
     SessionMessagesVO,
+    SessionRuntimeVO,
     SessionStreamReq,
     StopSessionVO,
 )
@@ -391,9 +392,11 @@ def create_app() -> FastAPI:
         normalized_id = _normalize_session_id_or_raise(session_id)
 
         messages = session_runtime.SESSION_MEMORY_STORE.load(normalized_id)
+        runtime = session_runtime.get_session_runtime(normalized_id)
         selected = messages[-limit:]
         return SessionMessagesVO(
             session_id=normalized_id,
+            runtime=SessionRuntimeVO(**runtime) if isinstance(runtime, dict) else None,
             messages=messages_to_vos(selected),
         )
 

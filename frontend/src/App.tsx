@@ -220,6 +220,13 @@ type ActivePathToken = {
 
 type HistoryResp = {
   session_id: string;
+  runtime?: {
+    mode: AgentName;
+    provider: string;
+    model: string;
+    provider_explicit: boolean;
+    model_explicit: boolean;
+  } | null;
   messages: Array<{
     message_id: string;
     role: string;
@@ -296,6 +303,11 @@ type HistoryResp = {
       }>;
     } | null;
   }>;
+};
+
+type HistoryLoadResult = {
+  messages: UiMessage[];
+  runtime: HistoryResp["runtime"];
 };
 
 type ModeSwitchResp = {
@@ -1517,13 +1529,15 @@ function getMatchedTurnMessages(history: UiMessage[], activeTurn: ActiveTurn): U
   return [];
 }
 
-async function loadHistory(sessionId: string): Promise<UiMessage[]> {
+async function loadHistory(sessionId: string): Promise<HistoryLoadResult> {
   const resp = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=50`);
   if (!resp.ok) {
     throw new Error(`历史加载失败: ${resp.status}`);
   }
   const data = (await resp.json()) as HistoryResp;
-  return data.messages.map((msg) => ({
+  return {
+    runtime: data.runtime || null,
+    messages: data.messages.map((msg) => ({
     id: msg.message_id,
     role: (msg.role as Role) || "assistant",
     text: msg.text,
@@ -1557,7 +1571,8 @@ async function loadHistory(sessionId: string): Promise<UiMessage[]> {
         }
       : null,
     question: normalizeQuestion(msg.question),
-  }));
+    })),
+  };
 }
 
 function deriveSessionRuntime(history: UiMessage[]): {
@@ -1571,6 +1586,22 @@ function deriveSessionRuntime(history: UiMessage[]): {
     mode: latestAssistant && (latestAssistant.agent === "build" || latestAssistant.agent === "plan") ? latestAssistant.agent : null,
     providerModelKey: latestRuntimeMessage ? buildProviderModelKey(latestRuntimeMessage.provider, latestRuntimeMessage.model) : "",
   };
+}
+
+function deriveSessionRuntimeFromPayload(
+  runtime: HistoryResp["runtime"],
+  history: UiMessage[],
+): { mode: AgentName | null; providerModelKey: string } {
+  const runtimeMode = runtime?.mode === "build" || runtime?.mode === "plan" ? runtime.mode : null;
+  const runtimeProvider = typeof runtime?.provider === "string" ? runtime.provider.trim() : "";
+  const runtimeModel = typeof runtime?.model === "string" ? runtime.model.trim() : "";
+  if (runtimeMode || (runtimeProvider && runtimeModel)) {
+    return {
+      mode: runtimeMode,
+      providerModelKey: runtimeProvider && runtimeModel ? buildProviderModelKey(runtimeProvider, runtimeModel) : "",
+    };
+  }
+  return deriveSessionRuntime(history);
 }
 
 function buildConversationRecords(messages: UiMessage[]): ConversationRecord[] {
@@ -3090,8 +3121,8 @@ export function App() {
     activeStreamControllerRef.current = null;
   };
 
-  const applySessionRuntimeFromHistory = (history: UiMessage[]) => {
-    const derivedRuntime = deriveSessionRuntime(history);
+  const applySessionRuntimeFromHistory = (history: UiMessage[], runtime: HistoryResp["runtime"] = null) => {
+    const derivedRuntime = deriveSessionRuntimeFromPayload(runtime, history);
     const nextMode = derivedRuntime.mode || mode;
     let nextProviderModelKey = providerModelKey;
     if (derivedRuntime.mode) {
@@ -3109,8 +3140,8 @@ export function App() {
   const refreshHistory = async (targetSessionId = sessionId) => {
     setError("");
     try {
-      const history = await loadHistory(targetSessionId);
-      applySessionRuntimeFromHistory(history);
+      const { messages: history, runtime } = await loadHistory(targetSessionId);
+      applySessionRuntimeFromHistory(history, runtime);
       startTransition(() => {
         setMessages(filterConversationMessages(history));
       });
@@ -3125,10 +3156,11 @@ export function App() {
     const maxAttempts = 12;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
-        const history = filterConversationMessages(await loadHistory(targetSessionId));
+        const { messages: loadedHistory, runtime } = await loadHistory(targetSessionId);
+        const history = filterConversationMessages(loadedHistory);
         const recoveredAssistant = findRecoveredAssistantMessage(history, activeTurn);
         if (recoveredAssistant) {
-          applySessionRuntimeFromHistory(history);
+          applySessionRuntimeFromHistory(history, runtime);
           startTransition(() => {
             setMessages(history);
           });
@@ -3196,12 +3228,13 @@ export function App() {
     clearPendingRun(sessionId);
     resetTransientUiState();
     try {
-      const history = filterConversationMessages(await loadHistory(nextSessionId));
+      const { messages: loadedHistory, runtime } = await loadHistory(nextSessionId);
+      const history = filterConversationMessages(loadedHistory);
       startTransition(() => {
         setSessionId(nextSessionId);
         setMessages(history);
       });
-      applySessionRuntimeFromHistory(history);
+      applySessionRuntimeFromHistory(history, runtime);
       setIsSessionLoadOpen(false);
       setSessionLoadDraft("");
       const resumed = await resumeActiveRun(nextSessionId);
@@ -3242,12 +3275,14 @@ export function App() {
     const maxAttempts = 12;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
-        const history = filterConversationMessages(await loadHistory(sessionId));
+        const { messages: loadedHistory, runtime } = await loadHistory(sessionId);
+        const history = filterConversationMessages(loadedHistory);
         const matchedTurnMessages = getMatchedTurnMessages(history, activeTurn);
         const stoppedAssistantMessage = matchedTurnMessages.find(
           (msg) => msg.role === "assistant" && msg.status === "interrupted" && msg.finishReason === "cancelled",
         );
         if (stoppedAssistantMessage) {
+          applySessionRuntimeFromHistory(history, runtime);
           startTransition(() => {
             setMessages((prev) => {
               const removedIds = new Set(

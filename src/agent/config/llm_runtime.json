@@ -56,11 +56,11 @@
   "agent_defaults": {
     "build": {
       "provider": "qwen",
-      "model": "qwen3-max"
+      "model": "kimi-k2.5"
     },
     "plan": {
       "provider": "qwen",
-      "model": "qwen3.5-flash"
+      "model": "kimi-k2.5"
     }
   }
 }

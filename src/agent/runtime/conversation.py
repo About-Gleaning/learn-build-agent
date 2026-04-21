@@ -96,6 +96,7 @@ class Session:
     updated_at_ms: int
     messages: list[ConversationMessage] = field(default_factory=list)
     compaction: dict[str, Any] | None = None
+    runtime: dict[str, Any] | None = None
     persistence_path: Path | None = None
 
     @classmethod
@@ -150,6 +151,7 @@ class Session:
             updated_at_ms=int(meta["updated_at_ms"]),
             messages=messages,
             compaction=compaction,
+            runtime=dict(meta.get("runtime") or {}) or None,
             persistence_path=file_path,
         )
         return session
@@ -221,13 +223,16 @@ class Session:
         return records
 
     def _session_meta_record(self) -> dict[str, Any]:
-        return {
+        record = {
             "type": "session_meta",
             "version": self.version,
             "session_id": self.session_id,
             "created_at_ms": self.created_at_ms,
             "updated_at_ms": self.updated_at_ms,
         }
+        if isinstance(self.runtime, dict) and self.runtime:
+            record["runtime"] = dict(self.runtime)
+        return record
 
 
 def _now_ms() -> int:
@@ -262,11 +267,15 @@ def _parse_session_meta(record: dict[str, Any], *, path: Path, line_no: int) -> 
     for field_name in required:
         if field_name not in record:
             raise ConversationPersistenceError(f"{path}:{line_no} session_meta 缺少 {field_name}")
+    runtime = record.get("runtime")
+    if runtime is not None and not isinstance(runtime, dict):
+        raise ConversationPersistenceError(f"{path}:{line_no} session_meta.runtime 必须是对象")
     return {
         "version": int(record["version"]),
         "session_id": str(record["session_id"]),
         "created_at_ms": int(record["created_at_ms"]),
         "updated_at_ms": int(record["updated_at_ms"]),
+        "runtime": dict(runtime or {}),
     }
 
 

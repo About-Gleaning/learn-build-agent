@@ -21,6 +21,14 @@ class SessionMemoryStore(ABC):
     def save(self, session_id: str, messages: list[Message]) -> None:
         """保存某个会话的历史消息。"""
 
+    @abstractmethod
+    def load_runtime(self, session_id: str) -> dict[str, object] | None:
+        """读取某个会话当前持久化的 runtime 偏好。"""
+
+    @abstractmethod
+    def save_runtime(self, session_id: str, runtime: dict[str, object] | None) -> None:
+        """保存某个会话当前 runtime 偏好；传入 None 表示清空。"""
+
     def append(self, session_id: str, message: Message) -> None:
         """追加保存单条消息；默认退化为 load + save，文件实现会使用 JSONL O(1) 追加。"""
         self.save(session_id, [*self.load(session_id), message])
@@ -61,6 +69,7 @@ class InMemorySessionMemoryStore(SessionMemoryStore):
         self._max_messages = max_messages
         self._trim_enabled = trim_enabled
         self._store: dict[str, list[Message]] = {}
+        self._runtime_store: dict[str, dict[str, object]] = {}
 
     def load(self, session_id: str) -> list[Message]:
         stored = self._store.get(session_id, [])
@@ -75,6 +84,19 @@ class InMemorySessionMemoryStore(SessionMemoryStore):
         )
         self._store[session_id] = deepcopy(trimmed_messages)
 
+    def load_runtime(self, session_id: str) -> dict[str, object] | None:
+        runtime = self._runtime_store.get(session_id)
+        return deepcopy(runtime) if isinstance(runtime, dict) else None
+
+    def save_runtime(self, session_id: str, runtime: dict[str, object] | None) -> None:
+        normalized = (session_id or "").strip()
+        if not normalized:
+            raise ValueError("session_id 不能为空")
+        if runtime:
+            self._runtime_store[normalized] = deepcopy(runtime)
+        else:
+            self._runtime_store.pop(normalized, None)
+
     def append(self, session_id: str, message: Message) -> None:
         stored = self._store.get(session_id, [])
         self.save(session_id, [*stored, message])
@@ -83,8 +105,10 @@ class InMemorySessionMemoryStore(SessionMemoryStore):
         normalized = (session_id or "").strip()
         if not normalized:
             self._store.clear()
+            self._runtime_store.clear()
             return
         self._store.pop(normalized, None)
+        self._runtime_store.pop(normalized, None)
 
 
 class FileSessionMemoryStore(SessionMemoryStore):
@@ -119,6 +143,16 @@ class FileSessionMemoryStore(SessionMemoryStore):
         trimmed = trim_messages_by_compaction_checkpoint([msg for msg in restored if isinstance(msg, dict)])
         return deepcopy(normalize_history_prefix(trimmed))
 
+    def load_runtime(self, session_id: str) -> dict[str, object] | None:
+        file_path = self._session_file(session_id)
+        if not file_path.exists():
+            return None
+        try:
+            session = Session.load_from_path(file_path)
+        except (OSError, ValueError):
+            return None
+        return deepcopy(dict(session.runtime or {})) or None
+
     def save(self, session_id: str, messages: list[Message]) -> None:
         trimmed_messages = _prepare_messages_for_storage(
             messages,
@@ -127,9 +161,21 @@ class FileSessionMemoryStore(SessionMemoryStore):
         )
         file_path = self._session_file(session_id)
         session = Session.new(session_id).with_persistence_path(file_path)
+        existing_runtime = self.load_runtime(session_id)
+        if existing_runtime:
+            session.runtime = existing_runtime
         session.messages = runtime_messages_to_conversation_messages(trimmed_messages)
         session.compaction = detect_compaction_record(trimmed_messages)
         # save_to_path 是 O(n) 快照重写，用于 turn 结束和 compact 后保证主文件自洽。
+        session.save_to_path(file_path)
+
+    def save_runtime(self, session_id: str, runtime: dict[str, object] | None) -> None:
+        file_path = self._session_file(session_id)
+        if file_path.exists():
+            session = Session.load_from_path(file_path).with_persistence_path(file_path)
+        else:
+            session = Session.new(session_id).with_persistence_path(file_path)
+        session.runtime = deepcopy(runtime) if runtime else None
         session.save_to_path(file_path)
 
     def append(self, session_id: str, message: Message) -> None:
