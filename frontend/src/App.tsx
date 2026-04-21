@@ -3665,11 +3665,12 @@ export function App() {
     void (async () => {
       setError("");
       try {
-        const history = filterConversationMessages(await loadHistory(bootSessionId));
+        const { messages: loadedHistory, runtime } = await loadHistory(bootSessionId);
+        const history = filterConversationMessages(loadedHistory);
         if (!isCurrentBootFlow()) {
           return;
         }
-        applySessionRuntimeFromHistory(history);
+        applySessionRuntimeFromHistory(history, runtime);
         startTransition(() => {
           if (isCurrentBootFlow()) {
             setMessages(history);
