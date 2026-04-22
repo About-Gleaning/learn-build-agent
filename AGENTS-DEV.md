@@ -129,6 +129,7 @@ LLM 返回 tool_calls
 
 - `/init`：当工作区缺失 `AGENTS.md` 时初始化首版规范文件
 - `/analyze`：当工作区缺失 `AGENTS-DEV.md` 时初始化首版开发手册；若文件已存在则直接停止。若工作区属于多项目或多模块结构，首版手册必须额外梳理模块边界、依赖方向、启动入口与公共模块职责，不能按单项目视角简化。
+- `/analyze` 同步补充 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`README.md`、`docs/` 这类工作区相对路径，禁止把本机绝对路径写入长期维护文档。
 
 ### 3.4 Web 链路
 
@@ -192,6 +193,7 @@ LSP 查询请求
 - 主日志必须启用生产化保护：按自然日自动切换文件，按 `logging.max_bytes` 做大小兜底轮转，并按 `logging.retention_days` 与 `logging.backup_count` 清理历史文件。
 - `project_runtime.json -> logging` 是日志策略唯一配置来源；新增日志策略字段时必须同步更新配置解析、默认配置、测试与本手册。
 - 日志落盘前必须先做敏感信息脱敏，再做字段截断；默认应开启 `redact_enabled` 与 `truncate_enabled`，避免 token、password、authorization、cookie、大模型上下文或工具参数无限落盘。
+- `logging.llm_request_messages_mode` 控制 `llm.request` 日志中的 `messages/input` 打印范围，默认 `full` 保持全量记录；设置为 `latest` 时仅记录发给 provider 的最新一条消息。
 - `codepilot web` 的 `backend.log/frontend.log` 只用于本地 Web 开发栈诊断，启动时允许清空，不作为生产日志保留策略的一部分。
 - 多进程或容器化生产部署优先使用 stdout/stderr 交给平台采集；若继续使用文件日志，必须先评估多进程写同一文件的并发安全性。
 
@@ -353,8 +355,9 @@ Tool Hook：
 
 LLM Hook：
 
-- 继承 `src/agent/adapters/llm/client.py` 中的 `LLMHook`
-- 在调用前后添加观测、审计或脱敏逻辑
+- 继承 `src/agent/adapters/llm/hooks.py` 中的 `LLMHook`，`client.py` 仅保留兼容导出
+- 默认日志 Hook 实现在 `src/agent/adapters/llm/hooks.py`，`client.py` 仅负责 LLM 调用编排、Hook 注册与调度
+- 在调用前后添加观测、审计或脱敏逻辑时，优先放入 LLM Hook 模块，不要把具体日志业务塞回 client 主流程
 - 支持 `order`、`enabled` 与 `HookFilter`；适合 prompt/request 观测、响应记录和最终 assistant message 的旁路处理
 
 Delegation Hook：

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 import agent.adapters.llm.client as client_module
+import agent.adapters.llm.hooks as llm_hooks_module
 import agent.adapters.llm.vendors as vendors_module
 import agent.config.logging_setup as logging_setup_module
 from agent.adapters.llm.client import (
@@ -2077,6 +2078,21 @@ def test_logging_hook_should_log_full_request_messages_on_tool_followup(monkeypa
     assert 'messages=[{"role":"user","content":"plan_enter工具的描述怎么写的"},{"role":"assistant","content":"我来读取工具描述","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"src/agent/tools/plan_enter.txt\\"}"}}]},{"role":"tool","content":"使用这个工具来建议用户切换到 plan agent","tool_call_id":"call_1"}]' in caplog.text
 
 
+def test_logging_hook_should_log_latest_request_message_when_configured(monkeypatch, caplog):
+    monkeypatch.setattr(
+        llm_hooks_module,
+        "resolve_logging_settings",
+        lambda: LoggingSettings(llm_request_messages_mode="latest"),
+    )
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_success_response("done"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_valid_tool_followup_messages(), tools=[], agent="build", llm_config=_build_chat_config())
+
+    assert 'messages=[{"role":"tool","content":"使用这个工具来建议用户切换到 plan agent","tool_call_id":"call_1"}]' in caplog.text
+    assert "plan_enter工具的描述怎么写的" not in caplog.text
+
+
 def test_logging_hook_should_log_responses_input_structure_on_tool_followup(monkeypatch, caplog):
     config = ResolvedLLMConfig(
         agent="build",
@@ -2096,6 +2112,34 @@ def test_logging_hook_should_log_responses_input_structure_on_tool_followup(monk
 
     assert "llm.request api_mode=responses" in caplog.text
     assert '[{"role":"user","content":"读取这个 PDF"},{"type":"function_call_output","call_id":"call_pdf","output":[{"type":"input_text","text":"PDF read successfully"},{"type":"input_file","file_data":"[omitted_file_data length=8]","filename":"demo.pdf"}]}]' in caplog.text
+    assert "data:application/pdf;base64" not in caplog.text
+
+
+def test_logging_hook_should_log_latest_responses_input_when_configured(monkeypatch, caplog):
+    config = ResolvedLLMConfig(
+        agent="build",
+        provider="gpt",
+        vendor="openai",
+        model="gpt-4.1",
+        max_tokens=32000,
+        api_mode="responses",
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+    )
+    monkeypatch.setattr(
+        llm_hooks_module,
+        "resolve_logging_settings",
+        lambda: LoggingSettings(llm_request_messages_mode="latest"),
+    )
+    _patch_openai_client(monkeypatch, lambda **kwargs: _build_responses_text_response("done"))
+
+    with caplog.at_level("INFO"):
+        create_chat_completion(_build_pdf_tool_followup_messages(), tools=[], agent="build", llm_config=config)
+
+    assert "llm.request api_mode=responses" in caplog.text
+    assert 'input=[{"type":"function_call_output","call_id":"call_pdf","output":[{"type":"input_text","text":"PDF read successfully"},{"type":"input_file","file_data":"[omitted_file_data length=8]","filename":"demo.pdf"}]}]' in caplog.text
+    assert '"role":"user","content":"读取这个 PDF"' not in caplog.text
     assert "data:application/pdf;base64" not in caplog.text
 
 

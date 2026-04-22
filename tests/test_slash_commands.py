@@ -49,6 +49,15 @@ def test_resolve_slash_command_should_render_analyze_prompt_with_multi_project_c
     assert resolved.override_mode == "build"
     assert resolved.display_text == "/analyze"
     assert "AGENTS-DEV.md" in resolved.user_input
+    assert "是否已经明确列出 `AGENTS-DEV.md` 的路径、用途和文档优先级" in resolved.user_input
+    assert "同步写入 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`README.md`、`docs/` 这类相对路径" in resolved.user_input
+    sync_lines = [
+        line
+        for line in resolved.user_input.splitlines()
+        if "是否已经明确列出" in line or "中必须明确列出" in line
+    ]
+    assert sync_lines
+    assert all(str(tmp_path) not in line for line in sync_lines)
     assert "analyze_docs" not in resolved.user_input
     assert "project-context.md" not in resolved.user_input
     assert "必须先判断当前工作区属于单项目、聚合多模块，还是多个项目并存的工作区" in resolved.user_input

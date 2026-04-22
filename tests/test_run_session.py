@@ -301,6 +301,15 @@ def test_run_session_should_resolve_analyze_slash_command_before_llm(monkeypatch
     assert "后续开发主手册" in captured["user_text"]
     assert "必须一并补充到" in captured["user_text"]
     assert "文档分工与优先级" in captured["user_text"]
+    assert "是否已经明确列出 `AGENTS-DEV.md` 的路径、用途和文档优先级" in captured["user_text"]
+    assert "同步写入 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`README.md`、`docs/` 这类相对路径" in captured["user_text"]
+    sync_lines = [
+        line
+        for line in captured["user_text"].splitlines()
+        if "是否已经明确列出" in line or "中必须明确列出" in line
+    ]
+    assert sync_lines
+    assert all(str(tmp_path) not in line for line in sync_lines)
     history_messages = session_module.SESSION_MEMORY_STORE.load("s_analyze")
     assert _last_user_display_text(history_messages) == "/analyze"
 
@@ -5038,7 +5047,8 @@ def test_get_project_runtime_settings_should_read_logging_config(tmp_path, monke
             "retention_days": 14,
             "redact_enabled": true,
             "truncate_enabled": true,
-            "truncate_limit": 2048
+            "truncate_limit": 2048,
+            "llm_request_messages_mode": "latest"
           }
         }
         """.strip(),
@@ -5058,6 +5068,7 @@ def test_get_project_runtime_settings_should_read_logging_config(tmp_path, monke
         assert settings.logging.redact_enabled is True
         assert settings.logging.truncate_enabled is True
         assert settings.logging.truncate_limit == 2048
+        assert settings.logging.llm_request_messages_mode == "latest"
     finally:
         clear_runtime_settings_cache()
 
@@ -5315,6 +5326,30 @@ def test_get_project_runtime_settings_should_reject_non_positive_logging_limit(t
         raise AssertionError("期望非法 logging.truncate_limit 配置抛出异常")
     except ValueError as exc:
         assert "logging.truncate_limit" in str(exc)
+    finally:
+        clear_runtime_settings_cache()
+
+
+def test_get_project_runtime_settings_should_reject_invalid_llm_request_messages_mode(tmp_path, monkeypatch):
+    config_path = tmp_path / "project_runtime.json"
+    config_path.write_text(
+        """
+        {
+          "logging": {
+            "llm_request_messages_mode": "recent"
+          }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+    clear_runtime_settings_cache()
+    monkeypatch.setattr("agent.config.settings.PROJECT_RUNTIME_CONFIG_PATH", config_path)
+
+    try:
+        get_project_runtime_settings()
+        raise AssertionError("期望非法 logging.llm_request_messages_mode 配置抛出异常")
+    except ValueError as exc:
+        assert "logging.llm_request_messages_mode" in str(exc)
     finally:
         clear_runtime_settings_cache()
 

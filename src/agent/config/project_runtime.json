@@ -59,7 +59,9 @@
     // 是否启用普通日志文本截断。生产默认开启，避免大模型上下文、工具参数或异常详情无限落盘。
     "truncate_enabled": true,
     // 启用截断时，单个日志字段允许保留的最大字符数。
-    "truncate_limit": 2000
+    "truncate_limit": 2000,
+    // LLM request 日志中的 messages/input 打印模式。full 打印全量，latest 仅打印最新一条。
+    "llm_request_messages_mode": "full"
   },
   "session_memory": {
     // 是否按消息条数裁剪会话历史。关闭后会保留全部非 system 消息，但仍保留 checkpoint 相关收口逻辑。
