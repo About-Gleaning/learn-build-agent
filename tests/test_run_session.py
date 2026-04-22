@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from agent.config.settings import (
 )
 from agent.runtime.workspace import build_plan_storage_path, configure_workspace, get_workspace
 from agent.runtime.tool_executor import ToolHookInterruption
+from agent.runtime.session_hooks import SessionHook
+from agent.runtime.task_artifacts import TaskArtifactSessionHook
 from agent.tools.file_edit_state import clear_file_edit_states
 from agent.tools.handlers import build_plan_placeholder_path
 from agent.mcp.runtime import _shutdown_asyncio_thread_runner
@@ -340,6 +343,49 @@ def test_run_session_should_stop_analyze_when_dev_agents_exists(monkeypatch, tmp
     assert _last_user_display_text(history_messages) == "/analyze"
 
 
+def test_run_session_should_skip_artifact_ingest_for_slash_command_prompt_path(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("# 已存在\n", encoding="utf-8")
+    called = {"artifact": False}
+
+    def fake_ingest(*args, **kwargs):
+        del args, kwargs
+        called["artifact"] = True
+        raise AssertionError("slash command 转 prompt 后也不应进入工件识别")
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "已生成说明书")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.ingest_user_input", fake_ingest)
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("/analyze", session_id="s_analyze_skip_artifact", mode="plan")
+
+    assert get_message_text(result) == "已生成说明书"
+    assert called["artifact"] is False
+
+
+def test_run_session_should_skip_artifact_ingest_for_slash_command_immediate_output(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("# 已存在\n", encoding="utf-8")
+    called = {"artifact": False}
+
+    def fake_ingest(*args, **kwargs):
+        del args, kwargs
+        called["artifact"] = True
+        raise AssertionError("slash command 立即返回时不应进入工件识别")
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.ingest_user_input", fake_ingest)
+
+    result = run_session("/init", session_id="s_init_skip_artifact", mode="plan")
+
+    assert "已存在 `AGENTS.md`" in get_message_text(result)
+    assert called["artifact"] is False
+
+
 def test_run_session_should_resolve_init_slash_command_before_llm_when_agents_missing(monkeypatch, tmp_path):
     configure_workspace(tmp_path)
     captured = {"user_text": "", "agent": ""}
@@ -403,6 +449,42 @@ def test_run_session_should_forward_unknown_slash_like_input_to_llm(monkeypatch)
     assert captured["user_text"] == "/missing"
     history_messages = session_module.SESSION_MEMORY_STORE.load("s_missing")
     assert _last_user_text(history_messages) == "/missing"
+
+
+def test_run_session_should_pass_frontend_runtime_to_artifact_ingest(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    clear_runtime_settings_cache()
+    captured = {"provider": "", "model": ""}
+
+    def fake_ingest(session_id, user_input, llm_config=None):
+        del session_id, user_input
+        captured["provider"] = llm_config.provider if llm_config else ""
+        captured["model"] = llm_config.model if llm_config else ""
+        return False
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, agent
+        assert llm_config.provider == "gpt"
+        assert llm_config.model == "gpt-4.1"
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "已完成")
+        return assistant
+
+    try:
+        monkeypatch.setattr("agent.runtime.task_artifacts.ingest_user_input", fake_ingest)
+        monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+        result = run_session(
+            "请根据这段接口资料生成代码",
+            session_id="s_artifact_frontend_runtime",
+            provider="gpt",
+            provider_specified=True,
+        )
+
+        assert get_message_text(result) == "已完成"
+        assert captured == {"provider": "gpt", "model": "gpt-4.1"}
+    finally:
+        clear_runtime_settings_cache()
 
 
 def test_run_session_should_forward_slash_command_with_extra_text_to_llm(monkeypatch):
@@ -1426,7 +1508,8 @@ def test_edit_file_tool_schema_should_use_camel_case_and_replace_all():
     assert "oldString" in properties
     assert "newString" in properties
     assert "replaceAll" in properties
-    assert edit_tool["function"]["parameters"]["required"] == ["filePath", "oldString", "newString"]
+    assert "related_artifacts" in properties
+    assert edit_tool["function"]["parameters"]["required"] == ["filePath", "oldString", "newString", "related_artifacts"]
 
 
 def test_write_file_tool_schema_should_use_file_path_and_content():
@@ -1436,7 +1519,8 @@ def test_write_file_tool_schema_should_use_file_path_and_content():
 
     assert "filePath" in properties
     assert "content" in properties
-    assert write_tool["function"]["parameters"]["required"] == ["filePath", "content"]
+    assert "related_artifacts" in properties
+    assert write_tool["function"]["parameters"]["required"] == ["filePath", "content", "related_artifacts"]
 
 
 def test_lsp_tool_schema_should_expose_operation_file_path_and_position():
@@ -1489,6 +1573,7 @@ def test_run_session_should_route_write_file_arguments(monkeypatch):
     result = handlers["write_file"](
         filePath="/tmp/demo.py",
         content="hello",
+        related_artifacts=[],
     )
 
     assert result["metadata"]["status"] == "completed"
@@ -1533,6 +1618,7 @@ def test_run_session_should_route_camel_case_edit_file_arguments(monkeypatch):
         oldString="old",
         newString="new",
         replaceAll=True,
+        related_artifacts=[],
     )
 
     assert result["metadata"]["status"] == "completed"
@@ -1542,6 +1628,186 @@ def test_run_session_should_route_camel_case_edit_file_arguments(monkeypatch):
         "new_string": "new",
         "replace_all": True,
     }
+
+
+def test_task_artifact_session_hook_should_extend_session_hook():
+    assert isinstance(TaskArtifactSessionHook(), SessionHook)
+
+
+def test_write_file_should_reject_invalid_related_artifacts_type():
+    handlers = session_module._build_tool_handlers(
+        session_id="s_write_file_invalid_related",
+        get_mode=lambda: "build",
+        get_latest_model=lambda: "qwen-plus",
+        get_current_runtime=lambda: ResolvedLLMConfig(
+            agent="build",
+            provider="qwen",
+            vendor="qwen",
+            model="qwen3-coder-next",
+            max_tokens=32000,
+            api_mode="responses",
+            base_url="https://example.com",
+            api_key="test",
+            timeout_seconds=60,
+        ),
+    )
+
+    result = handlers["write_file"](
+        filePath="/tmp/demo.py",
+        content="hello",
+        related_artifacts="erp_mid_fly.sql",
+    )
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "related_artifacts_invalid"
+
+
+def test_edit_file_should_reject_invalid_related_artifacts_item():
+    handlers = session_module._build_tool_handlers(
+        session_id="s_edit_file_invalid_related",
+        get_mode=lambda: "build",
+        get_latest_model=lambda: "qwen-plus",
+        get_current_runtime=lambda: ResolvedLLMConfig(
+            agent="build",
+            provider="qwen",
+            vendor="qwen",
+            model="qwen3-coder-next",
+            max_tokens=32000,
+            api_mode="responses",
+            base_url="https://example.com",
+            api_key="test",
+            timeout_seconds=60,
+        ),
+    )
+
+    result = handlers["edit_file"](
+        filePath="/tmp/demo.py",
+        oldString="old",
+        newString="new",
+        related_artifacts=["erp_mid_fly.sql", 1],
+    )
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "related_artifacts_invalid"
+
+
+def test_task_artifact_ingestion_should_inject_prompt_before_first_llm(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    captured = {"system": ""}
+
+    def fake_ingest(messages, tools, llm_config=None, agent=""):
+        del tools, llm_config
+        assert agent == "artifact_ingest"
+        response = create_message("assistant", messages[-1]["info"]["session_id"], status="completed", finish_reason="stop")
+        append_text_part(
+            response,
+            json.dumps(
+                {
+                    "task_goal": "根据表结构开发查询",
+                    "artifacts": [
+                        {
+                            "file": "erp_mid_fly.sql",
+                            "type": "sql",
+                            "note": "erp_mid_fly 表结构",
+                            "content": "CREATE TABLE erp_mid_fly (id bigint);",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return response
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        captured["system"] = get_message_text(messages[0])
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed", finish_reason="stop")
+        append_text_part(assistant, "done")
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("请根据下面表结构开发查询：CREATE TABLE erp_mid_fly (id bigint);", session_id="s_artifact_prompt")
+
+    assert get_message_text(result) == "done"
+    assert "PERSISTENT CONTEXT" in captured["system"]
+    assert "erp_mid_fly.sql" in captured["system"]
+    assert "CREATE TABLE erp_mid_fly" not in captured["system"]
+
+
+def test_task_artifact_ingestion_failure_should_stop_session(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+
+    def broken_ingest(*args, **kwargs):
+        raise RuntimeError("ingest boom")
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", broken_ingest)
+    monkeypatch.setattr(session_module, "create_chat_completion", lambda *args, **kwargs: pytest.fail("主 LLM 不应被调用"))
+
+    with pytest.raises(HookExecutionError, match="task_artifact_ingestion"):
+        run_session("CREATE TABLE erp_mid_fly (id bigint);", session_id="s_artifact_fail")
+
+
+def test_run_session_write_file_should_accept_current_read_artifact_marker(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    target = tmp_path / "Demo.java"
+    call_state = {"count": 0}
+
+    def fake_ingest(messages, tools, llm_config=None, agent=""):
+        response = create_message("assistant", messages[-1]["info"]["session_id"], status="completed", finish_reason="stop")
+        append_text_part(
+            response,
+            json.dumps(
+                {
+                    "artifacts": [
+                        {
+                            "file": "erp_mid_fly.sql",
+                            "type": "sql",
+                            "note": "erp_mid_fly 表结构",
+                            "content": "CREATE TABLE erp_mid_fly (id bigint);",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return response
+
+    def fake_chat(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config, agent
+        call_state["count"] += 1
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        if call_state["count"] == 1:
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_read",
+                name="read_artifact",
+                arguments='{"filename":"erp_mid_fly.sql"}',
+            )
+            append_tool_call_part(
+                assistant,
+                tool_call_id="call_write",
+                name="write_file",
+                arguments=json.dumps(
+                    {
+                        "filePath": str(target),
+                        "content": "class Demo { String sql = \"select id from erp_mid_fly\"; }",
+                        "related_artifacts": ["erp_mid_fly.sql"],
+                    }
+                ),
+            )
+        else:
+            append_text_part(assistant, _last_tool_result_content(messages))
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
+    monkeypatch.setattr(session_module, "create_chat_completion", fake_chat)
+
+    result = run_session("CREATE TABLE erp_mid_fly (id bigint);", session_id="s_artifact_write")
+
+    assert "创建成功" in get_message_text(result)
+    assert target.exists()
 
 
 def test_run_session_should_route_lsp_arguments(monkeypatch):

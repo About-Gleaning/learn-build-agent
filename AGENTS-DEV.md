@@ -112,6 +112,7 @@ LLM 返回 tool_calls
 - 当前工具分发总入口在 `src/agent/runtime/session.py`
 - `src/agent/tools/handlers.py` 不是工具注册表，它主要提供公共结果构造与少量辅助逻辑
 - MCP 工具会被统一转换为普通 function tool，再并入同一执行面
+- 任务权威资料通过 `TaskArtifactSessionHook` 触发 `artifact_ingest` agent 识别并落盘；`read_artifact` 成功后的 tool message metadata 是后续 `write_file/edit_file` 判断“已读取”的唯一依据。
 
 ### 3.3 Slash Command 链路
 
@@ -183,6 +184,7 @@ LSP 查询请求
   - `workspaces/tool-output/`
   - `workspaces/web-dev/<workspace_id>/`
   - `logs/`
+- 任务工件按当前工作区隔离保存到 `get_workspace().workspace_home / "artifacts" / <session_id>/`，包含 `task_brief.md`、`task_facts.json` 与 `artifacts/` 原文目录。
 
 ### 5.1.1 日志保存策略
 
@@ -265,6 +267,8 @@ LSP 查询请求
 - `write_file` 仅用于创建新文件，禁止覆盖已有文件。
 - 已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。
 - `write_file` / `edit_file` 都必须传绝对路径。
+- `write_file` / `edit_file` 都必须传 `related_artifacts` 数组；涉及任务权威资料时必须先 `list_artifacts` / `read_artifact`，再声明依赖文件名。
+- 权威资料读取状态不能用纯内存标记判断，必须通过当前 messages 中 `read_artifact` tool result 的 `artifact_read/artifact_file/artifact_hash/artifact_version` metadata 判断；compact 后 marker 丢失时必须重新读取。
 - `edit_file` 默认要求 `oldString` 在文件中唯一命中；若不唯一，应补充上下文或显式使用 `replaceAll=true`。
 - 编辑已有文件前，建议先读取同一文件，避免基于陈旧上下文误改。
 
@@ -300,6 +304,8 @@ LSP 查询请求
 - 在 `src/agent/runtime/session.py` 中接入工具分发
 - 工具返回优先保持结构化，至少包含 `output` 与 `metadata.status`
 - 涉及路径、安全、权限控制的逻辑优先复用现有公共能力
+- 任务工件相关工具的落盘与 prompt 摘要归口在 `src/agent/runtime/task_artifacts.py`；`list_artifacts`、`read_artifact`、`update_artifact` 与写入前置校验归口在 `src/agent/tools/artifact_tool.py`。
+- ingestion 由 fail-fast `SessionHook` 接入；如果检测到疑似权威资料但解析 agent 失败，必须终止当前任务，禁止继续猜测开发。
 
 ### 7.3 新增 Subagent
 

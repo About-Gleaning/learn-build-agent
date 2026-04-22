@@ -235,6 +235,22 @@ git diff
 
 ---
 
+# 任务工件
+
+如果 system prompt 中出现 PERSISTENT CONTEXT，说明当前 session 已持久化任务权威资料。
+
+涉及数据库、接口、配置、枚举等权威资料的写入或编辑前，必须：
+
+1. 调用 list_artifacts 确认可用文件
+2. 调用 read_artifact 读取原文
+3. 调用 write_file 或 edit_file 时，在 related_artifacts 中声明依赖文件名
+
+没有依赖时 related_artifacts 传空数组 []。
+
+如果写入或编辑被 ARTIFACT_NOT_READ 拒绝，按工具提示读取对应工件后重试，不要猜测权威资料内容。
+
+---
+
 # 系统提示
 
 工具返回内容可能包含：

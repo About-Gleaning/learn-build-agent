@@ -23,3 +23,18 @@ def isolate_workspace_runtime(monkeypatch, tmp_path):
     workspace_module.reset_workspace()
     yield
     workspace_module.reset_workspace()
+
+
+@pytest.fixture(autouse=True)
+def stub_task_artifact_ingest(monkeypatch):
+    from agent.core.message import append_text_part, create_message
+    from agent.runtime import task_artifacts
+
+    def fake_empty_ingest(messages, tools, llm_config=None, agent=""):
+        del tools, llm_config, agent
+        session_id = messages[-1]["info"]["session_id"]
+        response = create_message("assistant", session_id, status="completed", finish_reason="stop")
+        append_text_part(response, '{"artifacts": []}')
+        return response
+
+    monkeypatch.setattr(task_artifacts, "create_chat_completion", fake_empty_ingest)

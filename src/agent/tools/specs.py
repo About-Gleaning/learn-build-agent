@@ -218,8 +218,17 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                             "type": "string",
                             "description": "要写入文件的内容。",
                         },
+                        "related_artifacts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "本次写操作依赖的权威资料文件名列表（通过 list_artifacts 获取可用文件名）。"
+                                "若当前写操作涉及数据库、接口、配置等有权威来源的内容，必须声明对应文件名。"
+                                "不依赖任何权威资料时传空数组。"
+                            ),
+                        },
                     },
-                    "required": ["filePath", "content"],
+                    "required": ["filePath", "content", "related_artifacts"],
                 },
             },
         },
@@ -235,8 +244,67 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                         "oldString": {"type": "string", "description": "要替换的文本。"},
                         "newString": {"type": "string", "description": "用于替换的新文本（必须与原字符串不同）。"},
                         "replaceAll": {"type": "boolean", "description": "是否替换 oldString 的所有出现位置（默认为 false）。"},
+                        "related_artifacts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "本次编辑操作依赖的权威资料文件名列表（通过 list_artifacts 获取可用文件名）。"
+                                "若当前编辑涉及数据库、接口、配置等有权威来源的内容，必须声明对应文件名。"
+                                "不依赖任何权威资料时传空数组。"
+                            ),
+                        },
                     },
-                    "required": ["filePath", "oldString", "newString"],
+                    "required": ["filePath", "oldString", "newString", "related_artifacts"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_artifacts",
+                "description": "列出当前 session 已持久化的任务权威资料，并标识哪些资料已通过 read_artifact 读取且仍是最新版本。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_artifact",
+                "description": "读取当前 session 中某个任务权威资料的原文。涉及权威资料的写入或编辑前，必须先读取对应工件。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "要读取的任务工件文件名，必须来自 list_artifacts 返回结果。",
+                        },
+                    },
+                    "required": ["filename"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_artifact",
+                "description": "更新当前 session 中某个任务权威资料。旧版本会自动归档，后续写入/编辑必须重新读取新版本。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "要更新的任务工件文件名，必须来自 list_artifacts 返回结果。",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "新的权威资料原文。",
+                        },
+                    },
+                    "required": ["filename", "content"],
                 },
             },
         },

@@ -1,5 +1,6 @@
 import os
 import base64
+import json
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,12 @@ from agent.tools.handlers import (
 from agent.tools.question_tool import CUSTOM_OPTION_LABEL, run_question
 from agent.tools.read_file_tool import resolve_readable_file_path, run_read
 from agent.tools.lsp_tool import run_lsp
+from agent.tools.artifact_tool import (
+    check_before_write,
+    run_list_artifacts,
+    run_read_artifact,
+    run_update_artifact,
+)
 from agent.tools.skill_tool import run_load_skill
 from agent.tools.todo_manager import TodoManager
 from agent.tools.write_file_tool import run_write
@@ -39,6 +46,8 @@ from agent.runtime.workspace import (
     configure_workspace,
     get_workspace,
 )
+from agent.runtime.task_artifacts import get_artifacts_dir, ingest_user_input, load_task_facts
+from agent.core.message import append_text_part, append_tool_part, create_message, get_message_text
 
 
 def _set_test_session(session_id: str = "test_handler_session") -> str:
@@ -56,6 +65,211 @@ def test_build_plan_placeholder_path_should_be_absolute():
     path = build_plan_placeholder_path("s:1/test")
     assert path.is_absolute()
     assert path == build_plan_storage_path("s:1/test")
+
+
+def _artifact_ingest_response(session_id: str, payload: dict):
+    message = create_message("assistant", session_id, status="completed", finish_reason="stop")
+    append_text_part(message, json.dumps(payload, ensure_ascii=False))
+    return message
+
+
+def _artifact_read_message(session_id: str, filename: str, *, artifact_hash: str, artifact_version: str):
+    message = create_message("tool", session_id, status="completed")
+    append_tool_part(
+        message,
+        tool_call_id="call_read_artifact",
+        name="read_artifact",
+        status="completed",
+        output={
+            "output": "schema",
+            "metadata": {
+                "status": "completed",
+                "artifact_read": True,
+                "artifact_file": filename,
+                "artifact_hash": artifact_hash,
+                "artifact_version": artifact_version,
+            },
+        },
+    )
+    return message
+
+
+def test_task_artifact_ingest_should_persist_sql_facts(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("s_artifact_ingest")
+
+    def fake_ingest(messages, tools, llm_config=None, agent=""):
+        assert agent == "artifact_ingest"
+        return _artifact_ingest_response(
+            "s_artifact_ingest",
+            {
+                "task_goal": "实现用户查询",
+                "artifacts": [
+                    {
+                        "file": "erp_mid_fly.sql",
+                        "type": "sql",
+                        "note": "erp_mid_fly 表结构",
+                        "content": "CREATE TABLE erp_mid_fly (id bigint);",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
+
+    assert ingest_user_input("s_artifact_ingest", "```sql\nCREATE TABLE erp_mid_fly (id bigint);\n```") is True
+    artifact_path = get_artifacts_dir("s_artifact_ingest") / "erp_mid_fly.sql"
+    assert artifact_path.read_text(encoding="utf-8") == "CREATE TABLE erp_mid_fly (id bigint);"
+    facts = load_task_facts("s_artifact_ingest")
+    assert facts["artifacts"][0]["file"] == "erp_mid_fly.sql"
+    assert "mapper" in facts["artifacts"][0]["triggers"]["keywords"]
+
+
+def test_task_artifact_ingest_should_ask_agent_for_plain_text(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("s_artifact_plain")
+    captured = {"called": False, "input": ""}
+
+    def fake_ingest(messages, tools, llm_config=None, agent=""):
+        del tools, llm_config
+        assert agent == "artifact_ingest"
+        captured["called"] = True
+        captured["input"] = get_message_text(messages[-1])
+        return _artifact_ingest_response("s_artifact_plain", {"artifacts": []})
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
+
+    assert ingest_user_input("s_artifact_plain", "erp_mid_fly 表有 id、name、status 三个字段") is False
+    assert captured == {"called": True, "input": "erp_mid_fly 表有 id、name、status 三个字段"}
+    assert not load_task_facts("s_artifact_plain")["artifacts"]
+
+
+def test_artifact_tools_should_mark_read_via_tool_message_metadata(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("s_artifact_read")
+
+    def fake_ingest(messages, tools, llm_config=None, agent=""):
+        return _artifact_ingest_response(
+            "s_artifact_read",
+            {
+                "artifacts": [
+                    {
+                        "file": "erp_mid_fly.sql",
+                        "type": "sql",
+                        "note": "erp_mid_fly 表结构",
+                        "content": "CREATE TABLE erp_mid_fly (id bigint);",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
+    ingest_user_input("s_artifact_read", "CREATE TABLE erp_mid_fly (id bigint);")
+    read_result = run_read_artifact("s_artifact_read", "erp_mid_fly.sql")
+    metadata = read_result["metadata"]
+    messages = [
+        _artifact_read_message(
+            "s_artifact_read",
+            "erp_mid_fly.sql",
+            artifact_hash=metadata["artifact_hash"],
+            artifact_version=metadata["artifact_version"],
+        )
+    ]
+
+    listed = run_list_artifacts("s_artifact_read", messages)
+    assert listed["metadata"]["artifacts"][0]["read"] is True
+    assert check_before_write(
+        "s_artifact_read",
+        ["erp_mid_fly.sql"],
+        "/tmp/UserMapper.java",
+        "select * from erp_mid_fly",
+        messages,
+    )["success"] is True
+
+
+def test_artifact_write_check_should_reject_missing_or_stale_marker(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("s_artifact_guard")
+
+    def fake_ingest(messages, tools, llm_config=None, agent=""):
+        return _artifact_ingest_response(
+            "s_artifact_guard",
+            {
+                "artifacts": [
+                    {
+                        "file": "erp_mid_fly.sql",
+                        "type": "sql",
+                        "note": "erp_mid_fly 表结构",
+                        "content": "CREATE TABLE erp_mid_fly (id bigint);",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
+    ingest_user_input("s_artifact_guard", "CREATE TABLE erp_mid_fly (id bigint);")
+
+    missing = check_before_write(
+        "s_artifact_guard",
+        ["erp_mid_fly.sql"],
+        "/tmp/UserMapper.java",
+        "select * from erp_mid_fly",
+        [],
+    )
+    assert missing["metadata"]["error_code"] == "ARTIFACT_NOT_READ"
+
+    read_result = run_read_artifact("s_artifact_guard", "erp_mid_fly.sql")
+    stale_messages = [
+        _artifact_read_message(
+            "s_artifact_guard",
+            "erp_mid_fly.sql",
+            artifact_hash=read_result["metadata"]["artifact_hash"],
+            artifact_version=read_result["metadata"]["artifact_version"],
+        )
+    ]
+    update_result = run_update_artifact("s_artifact_guard", "erp_mid_fly.sql", "CREATE TABLE erp_mid_fly (id bigint, name varchar(64));")
+    assert update_result["metadata"]["status"] == "completed"
+
+    stale = check_before_write(
+        "s_artifact_guard",
+        ["erp_mid_fly.sql"],
+        "/tmp/UserMapper.java",
+        "select * from erp_mid_fly",
+        stale_messages,
+    )
+    assert stale["metadata"]["error_code"] == "ARTIFACT_NOT_READ"
+
+
+def test_artifact_keyword_fallback_should_reject_empty_related_artifacts(monkeypatch, tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session("s_artifact_keyword")
+
+    def fake_ingest(messages, tools, llm_config=None, agent=""):
+        return _artifact_ingest_response(
+            "s_artifact_keyword",
+            {
+                "artifacts": [
+                    {
+                        "file": "erp_mid_fly.sql",
+                        "type": "sql",
+                        "note": "erp_mid_fly 表结构",
+                        "content": "CREATE TABLE erp_mid_fly (id bigint);",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
+    ingest_user_input("s_artifact_keyword", "CREATE TABLE erp_mid_fly (id bigint);")
+
+    result = check_before_write(
+        "s_artifact_keyword",
+        [],
+        "/tmp/UserMapper.java",
+        "class UserMapper { String sql = \"select * from erp_mid_fly\"; }",
+        [],
+    )
+    assert result["metadata"]["error_code"] == "ARTIFACT_NOT_READ"
 
 
 def test_run_plan_enter_should_return_confirmation_required_when_unconfirmed():
