@@ -1573,6 +1573,43 @@ def test_run_edit_should_reject_relative_path(tmp_path):
     assert result["metadata"]["error_code"] == "edit_path_not_absolute"
 
 
+def test_run_edit_should_allow_utf8_text_when_sample_ends_inside_multibyte_character(tmp_path):
+    file_path = tmp_path / "ReportTaskPage.js"
+    file_path.write_bytes(b"a" * 4095 + "中\nconst oldName = true;\n".encode("utf-8"))
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_edit(str(file_path.resolve()), "oldName", "newName")
+
+    assert result["metadata"]["status"] == "completed"
+    assert file_path.read_text(encoding="utf-8").endswith("const newName = true;\n")
+
+
+def test_run_edit_should_reject_non_utf8_text_with_encoding_error(tmp_path):
+    file_path = tmp_path / "Legacy.java"
+    file_path.write_bytes("public class Legacy { // 中文\n}".encode("gbk"))
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_edit(str(file_path.resolve()), "Legacy", "Modern")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "edit_text_encoding_unsupported"
+    assert "UTF-8" in result["output"]
+
+
+def test_run_edit_should_still_reject_real_binary_file(tmp_path):
+    file_path = tmp_path / "image.png"
+    file_path.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_edit(str(file_path.resolve()), "old", "new")
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "edit_binary_unsupported"
+
+
 def test_build_plan_placeholder_path_should_anchor_to_workspace_plan_path(tmp_path):
     project_root = tmp_path / "project-root"
     project_root.mkdir()
