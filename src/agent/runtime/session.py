@@ -106,7 +106,15 @@ from .session_hooks import (
 )
 from .tool_executor import ToolExecutor, ToolHook, ToolHookInterruption, ToolResult, get_global_tool_hooks
 from .workspace import get_workspace
-from .task_artifacts import TaskArtifactSessionHook, render_persistent_context
+from .task_artifacts import (
+    ARTIFACT_INGEST_AGENT,
+    INGEST_PROMPT_PATH,
+    TaskArtifactError,
+    TaskArtifactSessionHook,
+    persist_ingest_result,
+    render_persistent_context,
+    should_ingest_user_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1753,6 +1761,11 @@ def _supports_keyword_arg(func: Callable[..., Any], arg_name: str) -> bool:
     return False
 
 
+def _supports_streaming_artifact_ingest(func: Callable[..., Any]) -> bool:
+    """仅对显式声明能力的流式入口启用内部 ingest，避免普通测试桩误消费首轮请求。"""
+    return bool(getattr(func, "supports_artifact_ingest", False)) and _supports_keyword_arg(func, "agent")
+
+
 def _call_chat_completion(
     *,
     messages: list[Message],
@@ -3015,6 +3028,91 @@ def _run_session_stream(
         )
         return event
 
+    prelude_projection = AssistantProjection()
+
+    def _consume_internal_stream(stream: Generator[dict[str, Any], None, Message]) -> Message:
+        """消费内部子流程并保留返回值；内部文本和 done 不向用户侧转发。"""
+        while True:
+            try:
+                event = next(stream)
+            except StopIteration as stop:
+                return stop.value
+            event_type = str(event.get("type", "")).strip()
+            if event_type in {"text_delta", "reasoning_delta", "done"}:
+                continue
+            # artifact_ingest 只暴露外层包装事件，避免内部 round/tool 事件干扰主时间线。
+            continue
+
+    def _run_streaming_artifact_ingest_if_needed() -> Generator[dict[str, Any], None, None]:
+        if depth != 0 or not mode_enabled:
+            return
+        if not _supports_streaming_artifact_ingest(create_chat_completion_stream):
+            # 内部流式 ingest 必须能把 runtime agent 传给 LLM 层，否则测试桩或旧适配器无法区分主流程与内部流程。
+            return
+        user_message = messages[-1] if messages and get_role(messages[-1]) == "user" else None
+        if not should_ingest_user_input(prepared_input.user_input, user_message):
+            return
+
+        started_at = utc_now_iso()
+        ingest_start_event = _emit_event(
+            "ingest_start",
+            agent=ARTIFACT_INGEST_AGENT,
+            agent_kind=_resolve_agent_kind(ARTIFACT_INGEST_AGENT),
+            depth=depth,
+            status="running",
+            started_at=started_at,
+        )
+        _record_projection_event(prelude_projection, ingest_start_event)
+        yield ingest_start_event
+
+        try:
+            ingest_message = _consume_internal_stream(
+                _run_session_stream(
+                    prepared_input.user_input,
+                    session_id=active_session_id,
+                    tools=[],
+                    system_prompt=INGEST_PROMPT_PATH.read_text(encoding="utf-8").strip(),
+                    runtime_agent=ARTIFACT_INGEST_AGENT,
+                    llm_config=current_runtime,
+                    depth=depth + 1,
+                    max_rounds=1,
+                    session_hooks=session_hooks,
+                    delegation_hooks=delegation_hooks,
+                )
+            )
+            ingest_status = str(ingest_message.get("info", {}).get("status", "")).strip().lower()
+            if ingest_status != "completed":
+                raise TaskArtifactError("artifact_ingest agent 未成功完成")
+            persist_ingest_result(active_session_id, get_message_text(ingest_message))
+        except Exception as exc:
+            error_event = _emit_event(
+                "ingest_error",
+                agent=ARTIFACT_INGEST_AGENT,
+                agent_kind=_resolve_agent_kind(ARTIFACT_INGEST_AGENT),
+                depth=depth,
+                status="failed",
+                finish_reason="error",
+                code=normalize_error(exc).get("code", type(exc).__name__),
+                message=str(exc),
+                completed_at=utc_now_iso(),
+            )
+            _record_projection_event(prelude_projection, error_event)
+            yield error_event
+            raise
+
+        done_event = _emit_event(
+            "ingest_done",
+            agent=ARTIFACT_INGEST_AGENT,
+            agent_kind=_resolve_agent_kind(ARTIFACT_INGEST_AGENT),
+            depth=depth,
+            status="completed",
+            finish_reason="stop",
+            started_at=started_at,
+            completed_at=utc_now_iso(),
+        )
+        _record_projection_event(prelude_projection, done_event)
+        yield done_event
+
     def _persist_projection(
         projection: AssistantProjection,
         *,
@@ -3121,6 +3219,8 @@ def _run_session_stream(
 
     round_no = 0
     try:
+        yield from _run_streaming_artifact_ingest_if_needed()
+        prelude_projection_pending = bool(prelude_projection.process_items or prelude_projection.display_parts)
         yield _emit_event(
             "start",
             agent=initial_agent,
@@ -3277,7 +3377,14 @@ def _run_session_stream(
                 started_at=round_started_at,
             )
             yield round_start_event
-            current_projection = AssistantProjection()
+            if prelude_projection_pending:
+                current_projection = AssistantProjection(
+                    process_items=[dict(item) for item in prelude_projection.process_items],
+                    display_parts=[dict(item) for item in prelude_projection.display_parts],
+                )
+                prelude_projection_pending = False
+            else:
+                current_projection = AssistantProjection()
             active_process_items = current_projection.process_items
             active_display_parts = current_projection.display_parts
             display_text_merge_open = False

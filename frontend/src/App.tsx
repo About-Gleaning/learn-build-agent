@@ -2064,6 +2064,18 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
     return createItem("error", `${agent} 会话异常`, readString(payload, "message", "未知错误"));
   }
 
+  if (eventName === "ingest_start") {
+    return createItem("ingest_start", "任务资料识别开始", "正在识别用户输入中的权威资料");
+  }
+
+  if (eventName === "ingest_done") {
+    return createItem("ingest_done", "任务资料识别完成", `状态: ${readString(payload, "status", "completed")}`);
+  }
+
+  if (eventName === "ingest_error") {
+    return createItem("ingest_error", "任务资料识别失败", readString(payload, "message", "未知错误"));
+  }
+
   return createItem(eventName, `${agent} 事件: ${eventName}`, JSON.stringify(payload));
 }
 

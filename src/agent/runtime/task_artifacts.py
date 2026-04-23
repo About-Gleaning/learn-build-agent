@@ -166,7 +166,7 @@ def _normalize_artifact_item(raw: Any) -> dict[str, str] | None:
     }
 
 
-def _run_ingest_agent(session_id: str, user_input: str, llm_config: ResolvedLLMConfig | None = None) -> dict[str, Any]:
+def _run_ingest_agent(session_id: str, user_input: str, llm_config: ResolvedLLMConfig | None = None) -> str:
     prompt = INGEST_PROMPT_PATH.read_text(encoding="utf-8").strip()
     runtime = llm_config or resolve_llm_config("build")
     system_message = create_message("system", session_id=session_id)
@@ -182,14 +182,35 @@ def _run_ingest_agent(session_id: str, user_input: str, llm_config: ResolvedLLMC
     text = get_message_text(response)
     if response.get("info", {}).get("status") != "completed":
         raise TaskArtifactError("artifact_ingest agent 未成功完成")
-    return _extract_json_object(text)
+    return text
 
 
-def ingest_user_input(session_id: str, user_input: str, llm_config: ResolvedLLMConfig | None = None) -> bool:
-    """识别并落盘本轮用户输入中的权威资料。返回是否产生或更新了工件。"""
+def should_ingest_user_input(user_input: str, user_message: Message | None = None) -> bool:
+    """判断本轮用户输入是否需要交给 artifact_ingest。
+
+    这里只过滤运行时控制输入；普通自然语言仍交给专用 agent 判断，避免漏掉口述资料。
+    """
+    normalized_input = (user_input or "").strip()
+    if not normalized_input:
+        return False
+    # slash command 是运行时控制命令，不属于用户提供的权威资料来源。
+    if _is_registered_slash_command(normalized_input):
+        return False
+    message = user_message if isinstance(user_message, dict) else {}
+    for part in message.get("parts", []) if isinstance(message, dict) else []:
+        meta = part.get("meta") if isinstance(part, dict) and isinstance(part.get("meta"), dict) else {}
+        if bool(meta.get("slash_command")) or bool(meta.get("synthetic")):
+            return False
+        display_text = str(meta.get("display_text", "")).strip()
+        if display_text.startswith("/"):
+            return False
+    return True
+
+
+def persist_ingest_result(session_id: str, response_text: str) -> bool:
+    """解析 artifact_ingest 输出并落盘。返回是否产生或更新了工件。"""
     try:
-        # 每轮普通用户输入都交给 artifact_ingest 判断，避免自然语言权威资料被启发式规则漏掉。
-        result = _run_ingest_agent(session_id, user_input, llm_config=llm_config)
+        result = _extract_json_object(response_text)
         raw_artifacts = result.get("artifacts", [])
         if not isinstance(raw_artifacts, list):
             raise TaskArtifactError("artifact_ingest 输出 artifacts 必须是数组")
@@ -263,6 +284,12 @@ def ingest_user_input(session_id: str, user_input: str, llm_config: ResolvedLLMC
         raise TaskArtifactError(f"任务工件落盘失败：{type(exc).__name__}: {exc}") from exc
 
 
+def ingest_user_input(session_id: str, user_input: str, llm_config: ResolvedLLMConfig | None = None) -> bool:
+    """识别并落盘本轮用户输入中的权威资料。返回是否产生或更新了工件。"""
+    response_text = _run_ingest_agent(session_id, user_input, llm_config=llm_config)
+    return persist_ingest_result(session_id, response_text)
+
+
 def _write_task_brief(session_id: str, ingest_result: dict[str, Any], facts: dict[str, Any]) -> None:
     objective = str(ingest_result.get("task_goal", "") or ingest_result.get("goal", "")).strip() or "未明确"
     lines = [
@@ -334,21 +361,15 @@ class TaskArtifactSessionHook(SessionHook):
         return super().should_run(ctx) and str(ctx.get("agent_kind", "")).strip().lower() == "primary"
 
     def before_session(self, ctx: dict[str, Any]) -> None:
+        if bool(ctx.get("stream")):
+            return
         session_id = str(ctx.get("session_id", "")).strip()
         user_input = str(ctx.get("user_input", "")).strip()
         if not session_id or not user_input:
             return
-        # slash command 是运行时控制命令，不属于用户提供的权威资料来源。
-        if _is_registered_slash_command(user_input):
-            return
         user_message = ctx.get("user_message") if isinstance(ctx.get("user_message"), dict) else {}
-        for part in user_message.get("parts", []) if isinstance(user_message, dict) else []:
-            meta = part.get("meta") if isinstance(part, dict) and isinstance(part.get("meta"), dict) else {}
-            if bool(meta.get("slash_command")) or bool(meta.get("synthetic")):
-                return
-            display_text = str(meta.get("display_text", "")).strip()
-            if display_text.startswith("/"):
-                return
+        if not should_ingest_user_input(user_input, user_message if isinstance(user_message, dict) else None):
+            return
         llm_config = ctx.get("llm_config")
         ingest_user_input(
             session_id,

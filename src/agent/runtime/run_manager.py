@@ -244,7 +244,7 @@ class RunManager:
                 if event_type == "error":
                     saw_terminal = True
                     final_status = "failed"
-                if event_type == "done":
+                if event_type == "done" and int(event.get("depth", 0) or 0) == 0:
                     saw_terminal = True
                     status = str(event.get("status", "")).strip().lower()
                     if status in {"failed", "error"}:

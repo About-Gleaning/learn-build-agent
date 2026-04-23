@@ -3070,6 +3070,104 @@ def test_run_session_stream_events_should_emit_text_delta_and_done(monkeypatch):
     assert "round_end" in process_kinds
 
 
+def test_run_session_stream_events_should_stream_artifact_ingest_without_leaking_json(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_stream_ingest")
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        if agent == "artifact_ingest":
+            yield {"type": "text_delta", "delta": '{"artifacts":[{"file":"schema.sql","content":"SECRET_JSON"}]}'}
+            append_text_part(assistant, '{"artifacts":[{"file":"schema.sql","content":"SECRET_JSON"}]}')
+            return assistant
+        yield {"type": "text_delta", "delta": "主流程回答"}
+        append_text_part(assistant, "主流程回答")
+        return assistant
+
+    fake_stream.supports_artifact_ingest = True
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("CREATE TABLE demo (id bigint);", session_id="s_stream_ingest"))
+    event_names = [event["type"] for event in events]
+    visible_text = "".join(event.get("delta", "") for event in events if event["type"] == "text_delta")
+    done_event = next(event for event in events if event["type"] == "done" and event["depth"] == 0)
+    process_kinds = [item["kind"] for item in done_event["process_items"]]
+    display_kinds = [item["kind"] for item in done_event["display_parts"]]
+
+    assert event_names.index("ingest_start") < event_names.index("ingest_done") < event_names.index("start")
+    assert visible_text == "主流程回答"
+    assert "SECRET_JSON" not in json.dumps(done_event["display_parts"], ensure_ascii=False)
+    assert "ingest_start" in process_kinds
+    assert "ingest_done" in process_kinds
+    assert "ingest_start" in display_kinds
+    assert "ingest_done" in display_kinds
+    assert "event_id" not in json.dumps(done_event["display_parts"], ensure_ascii=False)
+
+
+def test_run_session_stream_events_should_skip_artifact_ingest_without_explicit_capability(monkeypatch):
+    calls: list[str] = []
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config
+        calls.append(agent)
+        assistant = create_message("assistant", messages[-1]["info"]["session_id"], status="completed")
+        append_text_part(assistant, "主流程回答")
+        return assistant
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("CREATE TABLE demo (id bigint);", session_id="s_stream_ingest_skip_cap"))
+
+    assert len(calls) == 1
+    assert calls[0] != "artifact_ingest"
+    assert all(event["type"] not in {"ingest_start", "ingest_done", "ingest_error"} for event in events)
+    assert any(event["type"] == "done" for event in events)
+
+
+def test_run_session_stream_events_should_skip_artifact_ingest_for_slash_command(monkeypatch):
+    calls: list[str] = []
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del messages, tools, max_tokens, hooks, llm_config
+        calls.append(agent)
+        raise AssertionError("slash command immediate output should not call stream llm")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("/init", session_id="s_stream_ingest_slash"))
+
+    assert calls == []
+    assert all(event["type"] not in {"ingest_start", "ingest_done"} for event in events)
+
+
+def test_run_session_stream_events_should_fail_fast_when_artifact_ingest_fails(monkeypatch):
+    events: list[dict] = []
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        if agent == "artifact_ingest":
+            append_text_part(assistant, "不是 JSON")
+            return assistant
+        append_text_part(assistant, "不应进入主流程")
+        return assistant
+        yield  # pragma: no cover
+
+    fake_stream.supports_artifact_ingest = True
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    with pytest.raises(Exception, match="artifact_ingest"):
+        for event in run_session_stream_events("CREATE TABLE bad (id bigint);", session_id="s_stream_ingest_fail"):
+            events.append(event)
+
+    assert [event["type"] for event in events] == ["ingest_start", "ingest_error"]
+
+
 def test_run_session_stream_events_should_emit_runtime_alert_without_entering_done_payload(monkeypatch):
     def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
         session_id = messages[-1]["info"]["session_id"]
@@ -3201,6 +3299,57 @@ def test_run_session_stream_events_should_persist_display_parts_per_assistant(mo
     assert "round_end" not in second_display_kinds
     assert assistants[0]["info"]["response_meta"]["tool_call_count"] == 1
     assert assistants[1]["info"]["response_meta"]["tool_call_count"] == 0
+
+
+def test_run_session_stream_events_should_persist_ingest_prelude_only_once(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_stream_ingest_projection_once")
+    call_state = {"main": 0}
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        if agent == "artifact_ingest":
+            append_text_part(assistant, '{"artifacts":[]}')
+            return assistant
+        call_state["main"] += 1
+        if call_state["main"] == 1:
+            append_text_part(assistant, "先检查")
+            append_tool_call_part(assistant, tool_call_id="call_ingest_once", name="glob", arguments='{"pattern":"*.py"}')
+            return assistant
+        append_text_part(assistant, "完成")
+        return assistant
+        yield  # pragma: no cover
+
+    fake_stream.supports_artifact_ingest = True
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+    monkeypatch.setattr(
+        session_module.ToolExecutor,
+        "execute",
+        lambda self, name, arguments, **kwargs: {"output": "[]", "metadata": {"status": "completed"}},
+    )
+
+    events = list(run_session_stream_events("CREATE TABLE demo_once (id bigint);", session_id="s_stream_ingest_projection_once"))
+    assert any(event["type"] == "done" for event in events)
+
+    history = session_module.SESSION_MEMORY_STORE.load("s_stream_ingest_projection_once")
+    assistants = [message for message in history if message["info"].get("role") == "assistant"]
+
+    assert len(assistants) == 2
+    first_process_kinds = [item["kind"] for item in assistants[0]["info"].get("process_items", [])]
+    second_process_kinds = [item["kind"] for item in assistants[1]["info"].get("process_items", [])]
+    first_display_kinds = [item["kind"] for item in assistants[0]["info"].get("display_parts", [])]
+    second_display_kinds = [item["kind"] for item in assistants[1]["info"].get("display_parts", [])]
+
+    assert "ingest_start" in first_process_kinds
+    assert "ingest_done" in first_process_kinds
+    assert "ingest_start" in first_display_kinds
+    assert "ingest_done" in first_display_kinds
+    assert "ingest_start" not in second_process_kinds
+    assert "ingest_done" not in second_process_kinds
+    assert "ingest_start" not in second_display_kinds
+    assert "ingest_done" not in second_display_kinds
 
 
 def test_run_session_stream_events_should_not_copy_previous_projection_into_max_round_message(monkeypatch):

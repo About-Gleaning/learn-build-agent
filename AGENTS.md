@@ -23,7 +23,7 @@
 - 用户显式选择的 `mode/provider/model` 必须持久化在 Session JSONL 的 `session_meta.runtime`，禁止只依赖普通历史消息 `meta` 做恢复。
 - assistant 级 `process_items`、`display_parts`、`response_meta` 只作为运行时/SSE 展示投影；Session JSONL 仅持久化精简摘要字段，Web 历史展示由 `blocks + meta` 重建。
 - LLM 调用观测归 `LLMHook`，工具执行观测归 `ToolHook`；不要把 provider 调用细节或工具审计逻辑重新塞回 `src/agent/runtime/session.py`。
-- 任务权威资料统一由 `TaskArtifactSessionHook` 调用 `artifact_ingest` agent 识别并落盘；`write_file/edit_file` 的 `related_artifacts` 校验必须基于当前 messages 中有效的 `read_artifact` tool result metadata，禁止使用纯内存已读计数器替代。
+- 任务权威资料统一由 `artifact_ingest` agent 识别并落盘；非流式路径由 `TaskArtifactSessionHook` 同步触发，Web 流式路径在主会话 `start` 前以内部流式 subagent 触发且只暴露 ingest 包装事件；`write_file/edit_file` 的 `related_artifacts` 校验必须基于当前 messages 中有效的 `read_artifact` tool result metadata，禁止使用纯内存已读计数器替代。
 - `write_file` 仅用于创建新文件，禁止覆盖已有文件；已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。
 - 所有路径输入必须经过工作区边界校验；禁止硬编码密钥、Token、PAT 或其他凭证。
 - 新增或调整工具时，至少覆盖 `tests/test_handlers.py` 与 `tests/test_run_session.py`；涉及 Web API 时补充 `tests/test_web_api.py`。

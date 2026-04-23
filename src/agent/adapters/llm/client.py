@@ -295,4 +295,7 @@ def create_chat_completion_stream(
     return assistant
 
 
+create_chat_completion_stream.supports_artifact_ingest = True  # type: ignore[attr-defined]
+
+
 _default_hooks()

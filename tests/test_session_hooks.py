@@ -2,6 +2,7 @@ import pytest
 
 from agent.core.message import append_text_part, append_tool_call_part, create_message, get_message_text
 from agent.runtime.session import clear_session_memory, run_session, run_session_stream_events, subagent_loop
+from agent.runtime.task_artifacts import TaskArtifactSessionHook
 from agent.runtime.workspace import configure_workspace
 from agent.runtime.session_hooks import (
     SessionHook,
@@ -130,6 +131,57 @@ def _mock_stream_return_text(content: str = "done"):
         return assistant
 
     return _fake_stream
+
+
+def test_task_artifact_session_hook_should_ingest_non_stream_session(monkeypatch):
+    import agent.runtime.session as session_module
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_ingest(session_id, user_input, llm_config=None):
+        del llm_config
+        calls.append((session_id, user_input))
+        return False
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.ingest_user_input", fake_ingest)
+    monkeypatch.setattr(session_module, "create_chat_completion", _mock_chat_return_text("ok"))
+
+    run_session("普通资料输入", session_id="s_hook_ingest_non_stream", session_hooks=[TaskArtifactSessionHook()])
+
+    assert calls == [("s_hook_ingest_non_stream", "普通资料输入")]
+
+
+def test_task_artifact_session_hook_should_skip_stream_session(monkeypatch):
+    import agent.runtime.session as session_module
+
+    calls: list[str] = []
+
+    def fake_ingest(session_id, user_input, llm_config=None):
+        del llm_config
+        calls.append(f"{session_id}:{user_input}")
+        return False
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed", finish_reason="stop")
+        append_text_part(assistant, "ok")
+        yield {"type": "text_delta", "delta": "ok"}
+        return assistant
+
+    monkeypatch.setattr("agent.runtime.task_artifacts.ingest_user_input", fake_ingest)
+    monkeypatch.setattr(session_module, "create_chat_completion_stream", fake_stream)
+
+    events = list(
+        run_session_stream_events(
+            "普通资料输入",
+            session_id="s_hook_ingest_stream",
+            session_hooks=[TaskArtifactSessionHook()],
+        )
+    )
+
+    assert calls == []
+    assert events[-1]["type"] == "done"
 
 
 def test_session_hooks_should_sort_before_and_reverse_after(monkeypatch):

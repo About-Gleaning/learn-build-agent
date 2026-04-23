@@ -106,6 +106,15 @@ def _build_process_item(event: dict[str, Any]) -> ProcessItem | None:
     elif event_type == "error":
         title = f"{agent} 会话异常"
         detail = str(payload.get("message", "未知错误"))
+    elif event_type == "ingest_start":
+        title = "任务资料识别开始"
+        detail = "正在识别用户输入中的权威资料"
+    elif event_type == "ingest_done":
+        title = "任务资料识别完成"
+        detail = f"状态: {status or 'completed'}"
+    elif event_type == "ingest_error":
+        title = "任务资料识别失败"
+        detail = str(payload.get("message", "未知错误"))
 
     return {
         "id": str(payload.get("event_id", "")),

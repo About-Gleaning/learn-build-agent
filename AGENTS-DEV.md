@@ -112,7 +112,7 @@ LLM 返回 tool_calls
 - 当前工具分发总入口在 `src/agent/runtime/session.py`
 - `src/agent/tools/handlers.py` 不是工具注册表，它主要提供公共结果构造与少量辅助逻辑
 - MCP 工具会被统一转换为普通 function tool，再并入同一执行面
-- 任务权威资料通过 `TaskArtifactSessionHook` 触发 `artifact_ingest` agent 识别并落盘；`read_artifact` 成功后的 tool message metadata 是后续 `write_file/edit_file` 判断“已读取”的唯一依据。
+- 任务权威资料通过 `artifact_ingest` agent 识别并落盘：非流式 `run_session()` 由 `TaskArtifactSessionHook` 同步触发；Web 流式路径在主会话 `start` 前以内部流式 subagent 触发，仅暴露 `ingest_start/ingest_done/ingest_error` 包装事件，禁止泄露内部 JSON 文本。`read_artifact` 成功后的 tool message metadata 是后续 `write_file/edit_file` 判断“已读取”的唯一依据。
 
 ### 3.3 Slash Command 链路
 
