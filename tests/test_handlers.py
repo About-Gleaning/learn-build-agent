@@ -46,7 +46,7 @@ from agent.runtime.workspace import (
     configure_workspace,
     get_workspace,
 )
-from agent.runtime.task_artifacts import get_artifacts_dir, ingest_user_input, load_task_facts
+from agent.runtime.task_artifacts import get_artifact_session_dir, get_artifacts_dir, ingest_user_input, load_task_facts, persist_ingest_result
 from agent.core.message import append_text_part, append_tool_part, create_message, get_message_text
 
 
@@ -118,11 +118,75 @@ def test_task_artifact_ingest_should_persist_sql_facts(monkeypatch, tmp_path):
     monkeypatch.setattr("agent.runtime.task_artifacts.create_chat_completion", fake_ingest)
 
     assert ingest_user_input("s_artifact_ingest", "```sql\nCREATE TABLE erp_mid_fly (id bigint);\n```") is True
+    assert get_artifact_session_dir("s_artifact_ingest") == get_workspace().workspaces_root / "ingest" / "s_artifact_ingest"
     artifact_path = get_artifacts_dir("s_artifact_ingest") / "erp_mid_fly.sql"
     assert artifact_path.read_text(encoding="utf-8") == "CREATE TABLE erp_mid_fly (id bigint);"
     facts = load_task_facts("s_artifact_ingest")
     assert facts["artifacts"][0]["file"] == "erp_mid_fly.sql"
     assert "mapper" in facts["artifacts"][0]["triggers"]["keywords"]
+
+
+def test_task_artifact_persist_should_return_summary_for_changed_artifacts(tmp_path):
+    configure_workspace(tmp_path)
+    result = persist_ingest_result(
+        "s_artifact_summary_changed",
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "file": "schema.sql",
+                        "type": "sql",
+                        "content": "CREATE TABLE demo (id bigint);",
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert result == {
+        "artifact_count": 1,
+        "changed_count": 1,
+        "files": ["schema.sql"],
+        "changed_files": ["schema.sql"],
+    }
+
+
+def test_task_artifact_persist_should_return_empty_summary_without_artifacts(tmp_path):
+    configure_workspace(tmp_path)
+
+    result = persist_ingest_result("s_artifact_summary_empty", '{"artifacts":[]}')
+
+    assert result == {
+        "artifact_count": 0,
+        "changed_count": 0,
+        "files": [],
+        "changed_files": [],
+    }
+
+
+def test_task_artifact_persist_should_report_unchanged_artifacts(tmp_path):
+    configure_workspace(tmp_path)
+    payload = json.dumps(
+        {
+            "artifacts": [
+                {
+                    "file": "schema.sql",
+                    "type": "sql",
+                    "content": "CREATE TABLE demo (id bigint);",
+                }
+            ]
+        }
+    )
+
+    assert persist_ingest_result("s_artifact_summary_unchanged", payload)["changed_count"] == 1
+    result = persist_ingest_result("s_artifact_summary_unchanged", payload)
+
+    assert result == {
+        "artifact_count": 1,
+        "changed_count": 0,
+        "files": ["schema.sql"],
+        "changed_files": [],
+    }
 
 
 def test_task_artifact_ingest_should_ask_agent_for_plain_text(monkeypatch, tmp_path):

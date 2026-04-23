@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from ..adapters.llm.client import create_chat_completion
 from ..config.logging_setup import build_log_extra, sanitize_log_text
@@ -33,6 +33,13 @@ class TaskArtifactError(RuntimeError):
     """任务工件处理失败；该错误会终止当前 session，避免缺失权威资料时继续编码。"""
 
 
+class IngestPersistenceResult(TypedDict):
+    artifact_count: int
+    changed_count: int
+    files: list[str]
+    changed_files: list[str]
+
+
 def _is_registered_slash_command(user_input: str) -> bool:
     parsed = parse_slash_command(user_input)
     return parsed is not None and get_slash_command(parsed.name) is not None
@@ -40,7 +47,7 @@ def _is_registered_slash_command(user_input: str) -> bool:
 
 def get_artifact_session_dir(session_id: str) -> Path:
     session_name = build_session_storage_name(session_id)
-    return (get_workspace().workspace_home / "artifacts" / session_name).resolve()
+    return (get_workspace().workspaces_root / "ingest" / session_name).resolve()
 
 
 def get_artifacts_dir(session_id: str) -> Path:
@@ -207,8 +214,8 @@ def should_ingest_user_input(user_input: str, user_message: Message | None = Non
     return True
 
 
-def persist_ingest_result(session_id: str, response_text: str) -> bool:
-    """解析 artifact_ingest 输出并落盘。返回是否产生或更新了工件。"""
+def persist_ingest_result(session_id: str, response_text: str) -> IngestPersistenceResult:
+    """解析 artifact_ingest 输出并落盘，返回用于展示的安全摘要。"""
     try:
         result = _extract_json_object(response_text)
         raw_artifacts = result.get("artifacts", [])
@@ -216,8 +223,14 @@ def persist_ingest_result(session_id: str, response_text: str) -> bool:
             raise TaskArtifactError("artifact_ingest 输出 artifacts 必须是数组")
         artifacts = [_normalize_artifact_item(item) for item in raw_artifacts]
         artifacts = [item for item in artifacts if item is not None]
+        files = list(dict.fromkeys(item["file"] for item in artifacts))
         if not artifacts:
-            return False
+            return {
+                "artifact_count": 0,
+                "changed_count": 0,
+                "files": [],
+                "changed_files": [],
+            }
 
         session_dir = get_artifact_session_dir(session_id)
         artifacts_dir = get_artifacts_dir(session_id)
@@ -231,7 +244,7 @@ def persist_ingest_result(session_id: str, response_text: str) -> bool:
             for item in facts.get("artifacts", [])
             if isinstance(item, dict) and str(item.get("file", "")).strip()
         }
-        changed = False
+        changed_files: list[str] = []
         for item in artifacts:
             filename = item["file"]
             content = item["content"]
@@ -257,10 +270,16 @@ def persist_ingest_result(session_id: str, response_text: str) -> bool:
                 "hash": _hash_text(content),
                 "version": _timestamp(),
             }
-            changed = True
+            changed_files.append(filename)
 
-        if not changed:
-            return False
+        changed_files = list(dict.fromkeys(changed_files))
+        if not changed_files:
+            return {
+                "artifact_count": len(files),
+                "changed_count": 0,
+                "files": files,
+                "changed_files": [],
+            }
 
         constraints = facts.get("constraints") if isinstance(facts.get("constraints"), list) else []
         merged_constraints = list(dict.fromkeys([*DEFAULT_CONSTRAINTS, *(str(item) for item in constraints if str(item).strip())]))
@@ -271,13 +290,19 @@ def persist_ingest_result(session_id: str, response_text: str) -> bool:
         _write_facts(session_id, next_facts)
         _write_task_brief(session_id, result, next_facts)
         logger.info(
-            "task_artifacts.ingested session_id=%s artifact_count=%s path=%s",
+            "task_artifacts.ingested session_id=%s artifact_count=%s changed_count=%s path=%s",
             session_id,
-            len(artifacts),
+            len(files),
+            len(changed_files),
             sanitize_log_text(str(session_dir)),
             extra=build_log_extra(agent=ARTIFACT_INGEST_AGENT, model=""),
         )
-        return True
+        return {
+            "artifact_count": len(files),
+            "changed_count": len(changed_files),
+            "files": files,
+            "changed_files": changed_files,
+        }
     except TaskArtifactError:
         raise
     except Exception as exc:
@@ -287,7 +312,7 @@ def persist_ingest_result(session_id: str, response_text: str) -> bool:
 def ingest_user_input(session_id: str, user_input: str, llm_config: ResolvedLLMConfig | None = None) -> bool:
     """识别并落盘本轮用户输入中的权威资料。返回是否产生或更新了工件。"""
     response_text = _run_ingest_agent(session_id, user_input, llm_config=llm_config)
-    return persist_ingest_result(session_id, response_text)
+    return persist_ingest_result(session_id, response_text)["changed_count"] > 0
 
 
 def _write_task_brief(session_id: str, ingest_result: dict[str, Any], facts: dict[str, Any]) -> None:

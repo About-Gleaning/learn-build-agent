@@ -655,6 +655,37 @@ function readNumber(payload: Record<string, unknown>, key: string, fallback = 0)
   return typeof value === "number" ? value : fallback;
 }
 
+function readStringList(payload: Record<string, unknown>, key: string): string[] {
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function formatArtifactFiles(files: string[], limit = 5): string {
+  if (files.length === 0) {
+    return "";
+  }
+  const visibleFiles = files.slice(0, limit);
+  const suffix = files.length > limit ? ` 等 ${files.length} 个文件` : "";
+  return `${visibleFiles.join("、")}${suffix}`;
+}
+
+function describeIngestDone(payload: Record<string, unknown>): string {
+  const artifactCount = readNumber(payload, "artifact_count", 0);
+  const changedCount = readNumber(payload, "changed_count", 0);
+  if (changedCount > 0) {
+    const files = formatArtifactFiles(readStringList(payload, "changed_files"));
+    return `已持久化 ${changedCount} 个权威资料${files ? `：${files}` : ""}`;
+  }
+  if (artifactCount > 0) {
+    const files = formatArtifactFiles(readStringList(payload, "artifact_files"));
+    return `已识别 ${artifactCount} 个权威资料，内容未变化${files ? `：${files}` : ""}`;
+  }
+  return "未发现需要持久化的权威资料";
+}
+
 function normalizeQuestion(rawValue: unknown): QuestionInfo | null {
   if (!rawValue || typeof rawValue !== "object") {
     return null;
@@ -1462,7 +1493,8 @@ function mergeMessageWithFinalPayload(message: UiMessage, finalStatus: string, f
     },
     // 终态 done 只补空，不覆盖流式阶段已经累计的工具过程，避免完成瞬间把中间步骤抹掉。
     processItems: message.processItems.length > 0 ? message.processItems : finalProcessItems,
-    displayParts: message.displayParts.length > 0 ? message.displayParts : finalDisplayParts,
+    // 后端终态 display_parts 会合并权威资料摘要和最终文本，优先使用它修正实时阶段的简略展示。
+    displayParts: finalDisplayParts.length > 0 ? finalDisplayParts : message.displayParts,
     displayTextMergeOpen: false,
     confirmation:
       finalPayload.confirmation && typeof finalPayload.confirmation === "object"
@@ -2069,7 +2101,7 @@ function buildTimelineItem(eventName: string, payload: Record<string, unknown>):
   }
 
   if (eventName === "ingest_done") {
-    return createItem("ingest_done", "任务资料识别完成", `状态: ${readString(payload, "status", "completed")}`);
+    return createItem("ingest_done", "任务资料识别完成", describeIngestDone(payload));
   }
 
   if (eventName === "ingest_error") {

@@ -3083,7 +3083,7 @@ def _run_session_stream(
             ingest_status = str(ingest_message.get("info", {}).get("status", "")).strip().lower()
             if ingest_status != "completed":
                 raise TaskArtifactError("artifact_ingest agent 未成功完成")
-            persist_ingest_result(active_session_id, get_message_text(ingest_message))
+            ingest_result = persist_ingest_result(active_session_id, get_message_text(ingest_message))
         except Exception as exc:
             error_event = _emit_event(
                 "ingest_error",
@@ -3109,6 +3109,10 @@ def _run_session_stream(
             finish_reason="stop",
             started_at=started_at,
             completed_at=utc_now_iso(),
+            artifact_count=ingest_result["artifact_count"],
+            changed_count=ingest_result["changed_count"],
+            artifact_files=ingest_result["files"],
+            changed_files=ingest_result["changed_files"],
         )
         _record_projection_event(prelude_projection, done_event)
         yield done_event

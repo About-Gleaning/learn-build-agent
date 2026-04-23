@@ -184,8 +184,9 @@ LSP 查询请求
   - `workspaces/plan/`
   - `workspaces/tool-output/`
   - `workspaces/web-dev/<workspace_id>/`
+  - `workspaces/ingest/<session_id>/`
   - `logs/`
-- 任务工件按当前工作区隔离保存到 `get_workspace().workspace_home / "artifacts" / <session_id>/`，包含 `task_brief.md`、`task_facts.json` 与 `artifacts/` 原文目录。
+- 任务工件按 session 隔离保存到 `get_workspace().workspaces_root / "ingest" / <session_id>/`，包含 `task_brief.md`、`task_facts.json` 与 `artifacts/` 原文目录。
 
 ### 5.1.1 日志保存策略
 

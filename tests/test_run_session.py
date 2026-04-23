@@ -3092,18 +3092,55 @@ def test_run_session_stream_events_should_stream_artifact_ingest_without_leaking
     events = list(run_session_stream_events("CREATE TABLE demo (id bigint);", session_id="s_stream_ingest"))
     event_names = [event["type"] for event in events]
     visible_text = "".join(event.get("delta", "") for event in events if event["type"] == "text_delta")
+    ingest_done_event = next(event for event in events if event["type"] == "ingest_done")
     done_event = next(event for event in events if event["type"] == "done" and event["depth"] == 0)
     process_kinds = [item["kind"] for item in done_event["process_items"]]
     display_kinds = [item["kind"] for item in done_event["display_parts"]]
+    ingest_done_parts = [item for item in done_event["display_parts"] if item["kind"] == "ingest_done"]
 
     assert event_names.index("ingest_start") < event_names.index("ingest_done") < event_names.index("start")
     assert visible_text == "主流程回答"
+    assert ingest_done_event["artifact_count"] == 1
+    assert ingest_done_event["changed_count"] == 1
+    assert ingest_done_event["artifact_files"] == ["schema.sql"]
+    assert ingest_done_event["changed_files"] == ["schema.sql"]
     assert "SECRET_JSON" not in json.dumps(done_event["display_parts"], ensure_ascii=False)
+    assert ingest_done_parts[0]["detail"] == "已持久化 1 个权威资料：schema.sql"
     assert "ingest_start" in process_kinds
     assert "ingest_done" in process_kinds
     assert "ingest_start" in display_kinds
     assert "ingest_done" in display_kinds
     assert "event_id" not in json.dumps(done_event["display_parts"], ensure_ascii=False)
+
+
+def test_run_session_stream_events_should_show_empty_artifact_ingest_summary(monkeypatch):
+    configure_session_memory_store(InMemorySessionMemoryStore(max_messages=24))
+    clear_session_memory("s_stream_ingest_empty_summary")
+
+    def fake_stream(messages, tools, max_tokens=4096, hooks=None, llm_config=None, agent=""):
+        del tools, max_tokens, hooks, llm_config
+        session_id = messages[-1]["info"]["session_id"]
+        assistant = create_message("assistant", session_id, status="completed")
+        if agent == "artifact_ingest":
+            append_text_part(assistant, '{"artifacts":[]}')
+            return assistant
+        append_text_part(assistant, "主流程回答")
+        return assistant
+        yield  # pragma: no cover
+
+    fake_stream.supports_artifact_ingest = True
+    monkeypatch.setattr("agent.runtime.session.create_chat_completion_stream", fake_stream)
+
+    events = list(run_session_stream_events("这里有一些普通需求说明", session_id="s_stream_ingest_empty_summary"))
+    ingest_done_event = next(event for event in events if event["type"] == "ingest_done")
+    done_event = next(event for event in events if event["type"] == "done" and event["depth"] == 0)
+    ingest_done_parts = [item for item in done_event["display_parts"] if item["kind"] == "ingest_done"]
+
+    assert ingest_done_event["artifact_count"] == 0
+    assert ingest_done_event["changed_count"] == 0
+    assert ingest_done_event["artifact_files"] == []
+    assert ingest_done_event["changed_files"] == []
+    assert ingest_done_parts[0]["detail"] == "未发现需要持久化的权威资料"
 
 
 def test_run_session_stream_events_should_skip_artifact_ingest_without_explicit_capability(monkeypatch):
