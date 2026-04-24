@@ -78,17 +78,17 @@
     "call_timeout_ms": 120000,
     // 以 server 别名作为唯一键；暴露给 LLM 的工具名会规范化为 serverAlias__toolName。
     "servers": {
-      "github": {
-        // GitHub MCP server，依赖环境变量 GITHUB_TOKEN 进行认证。
-        "transport": "stdio",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-github"],
-        "env": {
-          "GITHUB_TOKEN": "${GITHUB_TOKEN}"
-        },
-        // 允许在 plan 模式下暴露该 server 的工具。
-        "expose_to_plan": true
-      }
+      // "github": {
+      //   // GitHub MCP server，依赖环境变量 GITHUB_TOKEN 进行认证。
+      //   "transport": "stdio",
+      //   "command": "npx",
+      //   "args": ["-y", "@modelcontextprotocol/server-github"],
+      //   "env": {
+      //     "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      //   },
+      //   // 允许在 plan 模式下暴露该 server 的工具。
+      //   "expose_to_plan": true
+      // }
     }
   },
   "lsp": {
