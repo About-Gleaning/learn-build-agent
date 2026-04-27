@@ -1189,6 +1189,8 @@ def test_run_write_should_return_structured_success(monkeypatch, tmp_path):
     assert result["metadata"]["exists"] is False
     assert result["metadata"]["diagnostics"] == []
     assert result["metadata"]["diagnostics_status"] == "unsupported_language"
+    assert result["output"] == result["message"]
+    assert "当前文件类型暂未接入 LSP diagnostics" not in result["output"]
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello"
 
 
@@ -1293,6 +1295,8 @@ def test_run_edit_should_succeed_after_read_and_return_diff(tmp_path):
     assert result["replacedCount"] == 1
     assert result["metadata"]["diagnostics"] == []
     assert result["metadata"]["diagnostics_status"] == "unsupported_language"
+    assert result["output"] == result["message"]
+    assert "当前文件类型暂未接入 LSP diagnostics" not in result["output"]
     assert result["metadata"]["filediff"]["before"] == "hello\nworld\n"
     assert result["metadata"]["filediff"]["after"] == "hello\nagent\n"
     assert "+agent" in result["metadata"]["diff"]

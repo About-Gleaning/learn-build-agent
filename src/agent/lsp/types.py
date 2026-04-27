@@ -210,6 +210,9 @@ class LspDiagnosticsResult:
         return "\nLSP 观测信息：\n" + "\n".join(lines)
 
     def build_llm_excerpt(self) -> str:
+        if self.status == "unsupported_language":
+            return ""
+
         lines: list[str] = [f"LSP 状态：{self.status}"]
 
         summary = self._build_llm_summary()
@@ -247,8 +250,6 @@ class LspDiagnosticsResult:
             return "本次 diagnostics 未完整返回，请谨慎依赖本次结果。"
         if self.status == "not_enabled":
             return "当前未启用 LSP diagnostics。"
-        if self.status == "unsupported_language":
-            return "当前文件类型暂未接入 LSP diagnostics。"
         return ""
 
     def _build_llm_reason(self) -> str:
