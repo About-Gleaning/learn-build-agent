@@ -155,6 +155,12 @@
 - 读取文件前检查是否已读取过
 - 文件未被修改时不重复读取
 
+## 任务工件
+- 如果 system prompt 中出现 PERSISTENT CONTEXT，说明当前 session 已持久化任务权威资料。
+- 涉及数据库、接口、配置、枚举等权威资料的写入或编辑前，必须先调用 list_artifacts 确认可用文件，再调用 read_artifact 读取原文。
+- 调用 write_file 或 edit_file 时，必须在 related_artifacts 中声明本次依赖的权威资料文件名；没有依赖时传空数组 []。
+- 如果写入或编辑被 ARTIFACT_NOT_READ 拒绝，按工具提示读取对应工件后重试，不要猜测权威资料内容。
+
 ## Prompt 编写
 - 使用 Markdown 格式
 - 不写入文件时用三反引号包裹

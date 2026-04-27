@@ -112,6 +112,7 @@ LLM 返回 tool_calls
 - 当前工具分发总入口在 `src/agent/runtime/session.py`
 - `src/agent/tools/handlers.py` 不是工具注册表，它主要提供公共结果构造与少量辅助逻辑
 - MCP 工具会被统一转换为普通 function tool，再并入同一执行面
+- 任务权威资料通过 `artifact_ingest` agent 识别并落盘：非流式 `run_session()` 由 `TaskArtifactSessionHook` 同步触发；Web 流式路径在主会话 `start` 前以内部流式 subagent 触发，仅暴露 `ingest_start/ingest_done/ingest_error` 包装事件，禁止泄露内部 JSON 文本。`read_artifact` 成功后的 tool message metadata 是后续 `write_file/edit_file` 判断“已读取”的唯一依据。
 
 ### 3.3 Slash Command 链路
 
@@ -128,6 +129,7 @@ LLM 返回 tool_calls
 
 - `/init`：当工作区缺失 `AGENTS.md` 时初始化首版规范文件
 - `/analyze`：当工作区缺失 `AGENTS-DEV.md` 时初始化首版开发手册；若文件已存在则直接停止。若工作区属于多项目或多模块结构，首版手册必须额外梳理模块边界、依赖方向、启动入口与公共模块职责，不能按单项目视角简化。
+- `/analyze` 同步补充 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`README.md`、`docs/` 这类工作区相对路径，禁止把本机绝对路径写入长期维护文档。
 
 ### 3.4 Web 链路
 
@@ -182,7 +184,9 @@ LSP 查询请求
   - `workspaces/plan/`
   - `workspaces/tool-output/`
   - `workspaces/web-dev/<workspace_id>/`
+  - `workspaces/ingest/<session_id>/`
   - `logs/`
+- 任务工件按 session 隔离保存到 `get_workspace().workspaces_root / "ingest" / <session_id>/`，包含 `task_brief.md`、`task_facts.json` 与 `artifacts/` 原文目录。
 
 ### 5.1.1 日志保存策略
 
@@ -190,6 +194,7 @@ LSP 查询请求
 - 主日志必须启用生产化保护：按自然日自动切换文件，按 `logging.max_bytes` 做大小兜底轮转，并按 `logging.retention_days` 与 `logging.backup_count` 清理历史文件。
 - `project_runtime.json -> logging` 是日志策略唯一配置来源；新增日志策略字段时必须同步更新配置解析、默认配置、测试与本手册。
 - 日志落盘前必须先做敏感信息脱敏，再做字段截断；默认应开启 `redact_enabled` 与 `truncate_enabled`，避免 token、password、authorization、cookie、大模型上下文或工具参数无限落盘。
+- `logging.llm_request_messages_mode` 控制 `llm.request` 日志中的 `messages/input` 打印范围，默认 `full` 保持全量记录；设置为 `latest` 时仅记录发给 provider 的最新一条消息。
 - `codepilot web` 的 `backend.log/frontend.log` 只用于本地 Web 开发栈诊断，启动时允许清空，不作为生产日志保留策略的一部分。
 - 多进程或容器化生产部署优先使用 stdout/stderr 交给平台采集；若继续使用文件日志，必须先评估多进程写同一文件的并发安全性。
 
@@ -221,6 +226,7 @@ LSP 查询请求
 ### 5.4 模式切换与问题恢复
 
 - `plan_enter` / `plan_exit` 只允许发起切换申请，确认与取消必须由程序状态机控制。
+- Plan 模式生成完整执行计划前，凡是会影响计划内容的澄清问题必须通过 `question` 工具结构化提问；禁止用普通文本、表格或列表代替待答问题状态。
 - 新建对话 Run 的显式 `mode/provider/model` 优先于 Session Runtime 与历史推断；空 `provider/model` 表示“不覆盖当前 Runtime”，不得当作重置默认值。
 - `question` 工具按 `session_id` 管理待答问题；恢复输入必须明确区分选项与备注。
 - Web 端“确认切换”与 `question` 答题恢复必须通过流式接口继续执行会话，避免阻塞式请求导致界面丢失增量事件；这些流式接口必须复用后台 Run 语义，不能让前端连接断开直接关闭后端生成器。
@@ -265,6 +271,8 @@ LSP 查询请求
 - `write_file` 仅用于创建新文件，禁止覆盖已有文件。
 - 已有文件的文本修改统一通过 `edit_file` 或 `apply_patch` 完成。
 - `write_file` / `edit_file` 都必须传绝对路径。
+- `write_file` / `edit_file` 都必须传 `related_artifacts` 数组；涉及任务权威资料时必须先 `list_artifacts` / `read_artifact`，再声明依赖文件名。
+- 权威资料读取状态不能用纯内存标记判断，必须通过当前 messages 中 `read_artifact` tool result 的 `artifact_read/artifact_file/artifact_hash/artifact_version` metadata 判断；compact 后 marker 丢失时必须重新读取。
 - `edit_file` 默认要求 `oldString` 在文件中唯一命中；若不唯一，应补充上下文或显式使用 `replaceAll=true`。
 - 编辑已有文件前，建议先读取同一文件，避免基于陈旧上下文误改。
 
@@ -300,6 +308,8 @@ LSP 查询请求
 - 在 `src/agent/runtime/session.py` 中接入工具分发
 - 工具返回优先保持结构化，至少包含 `output` 与 `metadata.status`
 - 涉及路径、安全、权限控制的逻辑优先复用现有公共能力
+- 任务工件相关工具的落盘与 prompt 摘要归口在 `src/agent/runtime/task_artifacts.py`；`list_artifacts`、`read_artifact`、`update_artifact` 与写入前置校验归口在 `src/agent/tools/artifact_tool.py`。
+- ingestion 由 fail-fast `SessionHook` 接入；如果检测到疑似权威资料但解析 agent 失败，必须终止当前任务，禁止继续猜测开发。
 
 ### 7.3 新增 Subagent
 
@@ -347,8 +357,9 @@ Tool Hook：
 
 LLM Hook：
 
-- 继承 `src/agent/adapters/llm/client.py` 中的 `LLMHook`
-- 在调用前后添加观测、审计或脱敏逻辑
+- 继承 `src/agent/adapters/llm/hooks.py` 中的 `LLMHook`，`client.py` 仅保留兼容导出
+- 默认日志 Hook 实现在 `src/agent/adapters/llm/hooks.py`，`client.py` 仅负责 LLM 调用编排、Hook 注册与调度
+- 在调用前后添加观测、审计或脱敏逻辑时，优先放入 LLM Hook 模块，不要把具体日志业务塞回 client 主流程
 - 支持 `order`、`enabled` 与 `HookFilter`；适合 prompt/request 观测、响应记录和最终 assistant message 的旁路处理
 
 Delegation Hook：

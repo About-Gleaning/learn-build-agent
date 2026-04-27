@@ -44,6 +44,12 @@ from ..tools.bash_tool import _normalize_timeout, resolve_bash_workdir, run_bash
 from ..tools.edit_file_tool import run_edit
 from ..tools.grep_tool import run_grep
 from ..tools.glob_tool import run_glob
+from ..tools.artifact_tool import (
+    check_before_write,
+    run_list_artifacts,
+    run_read_artifact,
+    run_update_artifact,
+)
 from ..skills.runtime import SkillRegistry
 from ..tools.handlers import (
     build_plan_placeholder_path,
@@ -100,6 +106,15 @@ from .session_hooks import (
 )
 from .tool_executor import ToolExecutor, ToolHook, ToolHookInterruption, ToolResult, get_global_tool_hooks
 from .workspace import get_workspace
+from .task_artifacts import (
+    ARTIFACT_INGEST_AGENT,
+    INGEST_PROMPT_PATH,
+    TaskArtifactError,
+    TaskArtifactSessionHook,
+    persist_ingest_result,
+    render_persistent_context,
+    should_ingest_user_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +153,7 @@ SESSION_MEMORY_STORE: SessionMemoryStore = _build_default_session_memory_store()
 ModeSwitchAction = Literal["confirm", "cancel"]
 
 register_global_session_hook(SessionJsonlPersistenceHook())
+register_global_session_hook(TaskArtifactSessionHook())
 register_global_loop_hook(LoopJsonlPersistenceHook())
 
 
@@ -475,8 +491,10 @@ def build_system_prompt(
 ) -> str:
     base_prompt = _read_prompt_file(_resolve_prompt_path(agent, vendor))
     rendered_prompt = _apply_prompt_context(base_prompt, agent=agent, session_id=session_id)
+    persistent_context = render_persistent_context(session_id)
     parts = [
         rendered_prompt,
+        persistent_context,
         _read_global_agent_appendix(),
         _read_local_agent_appendix(),
         _build_environment_appendix(agent=agent, model=model, provider=provider, vendor=vendor),
@@ -1743,6 +1761,11 @@ def _supports_keyword_arg(func: Callable[..., Any], arg_name: str) -> bool:
     return False
 
 
+def _supports_streaming_artifact_ingest(func: Callable[..., Any]) -> bool:
+    """仅对显式声明能力的流式入口启用内部 ingest，避免普通测试桩误消费首轮请求。"""
+    return bool(getattr(func, "supports_artifact_ingest", False)) and _supports_keyword_arg(func, "agent")
+
+
 def _call_chat_completion(
     *,
     messages: list[Message],
@@ -2202,6 +2225,7 @@ def _handle_mode_switch_tool_result(
     result: ToolResult,
     messages: list[Message],
     active_agent: str,
+    current_mode: MainAgentMode,
     current_runtime: ResolvedLLMConfig,
     current_provider_explicit: bool,
     current_model_explicit: bool,
@@ -2944,6 +2968,7 @@ def _run_session_stream(
         mode=bootstrap.initial_mode,
     )
     session_hook_ctx["persistence_enabled"] = mode_enabled
+    session_hook_ctx["llm_config"] = bootstrap.current_runtime
     session_hook_ctx["user_message"] = messages[-1] if messages else {}
     session_hook_ctx["messages_ref"] = messages
     session_hook_ctx["append_callback"] = _append_message
@@ -2975,6 +3000,17 @@ def _run_session_stream(
     )
     if mode_enabled:
         SESSION_MEMORY_STORE.save_runtime(active_session_id, current_session_runtime)
+        messages = _ensure_system_prompt(
+            messages,
+            _get_system_prompt_for_mode(
+                current_mode,
+                model=current_runtime.model,
+                provider=current_runtime.provider,
+                vendor=current_runtime.vendor,
+                session_id=active_session_id,
+            ),
+            active_session_id,
+        )
     initial_agent = bootstrap.initial_agent
     agent_kind = _resolve_agent_kind(initial_agent)
     stop_message_saved = False
@@ -2991,6 +3027,95 @@ def _run_session_stream(
             **payload,
         )
         return event
+
+    prelude_projection = AssistantProjection()
+
+    def _consume_internal_stream(stream: Generator[dict[str, Any], None, Message]) -> Message:
+        """消费内部子流程并保留返回值；内部文本和 done 不向用户侧转发。"""
+        while True:
+            try:
+                event = next(stream)
+            except StopIteration as stop:
+                return stop.value
+            event_type = str(event.get("type", "")).strip()
+            if event_type in {"text_delta", "reasoning_delta", "done"}:
+                continue
+            # artifact_ingest 只暴露外层包装事件，避免内部 round/tool 事件干扰主时间线。
+            continue
+
+    def _run_streaming_artifact_ingest_if_needed() -> Generator[dict[str, Any], None, None]:
+        if depth != 0 or not mode_enabled:
+            return
+        if not _supports_streaming_artifact_ingest(create_chat_completion_stream):
+            # 内部流式 ingest 必须能把 runtime agent 传给 LLM 层，否则测试桩或旧适配器无法区分主流程与内部流程。
+            return
+        user_message = messages[-1] if messages and get_role(messages[-1]) == "user" else None
+        if not should_ingest_user_input(prepared_input.user_input, user_message):
+            return
+
+        started_at = utc_now_iso()
+        ingest_start_event = _emit_event(
+            "ingest_start",
+            agent=ARTIFACT_INGEST_AGENT,
+            agent_kind=_resolve_agent_kind(ARTIFACT_INGEST_AGENT),
+            depth=depth,
+            status="running",
+            started_at=started_at,
+        )
+        _record_projection_event(prelude_projection, ingest_start_event)
+        yield ingest_start_event
+
+        try:
+            ingest_message = _consume_internal_stream(
+                _run_session_stream(
+                    prepared_input.user_input,
+                    session_id=active_session_id,
+                    tools=[],
+                    system_prompt=INGEST_PROMPT_PATH.read_text(encoding="utf-8").strip(),
+                    runtime_agent=ARTIFACT_INGEST_AGENT,
+                    llm_config=current_runtime,
+                    depth=depth + 1,
+                    max_rounds=1,
+                    session_hooks=session_hooks,
+                    delegation_hooks=delegation_hooks,
+                )
+            )
+            ingest_status = str(ingest_message.get("info", {}).get("status", "")).strip().lower()
+            if ingest_status != "completed":
+                raise TaskArtifactError("artifact_ingest agent 未成功完成")
+            ingest_result = persist_ingest_result(active_session_id, get_message_text(ingest_message))
+        except Exception as exc:
+            error_event = _emit_event(
+                "ingest_error",
+                agent=ARTIFACT_INGEST_AGENT,
+                agent_kind=_resolve_agent_kind(ARTIFACT_INGEST_AGENT),
+                depth=depth,
+                status="failed",
+                finish_reason="error",
+                code=normalize_error(exc).get("code", type(exc).__name__),
+                message=str(exc),
+                completed_at=utc_now_iso(),
+            )
+            _record_projection_event(prelude_projection, error_event)
+            yield error_event
+            raise
+
+        done_event = _emit_event(
+            "ingest_done",
+            agent=ARTIFACT_INGEST_AGENT,
+            agent_kind=_resolve_agent_kind(ARTIFACT_INGEST_AGENT),
+            depth=depth,
+            status="completed",
+            finish_reason="stop",
+            started_at=started_at,
+            completed_at=utc_now_iso(),
+            artifact_count=ingest_result["artifact_count"],
+            changed_count=ingest_result["changed_count"],
+            artifact_files=ingest_result["files"],
+            changed_files=ingest_result["changed_files"],
+        )
+        _record_projection_event(prelude_projection, done_event)
+        yield done_event
 
     def _persist_projection(
         projection: AssistantProjection,
@@ -3090,6 +3215,7 @@ def _run_session_stream(
             get_mode=lambda: current_mode,
             get_latest_model=lambda: _latest_model(messages),
             get_current_runtime=lambda: current_runtime,
+            get_messages=lambda: messages,
             session_hooks=session_hooks,
             delegation_hooks=delegation_hooks,
         )
@@ -3097,6 +3223,8 @@ def _run_session_stream(
 
     round_no = 0
     try:
+        yield from _run_streaming_artifact_ingest_if_needed()
+        prelude_projection_pending = bool(prelude_projection.process_items or prelude_projection.display_parts)
         yield _emit_event(
             "start",
             agent=initial_agent,
@@ -3253,7 +3381,14 @@ def _run_session_stream(
                 started_at=round_started_at,
             )
             yield round_start_event
-            current_projection = AssistantProjection()
+            if prelude_projection_pending:
+                current_projection = AssistantProjection(
+                    process_items=[dict(item) for item in prelude_projection.process_items],
+                    display_parts=[dict(item) for item in prelude_projection.display_parts],
+                )
+                prelude_projection_pending = False
+            else:
+                current_projection = AssistantProjection()
             active_process_items = current_projection.process_items
             active_display_parts = current_projection.display_parts
             display_text_merge_open = False
@@ -3680,6 +3815,7 @@ def _run_session_stream(
                         result=result,
                         messages=messages,
                         active_agent=active_agent,
+                        current_mode=current_mode,
                         current_runtime=current_runtime,
                         current_provider_explicit=current_provider_explicit,
                         current_model_explicit=current_model_explicit,
@@ -3960,6 +4096,7 @@ def _build_tool_handlers(
     get_mode: Callable[[], MainAgentMode],
     get_latest_model: Callable[[], str],
     get_current_runtime: Callable[[], ResolvedLLMConfig],
+    get_messages: Callable[[], list[Message]] | None = None,
     session_hooks: list[SessionHook] | None = None,
     delegation_hooks: list[DelegationHook] | None = None,
 ) -> dict[str, Callable[..., object]]:
@@ -3988,22 +4125,70 @@ def _build_tool_handlers(
             return build_tool_failure(f"Error: {exc}", error_code="bash_workdir_forbidden")
         return build_tool_success(run_bash(command, timeout, workdir))
 
-    def _run_mode_aware_write(file_path: str, content: str) -> dict[str, Any]:
+    def _normalize_related_artifacts(value: Any) -> tuple[list[str] | None, dict[str, Any] | None]:
+        if not isinstance(value, list):
+            return None, build_tool_failure(
+                "Error: related_artifacts 必须是字符串数组；无依赖时请传 []。",
+                error_code="related_artifacts_invalid",
+            )
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                return None, build_tool_failure(
+                    "Error: related_artifacts 必须是字符串数组，数组元素必须是文件名字符串。",
+                    error_code="related_artifacts_invalid",
+                )
+            stripped = item.strip()
+            if stripped:
+                normalized.append(stripped)
+        return normalized, None
+
+    def _run_mode_aware_write(file_path: str, content: str, related_artifacts: Any) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(file_path):
             plan_path = str(build_plan_placeholder_path(session_id))
             return build_tool_failure(
                 f"Error: plan 模式下仅允许写入 {plan_path} 文件。",
                 error_code="plan_write_forbidden",
             )
+        normalized_related, related_error = _normalize_related_artifacts(related_artifacts)
+        if related_error is not None:
+            return related_error
+        artifact_check = check_before_write(
+            session_id,
+            normalized_related or [],
+            file_path,
+            content,
+            get_messages() if get_messages is not None else [],
+        )
+        if artifact_check.get("success") is False:
+            return artifact_check
         return run_write(file_path, content)
 
-    def _run_mode_aware_edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict[str, Any]:
+    def _run_mode_aware_edit(
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+        related_artifacts: Any = None,
+    ) -> dict[str, Any]:
         if get_mode() == "plan" and not is_allowed_plan_write_path(file_path):
             plan_path = str(build_plan_placeholder_path(session_id))
             return build_tool_failure(
                 f"Error: plan 模式下仅允许编辑 {plan_path} 文件。",
                 error_code="plan_edit_forbidden",
             )
+        normalized_related, related_error = _normalize_related_artifacts(related_artifacts)
+        if related_error is not None:
+            return related_error
+        artifact_check = check_before_write(
+            session_id,
+            normalized_related or [],
+            file_path,
+            f"{old_string}\n{new_string}",
+            get_messages() if get_messages is not None else [],
+        )
+        if artifact_check.get("success") is False:
+            return artifact_check
         return run_edit(file_path, old_string, new_string, replace_all)
 
     def _run_plan_enter_tool(**kw: Any) -> dict[str, Any]:
@@ -4033,13 +4218,21 @@ def _build_tool_handlers(
             kw.get("limit"),
             kw.get("offset", 0),
         ),
-        "write_file": lambda **kw: _run_mode_aware_write(kw["filePath"], kw["content"]),
+        "write_file": lambda **kw: _run_mode_aware_write(
+            kw["filePath"],
+            kw["content"],
+            kw.get("related_artifacts"),
+        ),
         "edit_file": lambda **kw: _run_mode_aware_edit(
             kw.get("filePath") or kw.get("path") or kw["file_path"],
             kw.get("oldString") or kw.get("old_text") or kw["old_string"],
             kw.get("newString") or kw.get("new_text") or kw["new_string"],
             bool(kw.get("replaceAll", kw.get("replace_all", False))),
+            kw.get("related_artifacts"),
         ),
+        "list_artifacts": lambda **kw: run_list_artifacts(session_id, get_messages() if get_messages is not None else []),
+        "read_artifact": lambda **kw: run_read_artifact(session_id, kw.get("filename") or kw["file"]),
+        "update_artifact": lambda **kw: run_update_artifact(session_id, kw.get("filename") or kw["file"], kw["content"]),
         "lsp": lambda **kw: run_lsp(
             kw["operation"],
             kw.get("filePath") or kw.get("path") or kw["file_path"],
@@ -4232,6 +4425,7 @@ def run_session(
         mode=bootstrap.initial_mode,
     )
     session_hook_ctx["persistence_enabled"] = mode_enabled
+    session_hook_ctx["llm_config"] = bootstrap.current_runtime
     session_hook_ctx["user_message"] = messages[-1] if messages else {}
     session_hook_ctx["messages_ref"] = messages
     session_hook_ctx["append_callback"] = _append_message
@@ -4251,6 +4445,17 @@ def run_session(
     )
     if mode_enabled:
         SESSION_MEMORY_STORE.save_runtime(active_session_id, current_session_runtime)
+        messages = _ensure_system_prompt(
+            messages,
+            _get_system_prompt_for_mode(
+                current_mode,
+                model=current_runtime.model,
+                provider=current_runtime.provider,
+                vendor=current_runtime.vendor,
+                session_id=active_session_id,
+            ),
+            active_session_id,
+        )
     tool_call_owner_map: dict[str, str] = {}
 
     tool_executor = ToolExecutor(
@@ -4259,6 +4464,7 @@ def run_session(
             get_mode=lambda: current_mode,
             get_latest_model=lambda: _latest_model(messages),
             get_current_runtime=lambda: current_runtime,
+            get_messages=lambda: messages,
             session_hooks=session_hooks,
             delegation_hooks=delegation_hooks,
         )
@@ -4561,6 +4767,7 @@ def run_session(
                         result=result,
                         messages=messages,
                         active_agent=active_agent,
+                        current_mode=current_mode,
                         current_runtime=current_runtime,
                         current_provider_explicit=current_provider_explicit,
                         current_model_explicit=current_model_explicit,

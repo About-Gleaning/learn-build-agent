@@ -73,6 +73,7 @@ def test_lsp_client_should_return_unsupported_language_for_txt(monkeypatch, tmp_
 
     assert result.status == "unsupported_language"
     assert result.diagnostics == ()
+    assert result.build_llm_excerpt() == ""
 
 
 def test_lsp_client_should_return_not_enabled_when_global_switch_closed(monkeypatch, tmp_path):
@@ -81,6 +82,16 @@ def test_lsp_client_should_return_not_enabled_when_global_switch_closed(monkeypa
     result = LspClient().collect_diagnostics(file_path=tmp_path / "Foo.java", content="class Foo {}")
 
     assert result.status == "not_enabled"
+
+
+def test_lsp_diagnostics_result_should_keep_excerpt_for_supported_failure_status():
+    result = LspDiagnosticsResult(status="server_unavailable", lsp_error="jdtls 未安装")
+
+    excerpt = result.build_llm_excerpt()
+
+    assert "LSP 状态：server_unavailable" in excerpt
+    assert "LSP 当前不可用" in excerpt
+    assert "jdtls 未安装" in excerpt
 
 
 def test_lsp_client_should_route_java_file_to_manager(monkeypatch, tmp_path):

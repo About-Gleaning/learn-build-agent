@@ -14,6 +14,11 @@ from .handlers import build_tool_failure
 from .path_utils import resolve_workspace_or_skills_path
 from .write_file_tool import FileToolError
 
+try:
+    from binaryornot.check import is_binary as _binaryornot_is_binary
+except ImportError:  # pragma: no cover - 仅用于未重新安装依赖的本地开发环境
+    _binaryornot_is_binary = None
+
 
 @dataclass(frozen=True)
 class EditCandidate:
@@ -36,15 +41,36 @@ def _resolve_edit_target(file_path: str) -> Path:
     return resolve_workspace_or_skills_path(file_path)
 
 
-def _detect_binary_file(target: Path) -> bool:
-    sample = target.read_bytes()[:4096]
+def _fallback_detect_binary_file(target: Path) -> bool:
+    sample = target.read_bytes()[:8192]
+    if not sample:
+        return False
+    if sample.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return False
     if b"\x00" in sample:
         return True
-    try:
-        sample.decode("utf-8")
-    except UnicodeDecodeError:
+    # 兜底逻辑只判断明显二进制；编码是否合法交给后续完整 UTF-8 校验处理。
+    control_bytes = sum(1 for byte in sample if byte < 32 and byte not in (9, 10, 12, 13))
+    if control_bytes / len(sample) > 0.30:
         return True
     return False
+
+
+def _detect_binary_file(target: Path) -> bool:
+    if _binaryornot_is_binary is not None:
+        return bool(_binaryornot_is_binary(str(target)))
+    return _fallback_detect_binary_file(target)
+
+
+def _read_utf8_text(target: Path) -> str:
+    try:
+        return target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise FileToolError(
+            f"edit_file 当前仅支持 UTF-8 文本文件：{target}。"
+            f"文件无法按 UTF-8 解码（字节位置 {exc.start}）。请先将文件转换为 UTF-8 后重试。",
+            error_code="edit_text_encoding_unsupported",
+        ) from exc
 
 
 def _find_exact_candidates(content: str, needle: str) -> list[EditCandidate]:
@@ -313,7 +339,7 @@ def run_edit(
                 error_code="edit_binary_unsupported",
             )
 
-        before = target.read_text(encoding="utf-8")
+        before = _read_utf8_text(target)
         operation = _build_operation(old_string, new_string)
         if old_string == "":
             after = before + new_string

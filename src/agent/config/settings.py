@@ -14,6 +14,7 @@ load_dotenv()
 
 MainAgentMode = Literal["build", "plan"]
 LLMApiMode = Literal["responses", "chat_completions"]
+LogLLMRequestMessagesMode = Literal["full", "latest"]
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_LLM_PROMPT = os.getenv("LOG_LLM_PROMPT", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -51,6 +52,7 @@ DEFAULT_LOG_RETENTION_DAYS = 30
 DEFAULT_LOG_REDACT_ENABLED = True
 DEFAULT_LOG_TRUNCATE_ENABLED = True
 DEFAULT_LOG_TRUNCATE_LIMIT = 2000
+DEFAULT_LOG_LLM_REQUEST_MESSAGES_MODE: LogLLMRequestMessagesMode = "full"
 DEFAULT_SESSION_MEMORY_TRIM_ENABLED = True
 DEFAULT_SESSION_MEMORY_MAX_MESSAGES = 24
 DEFAULT_LSP_ENABLED = True
@@ -168,6 +170,7 @@ class LoggingSettings:
     redact_enabled: bool = DEFAULT_LOG_REDACT_ENABLED
     truncate_enabled: bool = DEFAULT_LOG_TRUNCATE_ENABLED
     truncate_limit: int = DEFAULT_LOG_TRUNCATE_LIMIT
+    llm_request_messages_mode: LogLLMRequestMessagesMode = DEFAULT_LOG_LLM_REQUEST_MESSAGES_MODE
 
 
 @dataclass(frozen=True)
@@ -620,6 +623,12 @@ def _load_project_logging_settings(raw_logging: Any) -> LoggingSettings:
 
     raw_truncate_limit = raw_logging.get("truncate_limit", DEFAULT_LOG_TRUNCATE_LIMIT)
     truncate_limit = _parse_positive_int(raw_truncate_limit, field_name="logging.truncate_limit")
+
+    llm_request_messages_mode = str(
+        raw_logging.get("llm_request_messages_mode", DEFAULT_LOG_LLM_REQUEST_MESSAGES_MODE)
+    ).strip().lower()
+    if llm_request_messages_mode not in {"full", "latest"}:
+        raise ValueError("logging.llm_request_messages_mode 仅支持 full 或 latest。")
     return LoggingSettings(
         file_enabled=file_enabled,
         console_enabled=console_enabled,
@@ -630,6 +639,7 @@ def _load_project_logging_settings(raw_logging: Any) -> LoggingSettings:
         redact_enabled=redact_enabled,
         truncate_enabled=truncate_enabled,
         truncate_limit=truncate_limit,
+        llm_request_messages_mode=llm_request_messages_mode,
     )
 
 

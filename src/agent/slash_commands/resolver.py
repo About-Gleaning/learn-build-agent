@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
-from pathlib import Path
-
 from ..runtime.workspace import get_workspace
 from .parser import parse_slash_command
 from .registry import SlashCommandDefinition, get_slash_command
@@ -31,8 +29,11 @@ def _render_analyze_prompt(command: SlashCommandDefinition) -> str:
         workspace_root=workspace.root,
         workspace_name=workspace.workspace_name,
         target_doc_path=target_path,
+        target_doc_relative_path="AGENTS-DEV.md",
         readme_path=(workspace.root / "README.md").resolve(),
+        readme_relative_path="README.md",
         agents_path=(workspace.root / "AGENTS.md").resolve(),
+        agents_relative_path="AGENTS.md",
     )
 
 

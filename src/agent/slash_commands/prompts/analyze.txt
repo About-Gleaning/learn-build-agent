@@ -3,14 +3,16 @@
 已知上下文：
 - 工作区名称：{workspace_name}
 - 工作区根目录：{workspace_root}
-- 目标文档路径：{target_doc_path}
-- 关键参考文件：{readme_path}
-- 当前工作区规范文件：{agents_path}
+- 目标文档写入路径：{target_doc_path}
+- 目标文档相对路径：{target_doc_relative_path}
+- 关键参考文件：{readme_relative_path}（写入时可使用路径：{readme_path}）
+- 当前工作区规范文件：{agents_relative_path}（写入时可使用路径：{agents_path}）
 
 任务目标：
 1. 基于当前工作区的高价值文件、目录结构与关键入口，整理一份可长期维护、可直接指导后续开发的项目主手册。
 2. 将最终结果写入 `{target_doc_path}`，而不是只在聊天回复中总结。
-3. 同步检查 `{agents_path}` 是否已经明确列出 `{target_doc_path}` 的路径、用途和文档优先级；若未列出，必须一并补充到 `{agents_path}` 中。
+3. 同步检查 `{agents_relative_path}` 是否已经明确列出 `{target_doc_relative_path}` 的路径、用途和文档优先级；若未列出，必须一并补充到 `{agents_relative_path}` 中。
+   执行写入 `{agents_relative_path}` 时使用路径 `{agents_path}`。
 4. 完成后用简洁中文告诉用户你写入了哪些文件、覆盖了哪些重点，以及后续应如何维护这些文档。
 
 执行约束：
@@ -27,6 +29,7 @@
 - 对高优先级规则、分层红线和常见误改点，应说明其核心意图；必要时补一句“为什么不能这样改”或“违反后可能造成什么问题”。
 - 对新增工具、slash command、运行时能力、Web API 等常见扩展点，应指出通常需要补哪些测试或校验。
 - 不得在文档中暴露 `.env` 内容、Token、密钥、凭证或其他敏感配置；涉及本地绝对路径、用户名等环境特定信息时，应避免原样记录，必要时做泛化或脱敏处理。
+- 同步写入 `{agents_relative_path}` 的文档导航时，必须使用 `{target_doc_relative_path}`、`{readme_relative_path}`、`docs/` 这类相对路径；禁止把 `{target_doc_path}`、`{readme_path}`、`{agents_path}` 或其他本地绝对路径原样写入文档正文。
 - 如果仓库较大或信息不足，无法一次完整覆盖全部内容，应在文档中明确说明“已覆盖范围”“待补充区域”或“待确认项”，不得伪装为已全面完成。
 - 如果多项目结构、依赖关系或启动方式识别不完整，必须在“风险点与待确认项”中明确说明未确认的模块、依赖方向或运行入口，禁止伪装成已经完整识别。
 - 为了清晰沟通，避免使用 emoji
@@ -35,6 +38,6 @@
 - 产出必须是稳定的 Markdown 文档，结构清晰，全文使用中文。
 - `{target_doc_path}` 至少覆盖以下内容：项目定位、文档分工与优先级、关键入口与代码地图、核心链路、分层职责红线、关键运行时约束、扩展规范、测试要求、安全与日志约束、文档维护规则。
 - 如果工作区存在多项目或多模块结构，`{target_doc_path}` 还必须单独覆盖“项目/模块结构与依赖关系”，并说明各模块职责、依赖方向、启动入口、构建顺序与常见开发落点。
-- `{agents_path}` 中必须明确列出 `{target_doc_path}`，并说明它是后续开发主手册、应优先阅读，以及与 `README.md`、`docs/` 的职责边界。
+- `{agents_relative_path}` 中必须明确列出 `{target_doc_relative_path}`，并说明它是后续开发主手册、应优先阅读，以及与 `{readme_relative_path}`、`docs/` 的职责边界。
 - 如果发现 README、docs、AGENTS.md 或代码实现之间存在潜在不一致，应在“风险点与待确认项”中明确说明。
-- 最终回复必须说明你写入了哪些文件，以及 `AGENTS.md` 新增了什么文档导航信息。
+- 最终回复必须说明你写入了哪些文件，以及 `{agents_relative_path}` 新增了什么文档导航信息。

@@ -25,7 +25,11 @@ class AgentRegistry:
         return list(self._agents.values())
 
     def list_subagents(self) -> list[AgentDefinition]:
-        return [agent for agent in self._agents.values() if agent.model == "subagent"]
+        return [
+            agent
+            for agent in self._agents.values()
+            if agent.model == "subagent" and agent.name != "artifact_ingest"
+        ]
 
 
 AGENT_REGISTRY = AgentRegistry(
@@ -44,6 +48,11 @@ AGENT_REGISTRY = AgentRegistry(
             name="explore",
             model="subagent",
             description="适合做代码搜索、信息收集、上下文探索和独立问题排查。",
+        ),
+        AgentDefinition(
+            name="artifact_ingest",
+            model="subagent",
+            description="负责识别用户输入中的权威资料并输出任务工件清单，不直接修改代码。",
         ),
     ]
 )

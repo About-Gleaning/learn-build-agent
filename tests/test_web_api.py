@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from agent.core.message import append_text_part, append_tool_call_part, append_tool_result_part, append_reasoning_part, create_message
 from agent.runtime import session as session_runtime
+from agent.runtime.run_manager import RunManager
 from agent.runtime.session import clear_session_memory, configure_session_memory_store, generate_session_id
 from agent.runtime.session_memory import InMemorySessionMemoryStore
 from agent.web.app import RUN_MANAGER, _stream_active_run, _stream_chat, _stream_session, create_app
@@ -33,6 +34,29 @@ def _stream_events(body_text: str) -> list[tuple[str, dict]]:
         data_payload = json.loads(match.group("data").strip())
         parsed.append((event_type, data_payload))
     return parsed
+
+
+def test_run_manager_should_wait_for_depth_zero_done():
+    manager = RunManager(heartbeat_interval_seconds=0.05)
+    depth_one_seen = threading.Event()
+    release_top_done = threading.Event()
+
+    def event_source():
+        yield {"type": "start", "event_id": "evt_depth_start", "session_id": "s_depth", "depth": 0}
+        yield {"type": "done", "event_id": "evt_depth_inner_done", "session_id": "s_depth", "depth": 1, "status": "completed"}
+        depth_one_seen.set()
+        release_top_done.wait(timeout=1)
+        yield {"type": "done", "event_id": "evt_depth_top_done", "session_id": "s_depth", "depth": 0, "status": "completed"}
+
+    run = manager.create_run(session_id="s_depth", event_source=event_source)
+    assert depth_one_seen.wait(timeout=1)
+    assert manager.get_active_run("s_depth") is not None
+
+    release_top_done.set()
+    run.thread.join(timeout=1)
+
+    assert manager.get_active_run("s_depth") is None
+    assert manager.get_run(run.run_id).status == "completed"
 
 
 def test_chat_stream_should_return_chunk_and_done(monkeypatch):

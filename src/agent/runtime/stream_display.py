@@ -61,6 +61,17 @@ def _describe_agent(payload: dict[str, Any]) -> str:
     return f"{agent_kind} · {agent}"
 
 
+def _format_artifact_files(value: Any, *, limit: int = 5) -> str:
+    if not isinstance(value, list):
+        return ""
+    files = [str(item).strip() for item in value if str(item).strip()]
+    if not files:
+        return ""
+    visible_files = files[:limit]
+    suffix = f" 等 {len(files)} 个文件" if len(files) > limit else ""
+    return "、".join(visible_files) + suffix
+
+
 def _build_process_item(event: dict[str, Any]) -> ProcessItem | None:
     event_type = str(event.get("type", "")).strip()
     if not event_type or event_type == "text_delta":
@@ -105,6 +116,24 @@ def _build_process_item(event: dict[str, Any]) -> ProcessItem | None:
         detail = f"{status or 'completed'} {runtime_desc}".strip()
     elif event_type == "error":
         title = f"{agent} 会话异常"
+        detail = str(payload.get("message", "未知错误"))
+    elif event_type == "ingest_start":
+        title = "任务资料识别开始"
+        detail = "正在识别用户输入中的权威资料"
+    elif event_type == "ingest_done":
+        title = "任务资料识别完成"
+        artifact_count = int(payload.get("artifact_count", 0) or 0)
+        changed_count = int(payload.get("changed_count", 0) or 0)
+        if changed_count > 0:
+            files = _format_artifact_files(payload.get("changed_files"))
+            detail = f"已持久化 {changed_count} 个权威资料{f'：{files}' if files else ''}"
+        elif artifact_count > 0:
+            files = _format_artifact_files(payload.get("artifact_files"))
+            detail = f"已识别 {artifact_count} 个权威资料，内容未变化{f'：{files}' if files else ''}"
+        else:
+            detail = "未发现需要持久化的权威资料"
+    elif event_type == "ingest_error":
+        title = "任务资料识别失败"
         detail = str(payload.get("message", "未知错误"))
 
     return {
