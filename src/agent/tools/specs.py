@@ -26,6 +26,8 @@ EDIT_FILE_DESC_FILE = Path(__file__).with_name("edit_file.txt")
 EDIT_FILE_TOOL_DESCRIPTION = EDIT_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
 WRITE_FILE_DESC_FILE = Path(__file__).with_name("write_file.txt")
 WRITE_FILE_TOOL_DESCRIPTION = WRITE_FILE_DESC_FILE.read_text(encoding="utf-8").strip()
+CONVERT_FILE_TO_MARKDOWN_DESC_FILE = Path(__file__).with_name("convert_file_to_markdown.txt")
+CONVERT_FILE_TO_MARKDOWN_TOOL_DESCRIPTION = CONVERT_FILE_TO_MARKDOWN_DESC_FILE.read_text(encoding="utf-8").strip()
 LSP_DESC_FILE = Path(__file__).with_name("lsp.txt")
 LSP_TOOL_DESCRIPTION = LSP_DESC_FILE.read_text(encoding="utf-8").strip()
 QUESTION_DESC_FILE = Path(__file__).with_name("question.txt")
@@ -229,6 +231,27 @@ def build_base_tools(skills: list[dict[str, Any]] | None = None) -> list[dict[st
                         },
                     },
                     "required": ["filePath", "content", "related_artifacts"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_file_to_markdown",
+                "description": CONVERT_FILE_TO_MARKDOWN_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filePath": {
+                            "type": "string",
+                            "description": "要转换的源文件绝对路径。本期仅支持 .pdf、.docx、.xlsx、.xls、.html、.htm。",
+                        },
+                        "outputPath": {
+                            "type": "string",
+                            "description": "可选，输出 Markdown 文件绝对路径。未传时默认使用源文件同目录同名 .md。",
+                        },
+                    },
+                    "required": ["filePath"],
                 },
             },
         },

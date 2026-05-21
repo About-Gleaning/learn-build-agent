@@ -5,12 +5,19 @@
 文档分工如下：
 
 - `README.md`：仓库入口、安装启动、文档导航
-- `AGENTS-DEV.md`：开发主手册，记录开发规范、架构边界、扩展落点与测试要求
-- `AGENTS.md`：会进入 LLM 上下文的最小高优先级规则
+- `AGENTS-DEV.md`：开发主手册与阅读索引，记录开发规范、架构边界、扩展落点与测试要求
+- `agents_docs/`：面向 Agent 自主读取的专题文档目录，承载开发风格、模块边界、测试策略等细分知识
+- `AGENTS.md`：会进入 LLM 上下文的最小高优先级入口文档
 - `docs/architecture.md`：架构讲解材料
 - `docs/extending.md`：扩展学习材料
 
-`/analyze` 只负责初始化本文件的第一版；若文件已存在则直接停止，后续内容由人工持续维护。
+`/analyze` 只负责初始化第一版 Agent 文档体系；若本文件已存在则直接停止，后续内容由人工持续维护。
+
+阅读分流：
+
+- 稳定规则、架构红线、核心链路与扩展落点，优先在本文件查看
+- 具备独立阅读价值的专题知识，放到 `agents_docs/` 按需读取
+- `AGENTS.md` 只保留每轮都值得进入上下文的最小入口信息，不复制本文件正文
 
 ## 1. 项目定位
 
@@ -127,9 +134,11 @@ LLM 返回 tool_calls
 
 当前内置命令：
 
-- `/init`：当工作区缺失 `AGENTS.md` 时初始化首版规范文件
-- `/analyze`：当工作区缺失 `AGENTS-DEV.md` 时初始化首版开发手册；若文件已存在则直接停止。若工作区属于多项目或多模块结构，首版手册必须额外梳理模块边界、依赖方向、启动入口与公共模块职责，不能按单项目视角简化。
-- `/analyze` 同步补充 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`README.md`、`docs/` 这类工作区相对路径，禁止把本机绝对路径写入长期维护文档。
+- `/init`：当工作区缺失 `AGENTS.md` 时初始化最小入口文档
+- `/analyze`：当工作区缺失 `AGENTS-DEV.md` 时初始化首版 Agent 文档体系，并按项目特征动态补充 `agents_docs/` 专题文档；若文件已存在则直接停止。若工作区属于多项目或多模块结构，首版手册必须额外梳理模块边界、依赖方向、启动入口与公共模块职责，不能按单项目视角简化。
+- `/analyze` 必须显式识别项目开发风格偏好；若相关信息具备独立阅读价值，应沉淀为 `agents_docs/` 专题文档。
+- `/analyze` 面对大型仓库时，应先结构化采集，再按主题分段成稿，最后统一整理索引与交叉引用；不能把全部写作压到最后一步。
+- `/analyze` 同步补充 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`agents_docs/`、`README.md`、`docs/` 这类工作区相对路径，禁止把本机绝对路径写入长期维护文档。
 
 ### 3.4 Web 链路
 
@@ -308,6 +317,7 @@ LSP 查询请求
 - 在 `src/agent/runtime/session.py` 中接入工具分发
 - 工具返回优先保持结构化，至少包含 `output` 与 `metadata.status`
 - 涉及路径、安全、权限控制的逻辑优先复用现有公共能力
+- `convert_file_to_markdown` 仅负责工作区内 PDF、Word、Excel、HTML 转 Markdown；后续增加格式时优先扩展工具内部格式注册表与依赖，不在 session 层增加格式分支。
 - 任务工件相关工具的落盘与 prompt 摘要归口在 `src/agent/runtime/task_artifacts.py`；`list_artifacts`、`read_artifact`、`update_artifact` 与写入前置校验归口在 `src/agent/tools/artifact_tool.py`。
 - ingestion 由 fail-fast `SessionHook` 接入；如果检测到疑似权威资料但解析 agent 失败，必须终止当前任务，禁止继续猜测开发。
 
@@ -427,6 +437,7 @@ npm install -g typescript typescript-language-server
 
 - 本文件是开发主手册，所有重大实现调整后都要优先更新这里。
 - `AGENTS.md` 只保留会进入 LLM 上下文的最小高优先级规则，不要把本文件整段复制过去。
+- 具备独立阅读价值的开发风格、模块说明、测试策略等专题知识，优先下沉到 `agents_docs/`，避免把本文件继续写成单体大全。
 - `README.md` 只保留入口信息与文档导航，不要把实现约束重新堆回去。
 - `docs/architecture.md` 与 `docs/extending.md` 主要面向人类理解项目，不承担开发规范主事实。
 - 若发现文档与实现不一致，应先修正本文件，再同步其他引用文档。

@@ -29,6 +29,7 @@ from agent.tools.handlers import (
 from agent.tools.question_tool import CUSTOM_OPTION_LABEL, run_question
 from agent.tools.read_file_tool import resolve_readable_file_path, run_read
 from agent.tools.lsp_tool import run_lsp
+import agent.tools.markdown_convert_tool as markdown_convert_module
 from agent.tools.artifact_tool import (
     check_before_write,
     run_list_artifacts,
@@ -37,6 +38,7 @@ from agent.tools.artifact_tool import (
 )
 from agent.tools.skill_tool import run_load_skill
 from agent.tools.todo_manager import TodoManager
+from agent.tools.markdown_convert_tool import run_convert_file_to_markdown
 from agent.tools.write_file_tool import run_write
 from agent.skills.runtime import SkillRegistry
 from agent.runtime.workspace import (
@@ -933,6 +935,119 @@ def test_run_read_should_reject_relative_path(tmp_path):
     assert result["metadata"]["error_code"] == "read_path_must_be_absolute"
 
 
+class _FakeMarkItDownResult:
+    def __init__(self, text: str) -> None:
+        self.text_content = text
+
+
+class _FakeMarkItDown:
+    def __init__(self, *, enable_plugins: bool) -> None:
+        assert enable_plugins is False
+
+    def convert_local(self, source: str) -> _FakeMarkItDownResult:
+        return _FakeMarkItDownResult(f"# 转换结果\n\n来源：{Path(source).name}")
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_format"),
+    [
+        ("sample.pdf", "pdf"),
+        ("sample.docx", "word"),
+        ("sample.xlsx", "excel"),
+        ("sample.xls", "excel"),
+        ("sample.html", "html"),
+        ("sample.htm", "html"),
+    ],
+)
+def test_run_convert_file_to_markdown_should_support_registered_document_formats(
+    monkeypatch,
+    tmp_path,
+    filename,
+    expected_format,
+):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    source = tmp_path / filename
+    source.write_bytes(b"demo")
+    monkeypatch.setattr(markdown_convert_module, "MarkItDown", _FakeMarkItDown)
+
+    result = run_convert_file_to_markdown(str(source.resolve()))
+
+    output_path = source.with_suffix(".md")
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["source_path"] == str(source.resolve())
+    assert result["metadata"]["output_path"] == str(output_path.resolve())
+    assert result["metadata"]["source_format"] == expected_format
+    assert result["metadata"]["size_bytes"] == len(output_path.read_text(encoding="utf-8").encode("utf-8"))
+    assert output_path.read_text(encoding="utf-8") == f"# 转换结果\n\n来源：{source.name}"
+
+
+def test_run_convert_file_to_markdown_should_reject_unsupported_type(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    source = tmp_path / "sample.txt"
+    source.write_text("hello", encoding="utf-8")
+
+    result = run_convert_file_to_markdown(str(source.resolve()))
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "markdown_convert_unsupported_type"
+
+
+def test_run_convert_file_to_markdown_should_reject_workspace_escape(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"demo")
+    configure_workspace(workspace)
+    _set_test_session()
+
+    result = run_convert_file_to_markdown(str(outside.resolve()))
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "markdown_convert_path_forbidden"
+
+
+def test_run_convert_file_to_markdown_should_reject_directory_source(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    source = tmp_path / "dir.pdf"
+    source.mkdir()
+
+    result = run_convert_file_to_markdown(str(source.resolve()))
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "markdown_convert_source_not_file"
+
+
+def test_run_convert_file_to_markdown_should_require_markdown_output_path(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    source = tmp_path / "sample.pdf"
+    source.write_bytes(b"demo")
+    output_path = tmp_path / "sample.txt"
+
+    result = run_convert_file_to_markdown(str(source.resolve()), str(output_path.resolve()))
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "markdown_convert_output_not_markdown"
+
+
+def test_run_convert_file_to_markdown_should_not_overwrite_existing_output(tmp_path):
+    configure_workspace(tmp_path)
+    _set_test_session()
+    source = tmp_path / "sample.pdf"
+    output_path = tmp_path / "sample.md"
+    source.write_bytes(b"demo")
+    output_path.write_text("exists", encoding="utf-8")
+
+    result = run_convert_file_to_markdown(str(source.resolve()))
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["error_code"] == "markdown_convert_output_exists"
+    assert output_path.read_text(encoding="utf-8") == "exists"
+
+
 def test_run_read_should_allow_current_session_plan_file(tmp_path):
     configure_workspace(tmp_path)
     session_id = _set_test_session("session-plan")
@@ -1651,6 +1766,22 @@ def test_run_edit_should_allow_utf8_text_when_sample_ends_inside_multibyte_chara
 
     assert result["metadata"]["status"] == "completed"
     assert file_path.read_text(encoding="utf-8").endswith("const newName = true;\n")
+
+
+def test_run_edit_should_allow_chinese_utf8_markdown(tmp_path):
+    file_path = tmp_path / "plan.md"
+    content = "# 执行计划：新建测试供应商页面\n\n" + "\n".join(
+        f"- 步骤 {index}：读取接口文档并补充字段说明。"
+        for index in range(200)
+    )
+    file_path.write_text(content, encoding="utf-8")
+    configure_workspace(tmp_path)
+    _set_test_session()
+
+    result = run_edit(str(file_path.resolve()), "新建测试供应商页面", "新建测试供应商配置页面")
+
+    assert result["metadata"]["status"] == "completed"
+    assert "新建测试供应商配置页面" in file_path.read_text(encoding="utf-8")
 
 
 def test_run_edit_should_reject_non_utf8_text_with_encoding_error(tmp_path):

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "my-main-agent"
 version = "0.1.0"
 description = "在当前目录启动的编码代理"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "openai==1.108.1",
   "python-dotenv==1.1.1",
@@ -17,6 +17,7 @@ dependencies = [
   "python-lsp-server==1.11.0",
   "mcp>=1.0.0,<2.0.0",
   "binaryornot>=0.6.0,<1.0.0",
+  "markitdown[pdf,docx,xlsx,xls]>=0.1.5,<0.2.0",
 ]
 
 [project.scripts]

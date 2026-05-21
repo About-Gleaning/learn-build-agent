@@ -60,6 +60,7 @@ from ..tools.handlers import (
     run_plan_exit,
 )
 from ..tools.lsp_tool import run_lsp
+from ..tools.markdown_convert_tool import run_convert_file_to_markdown
 from ..tools.question_tool import run_question
 from ..tools.read_file_tool import run_read
 from ..tools.skill_tool import run_load_skill
@@ -4222,6 +4223,10 @@ def _build_tool_handlers(
             kw["filePath"],
             kw["content"],
             kw.get("related_artifacts"),
+        ),
+        "convert_file_to_markdown": lambda **kw: run_convert_file_to_markdown(
+            kw.get("filePath") or kw["file_path"],
+            kw.get("outputPath") or kw.get("output_path"),
         ),
         "edit_file": lambda **kw: _run_mode_aware_edit(
             kw.get("filePath") or kw.get("path") or kw["file_path"],

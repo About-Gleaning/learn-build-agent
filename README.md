@@ -2,7 +2,7 @@
 
 一个面向本地工作区运行的 Python Agent 项目，提供 CLI、Web、工具调用、主/子 Agent 路由，以及面向代码任务的基础安全边界。
 
-`README.md` 的职责是仓库入口，不承载完整开发规范。日常开发、架构约束、扩展方式与测试要求，统一以 `AGENTS-DEV.md` 为准。
+`README.md` 的职责是仓库入口，不承载完整开发规范。日常开发、架构约束、扩展方式与测试要求，统一以 `AGENTS-DEV.md` 为准；更细的 Agent 专题知识放在 `agents_docs/`。
 
 ## 核心能力
 
@@ -100,15 +100,16 @@ PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile $(find src -name '*.py')
 
 ## Slash Commands
 
-- `/init`：若工作区根目录不存在 `AGENTS.md`，则初始化一份面向运行中 Agent 的简明规范文件；若已存在则直接停止，不做覆写。
-- `/analyze`：若工作区不存在 `AGENTS-DEV.md`，则生成第一版开发手册；若已存在则直接停止，后续由人工维护。
+- `/init`：若工作区根目录不存在 `AGENTS.md`，则初始化一份面向运行中 Agent 的最小入口文档；若已存在则直接停止，不做覆写。
+- `/analyze`：若工作区不存在 `AGENTS-DEV.md`，则初始化第一版开发主手册，并按项目特征补充 `agents_docs/` 专题文档；若已存在则直接停止，后续由人工维护。
 
 ## 文档导航
 
-- `AGENTS-DEV.md`：开发主手册，包含架构红线、Session Memory、Hook 扩展规范、测试要求与运行时约束。
+- `AGENTS-DEV.md`：开发主手册与阅读索引，包含架构红线、Session Memory、Hook 扩展规范、测试要求与运行时约束。
+- `agents_docs/`：给 Agent 自主读取的专题文档目录，承载开发风格、模块边界、测试策略等细分知识。
 - `docs/architecture.md`：面向人类阅读的架构讲解文档。
 - `docs/extending.md`：面向人类阅读的扩展思路与实践指南。
-- `AGENTS.md`：会加载到 LLM 上下文中的最小高优先级规则。
+- `AGENTS.md`：会加载到 LLM 上下文中的最小高优先级入口文档。
 
 ## 常见问题
 

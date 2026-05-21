@@ -14,11 +14,6 @@ from .handlers import build_tool_failure
 from .path_utils import resolve_workspace_or_skills_path
 from .write_file_tool import FileToolError
 
-try:
-    from binaryornot.check import is_binary as _binaryornot_is_binary
-except ImportError:  # pragma: no cover - 仅用于未重新安装依赖的本地开发环境
-    _binaryornot_is_binary = None
-
 
 @dataclass(frozen=True)
 class EditCandidate:
@@ -57,8 +52,7 @@ def _fallback_detect_binary_file(target: Path) -> bool:
 
 
 def _detect_binary_file(target: Path) -> bool:
-    if _binaryornot_is_binary is not None:
-        return bool(_binaryornot_is_binary(str(target)))
+    # 这里只需要阻断明显二进制文件；合法文本由后续 UTF-8 完整解码兜底确认。
     return _fallback_detect_binary_file(target)
 
 

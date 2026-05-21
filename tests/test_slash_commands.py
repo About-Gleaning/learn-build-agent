@@ -36,6 +36,9 @@ def test_resolve_slash_command_should_resolve_init_from_handler_key(tmp_path):
     assert resolved.override_mode == "build"
     assert resolved.display_text == "/init"
     assert "AGENTS.md" in resolved.user_input
+    assert "最小高优先级规则" in resolved.user_input
+    assert "文档导航" in resolved.user_input
+    assert "不要把详细架构说明、长篇规范、专题知识或一次性总结堆进 `AGENTS.md`" in resolved.user_input
 
 
 def test_resolve_slash_command_should_render_analyze_prompt_with_multi_project_constraints(tmp_path):
@@ -49,8 +52,14 @@ def test_resolve_slash_command_should_render_analyze_prompt_with_multi_project_c
     assert resolved.override_mode == "build"
     assert resolved.display_text == "/analyze"
     assert "AGENTS-DEV.md" in resolved.user_input
-    assert "是否已经明确列出 `AGENTS-DEV.md` 的路径、用途和文档优先级" in resolved.user_input
-    assert "同步写入 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`README.md`、`docs/` 这类相对路径" in resolved.user_input
+    assert "agents_docs/" in resolved.user_input
+    assert "是否已经明确列出 `AGENTS-DEV.md` 与 `agents_docs/` 的路径、用途和文档优先级" in resolved.user_input
+    assert "按项目特征动态拆分" in resolved.user_input
+    assert "开发风格偏好必须作为一等信息处理" in resolved.user_input
+    assert "先做结构化信息采集" in resolved.user_input
+    assert "再按主题分段沉淀" in resolved.user_input
+    assert "最后统一整理" in resolved.user_input
+    assert "同步写入 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`agents_docs/`、`README.md`、`docs/` 这类相对路径" in resolved.user_input
     sync_lines = [
         line
         for line in resolved.user_input.splitlines()

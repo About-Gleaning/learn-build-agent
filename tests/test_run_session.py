@@ -301,8 +301,14 @@ def test_run_session_should_resolve_analyze_slash_command_before_llm(monkeypatch
     assert "后续开发主手册" in captured["user_text"]
     assert "必须一并补充到" in captured["user_text"]
     assert "文档分工与优先级" in captured["user_text"]
-    assert "是否已经明确列出 `AGENTS-DEV.md` 的路径、用途和文档优先级" in captured["user_text"]
-    assert "同步写入 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`README.md`、`docs/` 这类相对路径" in captured["user_text"]
+    assert "agents_docs/" in captured["user_text"]
+    assert "是否已经明确列出 `AGENTS-DEV.md` 与 `agents_docs/` 的路径、用途和文档优先级" in captured["user_text"]
+    assert "按项目特征动态拆分" in captured["user_text"]
+    assert "开发风格偏好必须作为一等信息处理" in captured["user_text"]
+    assert "先做结构化信息采集" in captured["user_text"]
+    assert "再按主题分段沉淀" in captured["user_text"]
+    assert "最后统一整理" in captured["user_text"]
+    assert "同步写入 `AGENTS.md` 的文档导航时，必须使用 `AGENTS-DEV.md`、`agents_docs/`、`README.md`、`docs/` 这类相对路径" in captured["user_text"]
     sync_lines = [
         line
         for line in captured["user_text"].splitlines()
@@ -414,8 +420,11 @@ def test_run_session_should_resolve_init_slash_command_before_llm_when_agents_mi
     assert get_message_text(result) == "已生成 AGENTS.md"
     assert captured["agent"] == "build"
     assert "AGENTS.md" in captured["user_text"]
-    assert "作为该仓库的贡献者指南" in captured["user_text"]
+    assert "作为当前工作区中 Agent 每轮都会加载的最小入口文档" in captured["user_text"]
     assert "Repository Guidelines" in captured["user_text"]
+    assert "最小高优先级规则" in captured["user_text"]
+    assert "文档导航" in captured["user_text"]
+    assert "不要把详细架构说明、长篇规范、专题知识或一次性总结堆进 `AGENTS.md`" in captured["user_text"]
     assert "先确认目标文件当前不存在" not in captured["user_text"]
     history_messages = session_module.SESSION_MEMORY_STORE.load("s_init")
     assert _last_user_display_text(history_messages) == "/init"
@@ -1532,6 +1541,19 @@ def test_write_file_tool_schema_should_use_file_path_and_content():
     assert write_tool["function"]["parameters"]["required"] == ["filePath", "content", "related_artifacts"]
 
 
+def test_convert_file_to_markdown_tool_schema_should_use_file_and_output_path():
+    tools = build_base_tools()
+    convert_tool = next(tool for tool in tools if tool["function"]["name"] == "convert_file_to_markdown")
+    properties = convert_tool["function"]["parameters"]["properties"]
+
+    assert "PDF、Word、Excel 或 HTML" in convert_tool["function"]["description"]
+    assert "filePath" in properties
+    assert "outputPath" in properties
+    assert "overwrite" not in properties
+    assert "format" not in properties
+    assert convert_tool["function"]["parameters"]["required"] == ["filePath"]
+
+
 def test_lsp_tool_schema_should_expose_operation_file_path_and_position():
     tools = build_base_tools()
     lsp_tool = next(tool for tool in tools if tool["function"]["name"] == "lsp")
@@ -1589,6 +1611,43 @@ def test_run_session_should_route_write_file_arguments(monkeypatch):
     assert captured == {
         "file_path": "/tmp/demo.py",
         "content": "hello",
+    }
+
+
+def test_run_session_should_route_convert_file_to_markdown_arguments(monkeypatch):
+    handlers = session_module._build_tool_handlers(
+        session_id="s_convert_markdown_route",
+        get_mode=lambda: "build",
+        get_latest_model=lambda: "qwen-plus",
+        get_current_runtime=lambda: ResolvedLLMConfig(
+            agent="build",
+            provider="qwen",
+            vendor="qwen",
+            model="qwen3-coder-next",
+            max_tokens=32000,
+            api_mode="responses",
+            base_url="https://example.com",
+            api_key="test",
+            timeout_seconds=60,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_convert(file_path, output_path=None):
+        captured.update(file_path=file_path, output_path=output_path)
+        return {"output": "ok", "metadata": {"status": "completed"}}
+
+    monkeypatch.setattr(session_module, "run_convert_file_to_markdown", fake_convert)
+
+    result = handlers["convert_file_to_markdown"](
+        filePath="/tmp/demo.pdf",
+        outputPath="/tmp/demo.md",
+    )
+
+    assert result["metadata"]["status"] == "completed"
+    assert captured == {
+        "file_path": "/tmp/demo.pdf",
+        "output_path": "/tmp/demo.md",
     }
 
 
